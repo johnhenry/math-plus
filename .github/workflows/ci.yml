@@ -93,6 +93,13 @@ jobs:
       - name: Unit + differential tests
         run: npm test
 
+      # Runs the env-independent examples (01-09) against the built
+      # packages via their real exports maps. 10-wasm-kernels.mjs is
+      # deliberately excluded from the loop (env-dependent: needs the
+      # gitignored .wasm artifact) — see examples/README.md.
+      - name: Run examples (smoke)
+        run: npm run examples
+
       # packages/interop-python is a PyPI package outside the npm/Cargo
       # workspaces (docs/RELEASING.md) — its own pytest suite needs
       # installing separately.
