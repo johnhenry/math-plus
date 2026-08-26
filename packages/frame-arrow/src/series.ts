@@ -37,7 +37,14 @@ function convertScalar(value: unknown, from: DType, to: DType): unknown {
     return typeof value === "bigint" ? value : BigInt(Math.trunc(value as number));
   }
   if (from === "int64" && isNumericDType(to)) {
-    return Number(value as bigint);
+    const big = value as bigint;
+    if (big > BigInt(Number.MAX_SAFE_INTEGER) || big < BigInt(Number.MIN_SAFE_INTEGER)) {
+      throw new Error(
+        `Series.cast: int64 value ${big}n is outside Number.MIN_SAFE_INTEGER..Number.MAX_SAFE_INTEGER ` +
+          `and cannot be cast to "${to}" without silent precision loss`,
+      );
+    }
+    return Number(big);
   }
   if (isNumericDType(to)) return Number(value);
   if (to === "utf8" || to === "dictionary") return String(value);

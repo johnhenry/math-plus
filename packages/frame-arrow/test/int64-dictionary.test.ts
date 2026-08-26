@@ -64,3 +64,19 @@ test("Series.cast() throws a clear error for unsupported casts", () => {
   const series = Frame.fromArrow(table).getSeries("name");
   assert.throws(() => series.cast("float64"), /unsupported cast/);
 });
+
+test("Series.cast() throws instead of silently losing precision on int64 -> float64 outside Number.MAX_SAFE_INTEGER", () => {
+  const table = new Table({
+    id: vectorFromArray([9007199254740993n], new Int64()), // MAX_SAFE_INTEGER + 2
+  });
+  const series = Frame.fromArrow(table).getSeries("id");
+  assert.throws(() => series.cast("float64"), /precision loss/);
+});
+
+test("Series.cast() int64 -> float64 still casts normally for in-range values (no regression)", () => {
+  const table = new Table({
+    id: vectorFromArray([1n, -9007199254740991n, 9007199254740991n], new Int64()), // MIN/MAX_SAFE_INTEGER
+  });
+  const series = Frame.fromArrow(table).getSeries("id");
+  assert.deepEqual(series.cast("float64").toArray(), [1, -9007199254740991, 9007199254740991]);
+});
