@@ -44,12 +44,18 @@ jobs:
           - runner: ubuntu-24.04-arm
             platform: linux-aarch64
             libfile: libtensor_wasm_kernels.so
-          - runner: macos-13
-            platform: darwin-x86_64
-            libfile: libtensor_wasm_kernels.dylib
-          - runner: macos-latest
-            platform: darwin-aarch64
-            libfile: libtensor_wasm_kernels.dylib
+          # darwin-x86_64/darwin-aarch64 disabled 2026-08-27: hosted macOS
+          # runners aren't set up to run here reliably (observed 1+ hour
+          # queue times on other repos' macOS legs). No downstream job
+          # depends on these two existing, so commenting them out is safe --
+          # native.ts's darwin lookups will just miss and presumably fall
+          # back to WASM until these are re-enabled. Uncomment to restore:
+          # - runner: macos-13
+          #   platform: darwin-x86_64
+          #   libfile: libtensor_wasm_kernels.dylib
+          # - runner: macos-latest
+          #   platform: darwin-aarch64
+          #   libfile: libtensor_wasm_kernels.dylib
           - runner: windows-latest
             platform: windows-x86_64
             libfile: tensor_wasm_kernels.dll
