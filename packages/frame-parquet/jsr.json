@@ -5,10 +5,10 @@
   "exports": "./src/index.ts",
   "imports": {
     "apache-arrow": "npm:apache-arrow@21.2.0",
-    "@johnhenry/math-plus-frame-arrow": "jsr:@johnhenry/math-plus-frame-arrow@^0.0.0",
     "hyparquet": "npm:hyparquet@1.28.1",
     "hyparquet-writer": "npm:hyparquet-writer@0.16.6",
     "hyparquet-compressors": "npm:hyparquet-compressors@1.1.1",
-    "@hpcc-js/wasm-zstd": "npm:@hpcc-js/wasm-zstd@1.15.0"
+    "@hpcc-js/wasm-zstd": "npm:@hpcc-js/wasm-zstd@1.15.0",
+    "@johnhenry/math-plus-frame-arrow": "jsr:@johnhenry/math-plus-frame-arrow@^0.0.0"
   }
 }

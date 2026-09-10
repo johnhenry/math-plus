@@ -22,7 +22,7 @@
     "test": "npm run typecheck && node --test test/*.test.ts"
   },
   "dependencies": {
-    "@johnhenry/math": "^0.0.0",
+    "@johnhenry/math": "^0.0.1",
     "@johnhenry/math-plus-tensor-core": "^0.0.0",
     "@johnhenry/math-plus-tensor-compile": "^0.0.0",
     "@johnhenry/math-plus-frame-arrow": "^0.0.0"

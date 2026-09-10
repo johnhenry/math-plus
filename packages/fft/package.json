@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@johnhenry/math-plus-adapter-math": "^0.0.0",
-    "@johnhenry/math": "^0.0.0"
+    "@johnhenry/math": "^0.0.1"
   },
   "repository": {
     "type": "git",

@@ -4,7 +4,7 @@
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
-    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0",
-    "onnxruntime-web": "npm:onnxruntime-web@^1.27.0"
+    "onnxruntime-web": "npm:onnxruntime-web@^1.27.0",
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0"
   }
 }

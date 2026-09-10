@@ -5,6 +5,7 @@
   "exports": "./src/index.ts",
   "imports": {
     "@johnhenry/math-plus-fft": "jsr:@johnhenry/math-plus-fft@^0.0.0",
+    "@johnhenry/math-plus-scalar-types": "jsr:@johnhenry/math-plus-scalar-types@^0.0.0",
     "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0"
   }
 }

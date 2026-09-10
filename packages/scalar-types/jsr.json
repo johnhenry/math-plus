@@ -4,6 +4,6 @@
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
-    "@johnhenry/math": "jsr:@johnhenry/math@^0.0.0"
+    "@johnhenry/math": "jsr:@johnhenry/math@^0.0.1"
   }
 }
