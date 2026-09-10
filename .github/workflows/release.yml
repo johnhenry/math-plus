@@ -142,7 +142,7 @@ jobs:
             for f in packages/*/jsr.json adapters/*/jsr.json scalars/*/jsr.json; do
               dir=$(dirname "$f")
               echo "::group::jsr publish — $dir (pass $pass)"
-              (cd "$dir" && npx --yes jsr publish --allow-slow-types) || failures=$((failures+1))
+              (cd "$dir" && npx --yes jsr publish --allow-slow-types --allow-dirty) || failures=$((failures+1))
               echo "::endgroup::"
             done
             if [ "$failures" -eq 0 ]; then break; fi
