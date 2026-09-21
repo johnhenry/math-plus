@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-tensor-compile
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-tensor-compile.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-tensor-compile)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-tensor-compile.svg)](../../LICENSE)
+
 Elementwise expression IR + fusion for math-plus (issue #11): trace a
 function once over symbolic inputs, then execute it fused — one pass over the
 data instead of one intermediate tensor per op. The same IR is the lowering

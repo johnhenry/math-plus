@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-scalar-types
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-scalar-types.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-scalar-types)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-scalar-types.svg)](../../LICENSE)
+
 Thin re-export of [`@johnhenry/math`](https://github.com/johnhenry/math)'s
 scalar types (`ComplexNumber`, `Rational`, `Decimal`, `Interval`,
 `Quaternion`) plus the tensor-boundary converters the math-plus family uses

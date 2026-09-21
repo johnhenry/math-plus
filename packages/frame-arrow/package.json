@@ -1,7 +1,7 @@
 {
   "name": "@johnhenry/math-plus-frame-arrow",
   "version": "0.0.0",
-  "description": "Immutable, expression-oriented Frame/Series dataframe library on top of apache-arrow \u2014 part of Math Plus",
+  "description": "Immutable, expression-oriented Frame/Series dataframe library on top of apache-arrow — part of Math Plus",
   "type": "module",
   "exports": {
     ".": {
@@ -36,10 +36,11 @@
   "license": "MIT",
   "sideEffects": false,
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=26.0.0"
   },
   "publishConfig": {
     "access": "public",
     "provenance": true
-  }
+  },
+  "homepage": "https://github.com/johnhenry/math-plus/tree/main/packages/frame-arrow"
 }

@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-tensor-autograd
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-tensor-autograd.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-tensor-autograd)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-tensor-autograd.svg)](../../LICENSE)
+
 Reverse-mode automatic differentiation over `@johnhenry/math-plus-tensor-core`
 tensors: a define-by-run tape (`Variable`), a small `nn.*` layer/loss set, and
 `optim.*` optimizers (SGD/Adam/AdamW/RMSprop + StepLR), with a batteries-light

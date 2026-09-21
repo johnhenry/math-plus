@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-fft
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-fft.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-fft)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-fft.svg)](../../LICENSE)
+
 `ComplexTensor` plus `fft`/`ifft`/`rfft`/`irfft`/`fft2`/`fftn` for the
 math-plus tensor family. Reference-speed pure JS — no WASM kernel in v1, same
 "reference now, native later" framing as the rest of the family.

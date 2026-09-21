@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-mcp
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-mcp.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-mcp)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-mcp.svg)](../../LICENSE)
+
 An [MCP](https://modelcontextprotocol.io) server exposing the math family's
 math engines as agent-callable tools: exact symbolic computation
 (@johnhenry/math's `Symbolic` CAS) plus guarded numeric tensor/linalg/stats

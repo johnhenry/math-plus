@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-image
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-image.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-image)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-image.svg)](../../LICENSE)
+
 Resize and normalize tensor ops for practical ML/media pipelines (issue #41).
 Scoped tightly: this is the image *slice* of the math-plus family, not a
 general image-processing library. Pure JS; depends only on

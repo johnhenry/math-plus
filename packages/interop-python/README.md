@@ -1,5 +1,8 @@
 # johnhenry-math-plus-interop
 
+[![PyPI version](https://img.shields.io/pypi/v/johnhenry-math-plus-interop.svg)](https://pypi.org/project/johnhenry-math-plus-interop/)
+[![license](https://img.shields.io/pypi/l/johnhenry-math-plus-interop.svg)](../../LICENSE)
+
 The Python-side half of [math-plus](https://github.com/johnhenry/math-plus)'s interop story (issue #21). Ships to **PyPI as `johnhenry-math-plus-interop`** (not npm) — install alongside `pyarrow`/`pandas`.
 
 This package lives at `packages/interop-python/` in the math-plus repo but is **outside both the npm and Cargo workspaces** (it has no `package.json`) — released separately, on its own PyPI cadence, using `pyproject.toml`/`setuptools` rather than Changesets.

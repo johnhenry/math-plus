@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-data
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-data.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-data)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-data.svg)](../../LICENSE)
+
 Async dataset pipelines for math-plus (issue #22): a curated `Dataset` facade
 over [`@johnhenry/iteration`](https://github.com/johnhenry/math) —
 chunk/batch/shuffle/epochs/mapConcurrent/prefetch/fold with `AbortSignal`

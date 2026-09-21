@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-unit
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-unit.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-unit)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-unit.svg)](../../LICENSE)
+
 A unit/dimension scalar type: a magnitude plus dimension metadata, with
 parsing (`"kg*m/s^2"`), SI-prefix handling, formatting, and arithmetic that
 is dimensional-analysis-checked — adding metres to kilograms throws instead

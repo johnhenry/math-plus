@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-signal
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-signal.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-signal)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-signal.svg)](../../LICENSE)
+
 A SciPy-equivalent signal-processing slice for the math-plus tensor family:
 `convolve`/`correlate`, `stft`/`istft`/`welch`, `findPeaks`, Butterworth
 filter design (`butter`) + `sosFilter`/`freqz`, and `resamplePoly`. Pure JS,

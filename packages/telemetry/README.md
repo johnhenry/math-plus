@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-telemetry
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-telemetry.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-telemetry)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-telemetry.svg)](../../LICENSE)
+
 Shared event schema + sink registry for the math-plus family (issue #10): a
 stable stream any UI can consume later, with a zero-cost no-op default. Zero
 runtime dependencies.

@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-frame-parquet
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-frame-parquet.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-frame-parquet)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-frame-parquet.svg)](../../LICENSE)
+
 Parquet read/write for `@johnhenry/math-plus-frame-arrow`, built on
 hyparquet — with *genuine* projection and predicate pushdown (statistics-based
 row-group skipping and column-chunk-level fetch avoidance, proven at the byte

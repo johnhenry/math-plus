@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-tensor-webgpu
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-tensor-webgpu.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-tensor-webgpu)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-tensor-webgpu.svg)](../../LICENSE)
+
 WebGPU-accelerated GEMM, attention-adjacent primitives (QKᵀ / softmax /
 weighted-sum), and elementwise fusion by compiling
 `@johnhenry/math-plus-tensor-compile`'s IR to WGSL. **Chromium-family

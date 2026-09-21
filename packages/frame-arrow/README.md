@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-frame-arrow
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-frame-arrow.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-frame-arrow)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-frame-arrow.svg)](../../LICENSE)
+
 Immutable, expression-oriented `Frame`/`Series` dataframes on Apache Arrow.
 Build a lazy plan with a Polars-style expression algebra; nothing executes
 until you cross a materialization boundary.

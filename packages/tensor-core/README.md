@@ -1,9 +1,24 @@
 # @johnhenry/math-plus-tensor-core
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-tensor-core.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-tensor-core)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-tensor-core.svg)](../../LICENSE)
+
 Typed n-dimensional arrays for JS/TypeScript: dtypes, strides and views,
 NumPy-style broadcasting, `.npy` I/O, seeded RNG. Pure JS/TypedArray
 execution, zero dependencies — the root of the math-plus dependency graph.
 Start here.
+
+**Need more speed?** This package is pure-JS `Tensor`, not accelerated, and
+there's no `setBackend` switch here -- reaching for acceleration means
+explicitly bringing in a sibling package and its own API surface:
+[`@johnhenry/math-plus-tensor-wasm`](https://github.com/johnhenry/math-plus/tree/main/packages/tensor-wasm)
+(Rust→WASM kernels over a separate `WasmTensor` storage type -- f32,
+1-D/2-D ops, manual `free()` -- measured 1.78x faster than JS at N=1e6 for
+resident buffers), or
+[`@johnhenry/math-plus-tensor-webgpu`](https://github.com/johnhenry/math-plus/tree/main/packages/tensor-webgpu)
+(WebGPU GEMM/attention primitives, Chromium-only in v1 -- as of writing its
+own measurements say to reach for tensor-wasm instead at every size tested,
+see its "honest threshold" section).
 
 Architectural rules, stated up front: no Proxy-based indexing; views and
 contiguous tensors are semantically distinct (`permute`/`transpose`/`reshape`

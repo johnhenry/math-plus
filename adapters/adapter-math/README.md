@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-adapter-math
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-adapter-math.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-adapter-math)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-adapter-math.svg)](../../LICENSE)
+
 The bridge between `@johnhenry/math` (Vector/Matrix, `Symbolic` CAS — the
 science side) and `@johnhenry/math-plus-tensor-core` (`Tensor` — the
 engineering side). Three jobs live here: Matrix/Vector ↔ Tensor conversion,

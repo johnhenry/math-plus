@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-adapter-onnx
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-adapter-onnx.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-adapter-onnx)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-adapter-onnx.svg)](../../LICENSE)
+
 Run ONNX models with math-plus tensors: `load(modelSource)` /
 `model.run(inputs)`, marshalling between `@johnhenry/math-plus-tensor-core`'s
 `Tensor` and ONNX Runtime Web's tensor on the way in and out. That

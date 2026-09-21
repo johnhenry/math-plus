@@ -1,5 +1,8 @@
 # @johnhenry/math-plus-tensor-wasm
 
+[![npm version](https://img.shields.io/npm/v/%40johnhenry%2Fmath-plus-tensor-wasm.svg)](https://www.npmjs.com/package/@johnhenry/math-plus-tensor-wasm)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-tensor-wasm.svg)](../../LICENSE)
+
 Rust→WASM CPU kernels for math-plus tensors — a flat-numeric extern-C ABI
 with no wasm-bindgen marshalling on hot paths, an arena allocator, and
 zero-allocation `...Into` ops over resident buffers. Plus an opt-in native
