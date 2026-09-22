@@ -63,8 +63,11 @@ failure.
 
 ## New-package definition of done
 
-Adding a package under `packages/`, `adapters/`, or `scalars/` means all
-of the following, not just `npm init`:
+See the README's [`## Adding a new package`](README.md#adding-a-new-package)
+section for the narrative version (the real worked example, and the test
+for whether a new package is warranted at all). Mechanically, adding a
+package under `packages/`, `adapters/`, or `scalars/` means all of the
+following, not just `npm init`:
 - `tsconfig.json` + `tsconfig.typecheck.json` pair matching an existing
   package's shape.
 - The package name added to root `package.json`'s `build` **and** `test`

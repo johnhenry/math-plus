@@ -10,6 +10,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Root README: added the CI/license badge row and moved the `Full
+  documentation:` line into the literal required form directly under it,
+  added `## Contents` (now over 8 KB), and reshaped the math-family
+  relationship prose into its own `## Family` section. Added `## Adding a
+  new package`, pulled out of `AGENTS.md`'s "New-package definition of
+  done" with `@johnhenry/math-plus-signal`'s addition (#44) as the real
+  worked example; `AGENTS.md` now cross-references it instead of only
+  holding the mechanical checklist.
+- `package.json`: added the `license` field (the LICENSE file was always
+  MIT but the field was never set) and fixed `homepage`, which pointed at
+  the GitHub repo instead of the docs site (`opensource.johnhenry.me/math/`).
+- `AGENTS.md` and the `## Which package do I want?` routing table are this
+  family's named exemplars for the `adopt-library` skill's templates —
+  verified against the current templates and left otherwise unchanged.
+
 ### Added
 
 - Per-package READMEs for the 13 packages that lacked one (tensor-core,
