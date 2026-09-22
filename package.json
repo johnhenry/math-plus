@@ -36,5 +36,6 @@
   "engines": {
     "node": ">=26.0.0"
   },
-  "homepage": "https://github.com/johnhenry/math-plus"
+  "license": "MIT",
+  "homepage": "https://opensource.johnhenry.me/math/"
 }

@@ -1,10 +1,22 @@
 # Math Plus
 
+[![CI](https://github.com/johnhenry/math-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/johnhenry/math-plus/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/%40johnhenry%2Fmath-plus-tensor-core.svg)](LICENSE)
+
+Full documentation: [opensource.johnhenry.me/math](https://opensource.johnhenry.me/math/)
+
 A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + pandas + SciPy equivalent for Node/Deno/browser, built on Rust→WASM kernels, optional WebGPU acceleration, and Apache Arrow for tabular data.
 
-Part of the **math** family: the high-performance sibling of [`@johnhenry/math`](https://github.com/johnhenry/math) (education/CAS-oriented scalar math), reusing its scalar types (`ComplexNumber`, `Rational`, `Decimal`) at tensor API edges and bridging its `Symbolic` CAS into the tensor compiler. Data pipelines build on [`@johnhenry/iteration`](https://github.com/johnhenry/math) (a pull-based async iterator/transducer toolkit living in the same monorepo). Family documentation: **[opensource.johnhenry.me/math/](https://opensource.johnhenry.me/math/)**.
-
 **Status:** actively published. Everything ships independently under `@johnhenry/math-plus-*` on npm (and JSR, mostly) — install only what you need; a project that wants an FFT doesn't pull in a WebGPU backend. See each package's own `CHANGELOG.md` for release history, [docs/PLAN.md](./docs/PLAN.md) for the original implementation plan, and [docs/perplexity-conversation.md](./docs/perplexity-conversation.md) for the source design conversation.
+
+## Contents
+
+- [Which package do I want?](#which-package-do-i-want)
+- [Packages](#packages)
+- [Adding a new package](#adding-a-new-package)
+- [Examples](#examples)
+- [Working in this repo](#working-in-this-repo)
+- [Family](#family)
 
 ## Which package do I want?
 
@@ -62,6 +74,65 @@ Part of the **math** family: the high-performance sibling of [`@johnhenry/math`]
 | [`@johnhenry/math-plus-adapter-onnx`](./adapters/adapter-onnx) | ONNX Runtime Web wrapper (Tensor marshalling) |
 | [`@johnhenry/math-plus-unit`](./scalars/unit) | Unit/dimension scalar type with dimensional-analysis-checked arithmetic |
 
+## Adding a new package
+
+`@johnhenry/math-plus-signal` is the real worked example (`signal: new
+package -- convolve/stft/istft/findPeaks/sosFilter/butter/resamplePoly`,
+[issue #44](https://github.com/johnhenry/math-plus/issues/44)): a SciPy-shaped
+slice of functionality that didn't fit inside `@johnhenry/math-plus-fft`
+(which stays a pure Fourier-transform package) or any other existing
+cluster, so it got its own npm identity.
+
+**Smallest: a new function on an existing package's exports.** Most new
+numeric functionality is one more export from an existing package —
+another `nn.*` layer on `tensor-autograd`, another filter on `signal` once
+it exists — reusing that package's dtype/broadcasting/oracle machinery. No
+new package, no new npm identity, no new semver line, no new row in `##
+Which package do I want?` — the whole cost is the export itself.
+
+**A genuinely new package is warranted when the functionality needs its
+own install footprint** — a project that wants FFTs shouldn't have to pull
+in dataframes — **or crosses into a distinct dependency/runtime shape**
+(`tensor-webgpu`'s browser-only WebGPU requirement, `interop-python`'s
+separate PyPI distribution). `signal` is the harder case: it isn't a new
+runtime shape, just a decision that SciPy's `signal` module maps to its
+own npm package rather than growing `fft` past what "Fourier transforms"
+means.
+
+Every existing package follows the same small, repeatable pattern, so a
+new one does too:
+
+1. **`packages/<name>/package.json`** — `name: "@johnhenry/math-plus-<name>"`,
+   `version: "0.0.0"`, matching `publishConfig`/`exports` shape — copy an
+   existing package's, e.g. `signal`'s or `fft`'s for a numeric package.
+2. **`packages/<name>/tsconfig.json` (+ `tsconfig.typecheck.json`)** —
+   copy-paste of an existing package's pair.
+3. **Root `package.json`'s `build` and `test` script strings** — unlike
+   `@johnhenry/math`'s monorepo (a plain `packages/*` glob with nothing
+   else to edit), this repo's `build`/`test` scripts enumerate every
+   package by `-w @johnhenry/math-plus-<name>` explicitly; a package left
+   out of these strings never builds or tests in CI even though
+   `workspaces` picks it up for `npm install`. This is the step
+   [#47](https://github.com/johnhenry/math-plus/issues/47)'s planned
+   manifest-drift check exists to catch automatically.
+4. **The one part that isn't boilerplate: `scripts/sync-jsr-configs.mjs`'s
+   `PACKAGE_DIRS`.** Every package also publishes to JSR (mostly), and JSR
+   config generation is driven by this one hand-maintained list — a
+   package present in npm's workspace list but absent here silently never
+   gets a `jsr.json`, and nothing fails loudly about it today (this is the
+   other half of what #47 is meant to close).
+
+**Tests.** New numeric packages get a differential oracle wherever a
+reference implementation exists (NumPy for tensor ops, `scipy.signal` for
+`signal`, pyarrow/pandas for frame packages) — see `AGENTS.md`'s "Oracle
+discipline" section. Run `npm run example:NN` for the package's example
+once one is added to `examples/`.
+
+Add the row to this README's `## Which package do I want?` and `## Packages`
+tables. See `@johnhenry/math`'s own "Adding a new package" section for the
+simpler contrasting case — a sibling monorepo where the plain `packages/*`
+glob needs no manual root-script registration at all.
+
 ## Examples
 
 Runnable, one-per-cluster walkthroughs live in [`examples/`](./examples):
@@ -82,3 +153,20 @@ npm test             # manifest-drift guard + every workspace's tests
 ```
 
 Differential tests skip (never fail) without their oracles — NumPy/SciPy via `MATH_PLUS_ORACLE_PYTHON`, headless Chrome via `MATH_PLUS_CHROME_PATH`; CI verifies the oracles are importable so a green run can't be a silently-skipped one. The WASM SIMD benchmark is deliberately **not** in `npm test` (mixed CI runner fleets make wall-clock thresholds meaningless — `npm run test:bench -w @johnhenry/math-plus-tensor-wasm` on known hardware instead).
+
+## Family
+
+Part of the **math** family, alongside [`@johnhenry/math`](https://github.com/johnhenry/math).
+
+- **[`@johnhenry/math`](https://github.com/johnhenry/math)** — the
+  education/CAS-oriented scalar-math sibling. `math-plus` reuses its scalar
+  types (`ComplexNumber`, `Rational`, `Decimal`) at tensor API edges via
+  `@johnhenry/math-plus-scalar-types` and `@johnhenry/math-plus-adapter-math`,
+  and bridges its `Symbolic` CAS into this repo's tensor compiler. The two
+  repos make opposite trade-offs on purpose: `@johnhenry/math`'s boxed,
+  generic elements are precisely what this repo's SIMD-friendly tensor
+  runtime forbids, and vice versa — neither is a subset of the other.
+- **[`@johnhenry/iteration`](https://github.com/johnhenry/math)** — a
+  pull-based async iterator/transducer toolkit living in the same `math`
+  monorepo. `@johnhenry/math-plus-data`'s dataset pipelines build on the same
+  transducer/backpressure ideas, though not as a direct dependency.
