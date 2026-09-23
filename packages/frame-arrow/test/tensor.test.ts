@@ -80,6 +80,12 @@ test("@johnhenry/math-plus-frame-arrow's package.json lists @johnhenry/math-plus
   );
   const tensorCorePkg = JSON.parse(await fs.readFile(tensorCorePkgPath, "utf8"));
   assert.equal(pkg.dependencies?.["@johnhenry/math-plus-tensor-core"], undefined);
-  assert.equal(pkg.peerDependencies?.["@johnhenry/math-plus-tensor-core"], `^${tensorCorePkg.version}`);
+  // A caret range (possibly one of several `||` alternatives, so a 0.x minor
+  // bump of tensor-core doesn't force a major bump here) covering the ACTUAL version.
+  const peerRange: string = pkg.peerDependencies?.["@johnhenry/math-plus-tensor-core"] ?? "";
+  assert.ok(
+    peerRange.split("||").map((r) => r.trim()).includes(`^${tensorCorePkg.version}`),
+    `peer range ${JSON.stringify(peerRange)} must include ^${tensorCorePkg.version}`,
+  );
   assert.equal(pkg.peerDependenciesMeta?.["@johnhenry/math-plus-tensor-core"]?.optional, true);
 });

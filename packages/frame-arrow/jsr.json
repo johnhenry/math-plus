@@ -5,6 +5,6 @@
   "exports": "./src/index.ts",
   "imports": {
     "apache-arrow": "npm:apache-arrow@21.2.0",
-    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0"
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0 || ^0.1.0"
   }
 }

@@ -2,7 +2,10 @@
   "name": "@johnhenry/math-plus-tensor-webgpu",
   "version": "0.0.0",
   "license": "MIT",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./dawn": "./src/dawn.ts"
+  },
   "imports": {
     "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0",
     "@johnhenry/math-plus-tensor-compile": "jsr:@johnhenry/math-plus-tensor-compile@^0.0.0",
