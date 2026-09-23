@@ -9,6 +9,7 @@ Reads a JSON job file:
         | "cumsum" | "cumprod" | "sort" | "argsort" | "topk_values" | "topk_indices"
         | "concat" | "stack" | "where" | "relu" | "sigmoid" | "gelu" | "softmax" | "log",
     "ddof": 1,                            # optional (variance/std)
+    "approximate": "tanh",                # optional (gelu: "none" (default) | "tanh")
     "k": 3, "largest": true,              # optional (topk)
     "condition": "/path/cond.npy",        # optional (where -- npy dtype must be bool)
     "inputs": ["/path/a.npy", ...],       # .npy files written by tensor-core
@@ -189,9 +190,17 @@ def main() -> None:
     elif op == "sigmoid":
         result = 1 / (1 + np.exp(-inputs[0]))
     elif op == "gelu":
+        # "approximate" mirrors torch.nn.functional.gelu: "none" (default, exact
+        # erf-GELU -- NumPy has no erf, so the C library's math.erf is the
+        # reference) or "tanh".
         x = inputs[0]
-        c = np.sqrt(2 / np.pi)
-        result = 0.5 * x * (1 + np.tanh(c * (x + 0.044715 * x**3)))
+        if job.get("approximate", "none") == "tanh":
+            c = np.sqrt(2 / np.pi)
+            result = 0.5 * x * (1 + np.tanh(c * (x + 0.044715 * x**3)))
+        else:
+            import math
+            erf = np.vectorize(math.erf, otypes=[np.float64])
+            result = (0.5 * x.astype(np.float64) * (1 + erf(x.astype(np.float64) / math.sqrt(2)))).astype(x.dtype)
     elif op == "softmax":
         x = inputs[0]
         axis = job.get("axis", -1)

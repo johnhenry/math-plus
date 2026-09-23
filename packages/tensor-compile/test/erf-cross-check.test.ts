@@ -1,21 +1,24 @@
 /**
- * Differential test (issue #34, cross-repo interop investigation): does
- * tensor-compile's own `erf` (Abramowitz & Stegun 7.1.26, `|error| <= 1.5e-7`
- * per its own doc comment in src/ir.ts) actually agree with @johnhenry/math's
+ * Differential test (issue #34, cross-repo interop investigation; updated for
+ * #122): does tensor-compile's `erf` agree with @johnhenry/math's
  * `SpecialFunctions.erf` (an independently-written, separately-sourced
  * implementation, in the sibling johnhenry/math repo)?
  *
+ * Since #122 tensor-compile's `erf` IS tensor-core's canonical double-precision
+ * `erf` (src/special.ts, ~1e-15 relative, SciPy-verified in
+ * tensor-core/test/special-oracle.test.ts) rather than its own Abramowitz &
+ * Stegun 7.1.26 copy. `SpecialFunctions.erf` is the LESS accurate side of
+ * this comparison (measured max |diff| ≈ 1.4e-7 over [-6, 6], near x ≈ 0.5),
+ * so the 1e-6 tolerance below is bounding @johnhenry/math's own error, and
+ * this file is now an interop sanity check, not the accuracy oracle.
+ *
  * `@johnhenry/math` is a devDependency ONLY here -- tensor-compile's own
  * shipped runtime dependency graph is unchanged (see ir.ts's own doc
- * comment: "tensor-compile stays dependency-free of @johnhenry/math"). This
- * test exists purely to build confidence that the two independently-sourced
- * approximations actually agree, not to introduce a real coupling.
+ * comment: "tensor-compile stays dependency-free of @johnhenry/math").
  *
- * Covers tensor-webgpu's WGSL `erf` too, without needing a GPU: its
- * `math_plus_erf` (packages/tensor-webgpu/src/fusion-wgsl.ts) is the exact
- * same formula as this one, generated from the same source per that file's
- * own doc comment ("same math, different backend") -- so a mismatch here
- * would mean a mismatch there too, and an agreement here transfers.
+ * tensor-webgpu's WGSL `math_plus_erf` is an f32 lowering of the same
+ * canonical algorithm; it is verified against the canonical f64 `erf` on a
+ * live adapter in packages/tensor-webgpu/test/fusion.test.ts.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -29,14 +32,9 @@ function tensorCompileErf(x: number): number {
 }
 
 test("tensor-compile's erf matches @johnhenry/math's SpecialFunctions.erf within a documented tolerance", () => {
-  // Both implementations are approximations with their own stated error
-  // bounds -- @johnhenry/math's SpecialFunctions.erf doesn't document a bound
-  // as explicitly as tensor-compile's Abramowitz & Stegun comment does, but
-  // tensor-compile's OWN 1.5e-7 bound already dominates any tolerance tight
-  // enough to matter for elementwise-tensor use; 1e-6 gives headroom for
-  // floating-point accumulation differences between the two call paths
-  // (@johnhenry/math's own polynomial/series approach vs Abramowitz & Stegun)
-  // without hiding a real disagreement.
+  // @johnhenry/math's SpecialFunctions.erf doesn't document a bound; its
+  // measured error against the canonical erf is ~1.4e-7 (see header), so
+  // 1e-6 leaves headroom without hiding a real disagreement.
   const TOLERANCE = 1e-6;
   const xs = [
     -4, -3, -2.5, -2, -1.5, -1, -0.75, -0.5, -0.25, -0.1, -0.01, 0, 0.01, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4,

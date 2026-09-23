@@ -60,16 +60,25 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
 - **Copies:** `contiguous`, `take`, `gather`, `mask`, `cast`, `pad`,
   `split`, `repeat`, `flip`, `roll`, `nonzero`, `clip`, `flatten`.
 - **Math:** `add/sub/mul/div` (tensor or scalar), full unary set (`sqrt`,
-  `exp`, `log*`, trig, hyperbolic, `relu`/`sigmoid`/`gelu`/`softmax`),
+  `exp`, `log*`, trig, hyperbolic, `erf`/`erfc`, `relu`/`sigmoid`/`gelu`/`softmax`),
   `matmul`, `dot`, comparisons/logic, reductions (`sum mean min max
   argmin argmax variance std prod cumsum cumprod sort argsort topK`).
 - **I/O:** `toNpy()` / `Tensor.fromNpy(bytes)` — NPY v1.0.
+- **Special functions (scalar):** `erf`, `erfc`, `gelu(x, approximate)`,
+  `geluErf`, `geluTanh`, `geluDerivative` — the monorepo's ONE canonical
+  double-precision erf (`src/special.ts`, ~1e-15 relative, SciPy-verified).
+  tensor-compile's IR and tensor-webgpu's WGSL `erf` derive from it; don't
+  add another.
 - **Random:** `random.seed`, `random.uniform`, `random.normal`,
   `random.randint`; plus `broadcastShapes`, `allocate`, `BYTES_PER_ELEMENT`,
   `isBigIntDType`.
 
 ## Traps
 
+- **`gelu()` defaults to EXACT erf-GELU** (`approximate: "none"`, like
+  PyTorch's `nn.GELU()`), since issue #122. Earlier versions always used the
+  tanh approximation; pass `gelu({ approximate: "tanh" })` for those numbers
+  (they differ by up to ~4.7e-4).
 - **Default dtype is `f32`** for `zeros`/`ones`/`full`/`arange`/`from`
   (`random.randint` defaults to `i32`). Most numerical work here wants an
   explicit `{ dtype: "f64" }`.

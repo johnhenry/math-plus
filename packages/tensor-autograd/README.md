@@ -55,7 +55,9 @@ const { lossHistory } = await t.fit({ x: X, y: Y }); // X/Y are f64 Tensors
 
 - `Variable` / `variable` / `constant`; ops: `add sub mul div matmul
   unsqueeze sqrt log sum mean relu sigmoid gelu softmax`; `backward`,
-  `zeroGrad`, `detach`.
+  `zeroGrad`, `detach`. `gelu({ approximate: "none" | "tanh" })` defaults to
+  exact erf-GELU since #122 (was tanh); its backward differentiates
+  whichever mode ran.
 - `grad.of` / `grad.valueAndGrad`; `noGrad` / `enableGrad` / `isGradEnabled`.
 - `nn`: `Parameter`, `Module`, `Linear`, `Embedding`, `LayerNorm`,
   `Sequential`, `Dropout`; losses `mseLoss`, `huberLoss`,
