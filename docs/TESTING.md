@@ -196,6 +196,25 @@ subprocess — `packages/tensor-webgpu/test/helpers.ts` launches headless Chrome
 Playwright/Puppeteer) and probes `navigator.gpu.requestAdapter()` once per test file, caching the
 result. Individual tests call `getHarness()` and `t.skip(reason)` when unavailable.
 
+**Two harness backends** (`test/helpers.ts`, selected by `$MATH_PLUS_WEBGPU_HARNESS`):
+
+- `dawn` — in-process Dawn via the `webgpu` npm package (a devDependency of this package; also
+  its optional peer for Node users, loaded through `src/dawn.ts`). Test bodies run as an
+  `AsyncFunction` with `navigator = { gpu: <Dawn> }`, so the same bodies run unmodified. No
+  browser or display server — this is the path that works on macOS (Metal) and any machine with a
+  Dawn-supported GPU. Created with `allow_unsafe_apis` so the experimental subgroup-matrix GEMM
+  kernel is exercised where the adapter supports it.
+- `chrome` — the headless-Chrome-over-CDP harness described below (Linux: Xvfb; macOS:
+  `--headless=new --use-angle=metal`, no display needed).
+- unset / `auto` — Dawn first, Chrome if Dawn has no adapter (e.g. a GPU-less CI runner, where
+  Chrome's SwiftShader path is the one that works).
+
+GEMM correctness (`test/gemm.test.ts`) additionally uses a NumPy float64 oracle
+(`packages/tensor-webgpu/scripts/gemm_oracle.py`, same `$MATH_PLUS_ORACLE_PYTHON` / `python3`
+resolution and skip-don't-fail rule as above), with error bounds derived from `|A|·|B|` rather than
+hand-tuned per case. A healthy local run shows `skipped 0`; the one test that skips on adapters
+without f32 8x8x8 subgroup matrices (anything but Apple GPUs today) says so in its skip reason.
+
 Resolution order for the Chrome binary: `$MATH_PLUS_CHROME_PATH` (explicit override), else the usual
 PATH/well-known-path candidates (`google-chrome-stable`, `/opt/google/chrome/chrome`, `chromium`,
 etc. — see `CHROME_CANDIDATES` in `helpers.ts`). `Xvfb` must also be on `PATH` (or `$DISPLAY` set to
@@ -218,5 +237,6 @@ while others succeeded.
 GitHub Actions runner, only WASM has a hardware-verified speedup assertion in CI). GEMM correctness
 IS tested against a live adapter; the WASM-vs-WebGPU crossover itself is a manually-run spike
 (`packages/tensor-webgpu/scripts/measure-gemm-threshold.ts`), recorded in
-`docs/spikes/webgpu-baseline.md`, the same way `docs/spikes/wasm-baseline.md` records the
-WASM-vs-pure-JS numbers.
+`docs/spikes/webgpu-tiled-gemm.md` (current kernels; `docs/spikes/webgpu-baseline.md` has the v1
+naive-kernel numbers), the same way `docs/spikes/wasm-baseline.md` records the WASM-vs-pure-JS
+numbers.

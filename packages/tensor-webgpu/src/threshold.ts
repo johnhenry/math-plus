@@ -1,42 +1,39 @@
 /**
  * GEMM backend selection (issue #12, v1 scope item 1: "GEMM above a measured
  * size threshold — small matmuls stay on WASM since GPU dispatch overhead
- * dominates at small sizes"). The crossover was MEASURED, not guessed — see
- * docs/spikes/webgpu-baseline.md for the full methodology and raw numbers —
- * and the honest result on THIS machine is: no crossover exists within a
- * practical size range. `@johnhenry/math-plus-tensor-wasm`'s `matmulInto` was faster than
- * this package's `runGemmWGSL` at every measured size from 8x8 up to
- * 768x768 (589,824 output elements), by a factor that stayed in the 5-10x
- * range rather than narrowing toward 1x as size grew — i.e. this isn't
- * "the crossover is just past what got measured," it's "no crossover is
- * visible in the trend at all" on this hardware+kernel combination.
+ * dominates at small sizes"). The crossover is MEASURED, not guessed, with
+ * `scripts/measure-gemm-threshold.ts` (end to end per call: upload, compute,
+ * read back — the cost a host-array matmul actually pays).
  *
- * Two real, named reasons, not hand-waving:
- *  1. This machine has no discrete GPU — WebGPU here runs through ANGLE's GL
- *     backend against an Intel integrated GPU under Xvfb (confirmed via
- *     `chrome://gpu`, not SwiftShader as originally expected — see
- *     docs/spikes/webgpu-baseline.md), which is a real hardware path but a
- *     much weaker one than a discrete GPU's.
- *  2. `runGemmWGSL`'s shader (gemm.ts) is intentionally naive for v1 — one
- *     thread per output element, no shared-memory tiling — exactly the kind
- *     of kernel that's most exposed to memory-bandwidth-bound performance on
- *     weak hardware. A tiled kernel is documented future work in gemm.ts's
- *     own module doc; it would very plausibly change this number.
+ * History, because the number changed for real reasons:
  *
- * `GEMM_ELEMENT_THRESHOLD` is set to `Infinity` — `chooseGemmBackend` always
- * returns `"wasm"` — as the only honest default given the measurement above:
- * a specific finite number here would imply a crossover was found and
- * extrapolated beyond the tested range, which didn't happen. Re-measure with
- * `scripts/measure-gemm-threshold.ts` on real discrete-GPU hardware (or
- * after a tiled kernel lands) and replace this constant with whatever that
- * run finds — the mechanism (`chooseGemmBackend`, this named constant) is
- * built for exactly that recalibration, it's just not been triggered yet.
+ *  1. v1 (docs/spikes/webgpu-baseline.md): `Infinity`. The naive
+ *     one-thread-per-output kernel never beat `@johnhenry/math-plus-tensor-wasm`'s
+ *     `matmulInto` from 8x8 to 768x768 on the trycooy dev box (Intel ADL-N
+ *     iGPU through ANGLE's GL backend under Xvfb) — 5-10x slower, with no
+ *     narrowing trend, so no finite threshold was honest.
+ *  2. Now (docs/spikes/webgpu-tiled-gemm.md): `128 * 128`. With the tiled /
+ *     skinny / subgroup-matrix kernels on an Apple M2 (Metal), WebGPU wins
+ *     end to end at every measured square size from n = 96 under Dawn
+ *     (Node) and from n = 128 in headless Chrome 153 (whose per-call
+ *     readback overhead is higher), and loses below — the per-call floor is
+ *     ~0.3-0.5 ms of submit + `mapAsync` latency, which WASM beats easily
+ *     for tiny matrices. The constant takes the more conservative (Chrome)
+ *     crossover.
+ *
+ * Caveats, loudly: this is ONE machine's number. It has not been
+ * re-measured on the trycooy Intel iGPU with the new kernels, nor on any
+ * discrete GPU; weaker GPUs or software adapters (SwiftShader) will cross
+ * over later or never. It is m*n-based only (ignores k), and it prices
+ * host-array calls — operands that already live on the GPU (`runGemm` on
+ * `GPUTensor`s) make WebGPU cheaper still. Re-run the script on your
+ * hardware before trusting it.
  */
 
-/** See this module's doc comment: no measured crossover exists on this machine's hardware+kernel combination, so `chooseGemmBackend` conservatively never returns `"webgpu"` until re-measured. */
-export const GEMM_ELEMENT_THRESHOLD = Number.POSITIVE_INFINITY;
+/** Output elements (m*n) at or above which WebGPU GEMM beat WASM end to end on the reference machine — see this module's doc for exactly where and how that was measured. */
+export const GEMM_ELEMENT_THRESHOLD = 128 * 128;
 
-/** `"wasm"` below the measured crossover, `"webgpu"` at or above it. Pure size-based heuristic — v1 doesn't factor in `k` separately or GPU queue occupancy. */
+/** `"wasm"` below the measured crossover, `"webgpu"` at or above it. Pure size-based heuristic — doesn't factor in `k`, residency, or GPU queue occupancy. */
 export function chooseGemmBackend(m: number, n: number): "wasm" | "webgpu" {
   return m * n >= GEMM_ELEMENT_THRESHOLD ? "webgpu" : "wasm";
 }
