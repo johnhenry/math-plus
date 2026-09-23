@@ -26,11 +26,11 @@ test("chooseGemmBackend: never crosses to webgpu on this machine's measured (non
   assert.equal(chooseGemmBackend(100_000, 100_000), "wasm");
 });
 
-test("toWebGPU: rejects non-f32 dtype without needing a real device", async () => {
+test("toWebGPU: rejects dtypes other than f32/f16 without needing a real device", async () => {
   const t = Tensor.zeros([4], { dtype: "f64" });
   await assert.rejects(
     () => toWebGPU(t, undefined as unknown as GPUDevice),
-    /f32 only/,
+    /f32 and f16 only/,
   );
 });
 
