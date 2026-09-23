@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-adapter-math",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Bridge between @johnhenry/math (Vector/Matrix, science/CAS side) and @johnhenry/math-plus-tensor-core (Tensor, engineering side) — Matrix/Vector <-> Tensor conversion (issue #14); Symbolic->tensor-compile IR (issue #15) and Symbolic->frame-arrow Expr (issue #38) compile targets, plus the DualNumber oracle, land here too",
   "type": "module",
   "exports": {
@@ -24,12 +24,12 @@
   },
   "dependencies": {
     "@johnhenry/math": "^0.0.1",
-    "@johnhenry/math-plus-tensor-core": "^0.1.0",
-    "@johnhenry/math-plus-tensor-compile": "^0.1.0",
-    "@johnhenry/math-plus-frame-arrow": "^0.0.1"
+    "@johnhenry/math-plus-tensor-core": "^0.1.1",
+    "@johnhenry/math-plus-tensor-compile": "^0.1.1",
+    "@johnhenry/math-plus-frame-arrow": "^0.0.2"
   },
   "devDependencies": {
-    "@johnhenry/math-plus-tensor-autograd": "^0.1.0"
+    "@johnhenry/math-plus-tensor-autograd": "^0.1.1"
   },
   "repository": {
     "type": "git",

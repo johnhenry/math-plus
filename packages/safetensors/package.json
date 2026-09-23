@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-safetensors",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Universal safetensors reader/writer: validated headers, typed views (F16 as Float16Array, BF16 bits), lazy reads from Blob, HTTP ranges and file handles, tensor-core interop — part of Math Plus",
   "type": "module",
   "exports": {
@@ -31,7 +31,7 @@
     }
   },
   "devDependencies": {
-    "@johnhenry/math-plus-tensor-core": "^0.1.0"
+    "@johnhenry/math-plus-tensor-core": "^0.1.1"
   },
   "repository": {
     "type": "git",

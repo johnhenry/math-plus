@@ -1,5 +1,13 @@
 # @johnhenry/math-plus-image
 
+## 0.0.2
+
+### Patch Changes
+
+- 80123df: Republish with an npm provenance attestation. The previous versions were published from a local machine on 2026-09-23 without provenance (the CI `NPM_TOKEN` secret had expired). No code changes.
+- Updated dependencies [80123df]
+  - @johnhenry/math-plus-tensor-core@0.1.1
+
 ## 0.0.1
 
 ### Patch Changes

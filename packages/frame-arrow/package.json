@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-frame-arrow",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Immutable, expression-oriented Frame/Series dataframe library on top of apache-arrow — part of Math Plus",
   "type": "module",
   "exports": {
