@@ -1,0 +1,51 @@
+{
+  "name": "@johnhenry/math-plus-safetensors",
+  "version": "0.0.0",
+  "description": "Universal safetensors reader/writer: validated headers, typed views (F16 as Float16Array, BF16 bits), lazy reads from Blob, HTTP ranges and file handles, tensor-core interop \u2014 part of Math Plus",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tensor": {
+      "types": "./dist/tensor.d.ts",
+      "default": "./dist/tensor.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "npm run typecheck && node --test test/*.test.ts"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@johnhenry/math-plus-tensor-core": "^0.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@johnhenry/math-plus-tensor-core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@johnhenry/math-plus-tensor-core": "^0.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnhenry/math-plus.git",
+    "directory": "packages/safetensors"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/johnhenry/math-plus/tree/main/packages/safetensors"
+}
