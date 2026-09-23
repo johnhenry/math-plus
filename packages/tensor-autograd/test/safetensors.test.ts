@@ -8,7 +8,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { random } from "@johnhenry/math-plus-tensor-core";
 import { readSafetensors } from "@johnhenry/math-plus-safetensors";
 import { Variable, nn } from "../src/index.ts";
@@ -28,7 +30,7 @@ import {
 } from "./torch-oracle.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "autograd-st-"));
-test.after(() => rmSync(dir, { recursive: true, force: true }));
+after(() => rmSync(dir, { recursive: true, force: true }));
 
 function encoder(dtype?: nn.ParamDType): nn.TransformerEncoderLayer {
   return new nn.TransformerEncoderLayer(8, 2, { dimFeedforward: 16, normFirst: true, batchFirst: true, dtype });

@@ -19,7 +19,7 @@
  *   and has no RoPE scaling variants; cos/sin are computed in f64, then cast.
  * - Masks are plain (non-differentiable) Tensors.
  */
-import { Tensor, type Rng } from "@johnhenry/math-plus-tensor-core";
+import { Tensor, type GeluApproximate, type Rng } from "@johnhenry/math-plus-tensor-core";
 import { Variable, constant } from "./variable.ts";
 import { LayerNorm, Linear, Module, Parameter, asCompute, type ParamDType } from "./nn.ts";
 
@@ -86,9 +86,9 @@ export function applyRotaryEmbedding(x: Variable, cos: Tensor, sin: Tensor): Var
  * `gelu(value) * gate` — the ModernBERT / laya-js order (GELU on the FIRST
  * half). Note diffusers' `GEGLU` applies GELU to the second half instead;
  * swap your projection rows if porting from there. `approximate` defaults to
- * `"none"` (exact erf GELU, PyTorch's default).
+ * `"none"` (exact erf GELU — PyTorch's and `Variable.gelu()`'s default).
  */
-export function geglu(x: Variable, options: { approximate?: "none" | "tanh" } = {}): Variable {
+export function geglu(x: Variable, options: { approximate?: GeluApproximate } = {}): Variable {
   const d = x.shape[x.ndim - 1] as number;
   if (d % 2 !== 0) throw new RangeError(`geglu: last axis must be even, got ${d}`);
   const half = d / 2;
@@ -340,12 +340,12 @@ export class TransformerEncoderLayer extends Module {
  */
 export class GeGLU extends Module {
   readonly proj: Linear;
-  readonly approximate: "none" | "tanh";
+  readonly approximate: GeluApproximate;
 
   constructor(
     dimIn: number,
     dimOut: number,
-    options: { bias?: boolean; approximate?: "none" | "tanh"; dtype?: ParamDType; rng?: Rng } = {},
+    options: { bias?: boolean; approximate?: GeluApproximate; dtype?: ParamDType; rng?: Rng } = {},
   ) {
     super();
     this.proj = new Linear(dimIn, 2 * dimOut, { bias: options.bias ?? true, dtype: options.dtype, rng: options.rng });

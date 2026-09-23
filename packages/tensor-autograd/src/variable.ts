@@ -23,10 +23,9 @@
  * immutable style — there's nothing to reject at runtime because the
  * mutating method doesn't exist.
  */
-import { Tensor, allocate, type AnyTypedArray, type Axis, type DType, type SliceSpec } from "@johnhenry/math-plus-tensor-core";
+import { allocate, checkGeluApproximate, Tensor, type Axis, type DType, type GeluApproximate, type SliceSpec } from "@johnhenry/math-plus-tensor-core";
 import { timed } from "@johnhenry/math-plus-telemetry";
 import { contiguousOf, sumToShape } from "./shape-utils.ts";
-import { geluExact, geluExactDerivative } from "./erf.ts";
 
 /** Swap the last two axes (a view) — matmul's transpose for batched operands. */
 function swapLastTwo(t: Tensor): Tensor {
@@ -34,14 +33,6 @@ function swapLastTwo(t: Tensor): Tensor {
   axes[t.ndim - 1] = t.ndim - 2;
   axes[t.ndim - 2] = t.ndim - 1;
   return t.permute(axes);
-}
-
-/** Elementwise `fn` over a float tensor into a fresh contiguous tensor of the same dtype. */
-function mapFloat(t: Tensor, fn: (v: number) => number): Tensor {
-  const src = t.contiguous().data as Float64Array;
-  const out = allocate(t.dtype, t.size) as Exclude<AnyTypedArray, BigInt64Array | BigUint64Array>;
-  for (let i = 0; i < t.size; i++) out[i] = fn(src[i] as number);
-  return Tensor.fromTypedArray(out, [...t.shape], { dtype: t.dtype });
 }
 
 /**
@@ -358,27 +349,26 @@ export class Variable {
   }
 
   /**
-   * GELU. `approximate: "tanh"` (the DEFAULT here, for backward
-   * compatibility — tensor-core's `Tensor.gelu()` is the tanh form) or
-   * `"none"` for the exact erf form `x * Phi(x)`, which is PyTorch's
-   * `F.gelu` default and what BERT/ModernBERT checkpoints expect. Note the
-   * default is the OPPOSITE of PyTorch's; pass `{ approximate: "none" }`
-   * explicitly when porting PyTorch code.
-   *
-   * The tanh backward uses tanh(x) = 2*sigmoid(2x)-1 (historical; identical
-   * values). The exact form's erf lives in `./erf.ts` until tensor-core
-   * grows a canonical `erf` (issue #122) — see the overlap note there.
+   * GELU with the same `approximate` option and default as `Tensor.gelu()`
+   * (`"none"` = exact erf-GELU, the default since #122; `"tanh"` = the tanh
+   * approximation). The backward pass differentiates whichever forward was
+   * actually computed:
+   * - exact: `Φ(x) + x·φ(x)`, with `Φ(x) = 0.5·erfc(-x/√2)` from the
+   *   canonical `Tensor.erfc()` (tensor-core src/special.ts);
+   * - tanh: the exact derivative of the tanh approximation, using the
+   *   identity tanh(x) = 2*sigmoid(2x)-1.
    */
-  gelu(options: { approximate?: "tanh" | "none" } = {}): Variable {
-    const approximate = options.approximate ?? "tanh";
+  gelu(options: { approximate?: GeluApproximate } = {}): Variable {
+    const approximate = checkGeluApproximate(options.approximate);
+    const value = this.value.gelu({ approximate });
     if (approximate === "none") {
-      const value = mapFloat(this.value, geluExact);
-      return Variable.fromOp(value, [this], (g) => [g.mul(mapFloat(this.value, geluExactDerivative))]);
+      return Variable.fromOp(value, [this], (g) => {
+        const x = this.value;
+        const cdf = x.mul(-Math.SQRT1_2).erfc().mul(0.5); // Φ(x) = 0.5·erfc(-x/√2), no cancellation for x << 0
+        const pdf = x.mul(x).mul(-0.5).exp().mul(1 / Math.sqrt(2 * Math.PI)); // φ(x)
+        return [g.mul(cdf.add(x.mul(pdf)))];
+      });
     }
-    if (approximate !== "tanh") {
-      throw new RangeError(`gelu: approximate must be "tanh" or "none", got ${JSON.stringify(approximate)}`);
-    }
-    const value = this.value.gelu();
     return Variable.fromOp(value, [this], (g) => {
       const c = Math.sqrt(2 / Math.PI);
       const x = this.value;

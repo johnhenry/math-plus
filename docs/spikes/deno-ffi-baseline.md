@@ -59,7 +59,9 @@ deno run --allow-ffi --allow-read packages/tensor-wasm/scripts/deno-ffi-bench.ts
 - **`gemm` is the weakest case (1.2–1.4x)** — both sides are the same naive
   triple loop and at 1024² both are cache-miss-bound. A native gemm only
   gets interesting with blocking/BLAS, which is out of scope for this
-  crate's "reference kernels" role.
+  crate's "reference kernels" role. *(Superseded: issue #121 added blocking,
+  SIMD128 and an opt-in Accelerate path — see "Re-measured after issue
+  #121" below.)*
 
 ## Verdict: gate PASSES for Phase 2 — with a scope note
 
@@ -105,3 +107,46 @@ binding + panic hardening" is the entire remaining work.
 - **Verification**: `scripts/deno-native-test.ts` — native vs WASM
   agreement on every op (incl. transposed-stride matmul), fallback
   contract, RangeError validation. Passing under Deno 2.6.10 locally.
+
+## Re-measured after issue #121 (blocked GEMM), 2026-09-23
+
+**Machine**: Apple M2, macOS 27 (not trycooy — absolute numbers are not
+comparable to the table above; the ratios within this table are).
+**Deno** 2.9.7. Same script, now platform-aware (`.dylib`/`.dll`/`.so`),
+honoring `$MATH_PLUS_NATIVE_KERNELS_PATH`, and with a second gemm row per
+size comparing native against the SIMD128 module's `gemm_f32_simd128` (what
+`matmulInto` actually runs on any SIMD-capable runtime):
+
+```bash
+cargo build --release -p tensor-wasm-kernels          # portable cdylib
+npm run build:wasm -w @johnhenry/math-plus-tensor-wasm
+deno run --allow-ffi --allow-read --allow-env packages/tensor-wasm/scripts/deno-ffi-bench.ts
+# Accelerate variant: build with --features accelerate, copy the dylib aside,
+# and point MATH_PLUS_NATIVE_KERNELS_PATH at the copy.
+```
+
+gemm rows (ms per call, mean; `wasm` = scalar blocked module unless noted):
+
+| size | native portable | native + `accelerate` | wasm scalar blocked | wasm SIMD128 blocked |
+|---|---:|---:|---:|---:|
+| 64×64 | 0.0132 | 0.0013 | 0.0603 | 0.0240 |
+| 256×256 | 0.845 | 0.0306 | 4.11 | 1.19 |
+| 512×512 | 6.57 | 0.247 | 29.7 | 9.30 |
+| 1024×1024 | 51.7 (41.5 GFLOP/s) | 2.22 (~970 GFLOP/s) | 222 | 79.6 (27 GFLOP/s) |
+
+- **gemm is no longer the weakest native case by accident of both sides
+  being naive**: native-portable (LLVM-autovectorized NEON over the same
+  4x8 tile) is ~1.4–1.8x the SIMD128 WASM path; Accelerate (AMX) is ~34x
+  it at 1024³. The Accelerate feature is opt-in, macOS-only, and not part
+  of the CI artifact matrix — the shipped dylibs stay dependency-free.
+- Linking: the native cdylib (and `cargo test`, which links a test binary)
+  built and linked cleanly against the default Command Line Tools SDK on
+  this macOS 27 machine — the `SDKROOT=…MacOSX26.x.sdk` workaround was not
+  needed, including for `-framework Accelerate`.
+- WASM under Deno measured ~27 GFLOP/s vs ~37 under Node 24 for the same
+  kernel — this script reports a mean over ≥300 ms, `gemm-bench.ts` a
+  best-of; not investigated further.
+- `scripts/deno-native-test.ts` passes against both the portable and the
+  Accelerate dylib.
+- Non-gemm rows (same run, for completeness): addInto native speedup
+  5.9x / 4.4x / 2.7x at N=10⁴/10⁶/4·10⁶; solve 3.7x (n=64), 6.1x (n=256).

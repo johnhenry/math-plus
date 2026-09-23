@@ -29,7 +29,9 @@
  * speculative-read window.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { asyncBufferFromFile, type AsyncBuffer } from "hyparquet";
 import { readParquetFile } from "../src/index.ts";
 

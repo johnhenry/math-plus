@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mock, test } from "node:test";
+import { makeTest, spyMethod } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import {
   BYTES_PER_ELEMENT,
   Tensor,
@@ -111,27 +113,27 @@ test("flatten()/roll()/cumsum() reuse an already-contiguous view instead of copy
   // which (unlike reshape()) additionally requires offset === 0 and a
   // fully-occupied buffer, so it copied `sub` even though it was already
   // contiguous.
-  const flattenSpy = mock.method(sub, "contiguous");
+  const flattenSpy = spyMethod(sub, "contiguous");
   assert.equal(sub.flatten().data, sub.data);
-  assert.equal(flattenSpy.mock.callCount(), 0, "flatten() should not call contiguous() on an already-contiguous view");
-  flattenSpy.mock.restore();
+  assert.equal(flattenSpy.callCount(), 0, "flatten() should not call contiguous() on an already-contiguous view");
+  flattenSpy.restore();
 
   // roll() (no axis) flattens first; that intermediate step should reuse
   // `sub`'s storage rather than pre-copying (the final take()-based gather
   // still allocates fresh output — that part is unavoidable and untested
   // here; differential.test.ts covers roll()'s correctness).
-  const rollSpy = mock.method(sub, "contiguous");
+  const rollSpy = spyMethod(sub, "contiguous");
   sub.roll(1);
-  assert.equal(rollSpy.mock.callCount(), 0, "roll() should not call contiguous() on an already-contiguous view");
-  rollSpy.mock.restore();
+  assert.equal(rollSpy.callCount(), 0, "roll() should not call contiguous() on an already-contiguous view");
+  rollSpy.restore();
 
   // cumsum()/cumprod() (axis omitted) flatten via the same fast path
   // (cumsum()'s own output is always a fresh, freshly-allocated tensor —
   // it's the redundant pre-copy of `sub` that this test targets).
-  const cumsumSpy = mock.method(sub, "contiguous");
+  const cumsumSpy = spyMethod(sub, "contiguous");
   sub.cumsum();
-  assert.equal(cumsumSpy.mock.callCount(), 0, "cumsum() should not call contiguous() on an already-contiguous view");
-  cumsumSpy.mock.restore();
+  assert.equal(cumsumSpy.callCount(), 0, "cumsum() should not call contiguous() on an already-contiguous view");
+  cumsumSpy.restore();
 });
 
 test("flatten()/roll()/cumsum() still copy when the source is genuinely non-contiguous", () => {
@@ -139,21 +141,21 @@ test("flatten()/roll()/cumsum() still copy when the source is genuinely non-cont
   const p = t.permute([1, 0]); // non-contiguous
   assert.equal(p.isContiguous, false);
 
-  const flattenSpy = mock.method(p, "contiguous");
+  const flattenSpy = spyMethod(p, "contiguous");
   const flattened = p.flatten();
-  assert.equal(flattenSpy.mock.callCount(), 1);
+  assert.equal(flattenSpy.callCount(), 1);
   assert.deepEqual(flattened.toArray(), [1, 4, 2, 5, 3, 6]);
-  flattenSpy.mock.restore();
+  flattenSpy.restore();
 
-  const rollSpy = mock.method(p, "contiguous");
+  const rollSpy = spyMethod(p, "contiguous");
   p.roll(1);
-  assert.equal(rollSpy.mock.callCount(), 1);
-  rollSpy.mock.restore();
+  assert.equal(rollSpy.callCount(), 1);
+  rollSpy.restore();
 
-  const cumsumSpy = mock.method(p, "contiguous");
+  const cumsumSpy = spyMethod(p, "contiguous");
   assert.deepEqual(p.cumsum().toArray(), [1, 5, 7, 12, 15, 21]);
-  assert.equal(cumsumSpy.mock.callCount(), 1);
-  cumsumSpy.mock.restore();
+  assert.equal(cumsumSpy.callCount(), 1);
+  cumsumSpy.restore();
 });
 
 test("reshape supports -1 inference and rejects non-contiguous input", () => {
@@ -174,6 +176,11 @@ test("broadcastShapes follows NumPy trailing-axis rules", () => {
   assert.deepEqual(broadcastShapes([2, 1], [1, 3]), [2, 3]);
   assert.deepEqual(broadcastShapes([], [4]), [4]);
   assert.throws(() => broadcastShapes([2, 3], [4]), RangeError);
+  // Zero-size dims broadcast against 1 to 0, not 1 (regression, found in #120).
+  assert.deepEqual(broadcastShapes([0, 4], [4]), [0, 4]);
+  assert.deepEqual(broadcastShapes([1], [0]), [0]);
+  assert.deepEqual(broadcastShapes([0, 1], [1, 3]), [0, 3]);
+  assert.deepEqual([...Tensor.zeros([0, 4]).add(Tensor.ones([4])).shape], [0, 4]);
 });
 
 test("add/sub/mul/div with broadcasting", () => {

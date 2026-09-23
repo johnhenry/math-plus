@@ -72,7 +72,10 @@ const y = noGrad(() => layer.forward(constant(x), { srcKeyPaddingMask })); // x:
   unsqueeze sqrt log exp tanh sum mean relu sigmoid gelu softmax
   maskedFill cast`, views `reshape permute transpose slice narrow`, and
   `Variable.concat`; `backward`, `zeroGrad`, `detach`. `matmul` is batched
-  (ndim >= 2, broadcasting batch axes).
+  (ndim >= 2, broadcasting batch axes). `gelu({ approximate: "none" |
+  "tanh" })` defaults to exact erf-GELU since #122 (was tanh), matching
+  PyTorch and tensor-core's `Tensor.gelu()`; its backward differentiates
+  whichever mode ran.
 - `grad.of` / `grad.valueAndGrad`; `noGrad` / `enableGrad` / `isGradEnabled`.
 - `nn`: `Parameter`, `Module` (`parameters`, `namedParameters`,
   `namedModules`, `stateDict`, `loadStateDict(dict, { strict,
@@ -114,8 +117,9 @@ const y = noGrad(() => layer.forward(constant(x), { srcKeyPaddingMask })); // x:
   `attnMask` is `true` = *may attend*; `MultiheadAttention` /
   `TransformerEncoderLayer` masks are `true` = *hidden*. A fully-masked
   row is NaN (as in PyTorch).
-- **`Variable.gelu()` defaults to the tanh approximation** (tensor-core's
-  `gelu`); PyTorch's default is exact — pass `{ approximate: "none" }`.
+- **`Variable.gelu()` defaults to exact erf-GELU** (since #122; it was the
+  tanh approximation before), same as PyTorch and tensor-core's
+  `Tensor.gelu()` — pass `{ approximate: "tanh" }` for the old numbers.
   `GeGLU`, `geglu` and `TransformerEncoderLayer`'s `"gelu"` use the exact
   form, like PyTorch. `geglu` applies GELU to the *first* half (ModernBERT
   order; diffusers' `GEGLU` uses the second).

@@ -5,7 +5,9 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { ComplexNumber } from "@johnhenry/math-plus-scalar-types";
 import { ComplexTensor, fft2, fftshift, ifft2, ifftshift } from "../src/index.ts";
 
