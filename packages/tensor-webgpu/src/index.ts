@@ -40,7 +40,23 @@ export {
   type SubgroupMatrixGemmConfig,
   type SubgroupMatrixSyntax,
 } from "./gemm-kernels.ts";
-export { runQKT, runSoftmax, runWeightedSum } from "./attention.ts";
+export {
+  runQKT,
+  runSoftmax,
+  runWeightedSum,
+  runAttention,
+  planAttention,
+  type AttentionOptions,
+  type AttentionPlan,
+} from "./attention.ts";
+export {
+  fastAttentionWGSL,
+  genericAttentionWGSL,
+  genericAttentionConfig,
+  type AttentionKernel,
+  type AttentionVariant,
+  type GenericAttentionConfig,
+} from "./attention-kernels.ts";
 export { compileIRToWGSL, type ElementwiseWGSL } from "./fusion-wgsl.ts";
 export { runElementwiseWGSL } from "./elementwise.ts";
 export {
@@ -58,6 +74,21 @@ export {
   dispatchCompute,
   getOrCreateComputePipeline,
   pipelineCacheSize,
+  getKernel,
+  getKernelChecked,
+  parseWGSLBindings,
+  dispatchKernel,
+  writeBytes,
+  configureGPURuntime,
+  gpuRuntimeStats,
+  startProfiling,
+  stopProfiling,
+  type BindingKind,
+  type ComputeKernel,
+  type DispatchOptions,
+  type GPURuntimeOptions,
+  type GPURuntimeStats,
+  type KernelTiming,
   workgroupsFor,
   type SizedBuffer,
 } from "./gpu-runtime.ts";

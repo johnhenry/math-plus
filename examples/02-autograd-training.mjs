@@ -19,11 +19,12 @@ const vg = grad.valueAndGrad((v) => v.mul(v).sum());
 const { value, grad: g } = vg(Tensor.from([3, 4], { dtype: "f64" }));
 console.log(value.item(), g.toArray()); // 25 [6, 8]
 
-// Train y = 3x + 2 with a Linear layer. NOTE: nn.Linear initializes at f64,
-// and tensor-core has no implicit promotion — inputs must be f64 too.
+// Train y = 3x + 2 with a Linear layer. NOTE: nn.* parameters default to
+// f32 (pass { dtype: "f64" } to a layer for f64), and tensor-core has no
+// implicit promotion — inputs must match the parameters' dtype.
 const xs = [0, 1, 2, 3, 4];
-const X = Tensor.from(xs, { dtype: "f64" }).reshape([5, 1]);
-const Y = Tensor.from(xs.map((v) => 3 * v + 2), { dtype: "f64" }).reshape([5, 1]);
+const X = Tensor.from(xs, { dtype: "f32" }).reshape([5, 1]);
+const Y = Tensor.from(xs.map((v) => 3 * v + 2), { dtype: "f32" }).reshape([5, 1]);
 
 // Telemetry is opt-in: install a sink and optimizers emit optim/gradNorm
 // (the norm isn't even computed when no sink is installed).

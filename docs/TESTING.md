@@ -166,6 +166,27 @@ independent of both `tensor-autograd`'s reverse-mode tape and finite differences
 (`adapters/adapter-math/test/test-utils.test.ts`) validate it against finite differences AND
 against `tensor-autograd`'s `Variable`/`grad.of` on real scalar/multivariate functions.
 
+## PyTorch oracle (tensor-autograd)
+
+`packages/tensor-autograd/test/transformer.test.ts` and `test/safetensors.test.ts` check every
+`Variable` view op and transformer layer (`scaledDotProductAttention`, `MultiheadAttention`,
+`RotaryEmbedding`, `LayerNorm(bias=False)`, `TransformerEncoderLayer`, `GeGLU`) against PyTorch —
+forward output AND the gradient of every input and parameter, for a seeded random upstream
+gradient — via one batched subprocess per test file (`packages/tensor-autograd/scripts/torch_oracle.py`).
+Layers ship their JS `stateDict()`, which the oracle loads with `load_state_dict(strict=True)`, so
+parameter *names* are checked against PyTorch's too. The safetensors tests additionally need
+Python's `safetensors` and cover both directions (JS-written file into torch; torch-written f16
+file into JS f16/f32 modules).
+
+Python resolution: `$MATH_PLUS_TORCH_ORACLE_PYTHON`, else `$MATH_PLUS_ORACLE_PYTHON`, else `python3`
+on PATH; same skip-don't-fail contract (no `import torch` → skip). Tolerances: f64 `rtol 1e-9`,
+f32 `rtol 2e-4` (`TOL` in `test/torch-oracle.ts`). On NixOS:
+
+```bash
+TORCH_PY=$(nix-shell -p "python3.withPackages(ps: with ps; [torch safetensors numpy])" --run "which python3")
+MATH_PLUS_TORCH_ORACLE_PYTHON=$TORCH_PY npm test -w @johnhenry/math-plus-tensor-autograd
+```
+
 ## Python-side interop tests (`packages/interop-python`)
 
 `johnhenry-math-plus-interop` is a PyPI package outside the npm/Cargo workspaces (see docs/RELEASING.md) — its
@@ -212,7 +233,12 @@ result. Individual tests call `getHarness()` and `t.skip(reason)` when unavailab
 GEMM correctness (`test/gemm.test.ts`) additionally uses a NumPy float64 oracle
 (`packages/tensor-webgpu/scripts/gemm_oracle.py`, same `$MATH_PLUS_ORACLE_PYTHON` / `python3`
 resolution and skip-don't-fail rule as above), with error bounds derived from `|A|·|B|` rather than
-hand-tuned per case. A healthy local run shows `skipped 0`; the one test that skips on adapters
+hand-tuned per case. Fused attention (`test/flash-attention.test.ts`) uses a second NumPy oracle
+(`packages/tensor-webgpu/scripts/attention_oracle.py`, same resolution and skip rule). The
+`queue.writeBuffer` byteOffset regression (`test/write-buffer.test.ts`) also runs a standalone
+Bun script, `packages/tensor-webgpu/test/bun/write-buffer-offset.bun.ts`, with `bun` from `PATH`;
+the bug it guards against exists only under Bun, and the node:test suite runs under Node. That
+test skips when no `bun` binary is on `PATH`. A healthy local run shows `skipped 0`; the one test that skips on adapters
 without f32 8x8x8 subgroup matrices (anything but Apple GPUs today) says so in its skip reason.
 
 Resolution order for the Chrome binary: `$MATH_PLUS_CHROME_PATH` (explicit override), else the usual

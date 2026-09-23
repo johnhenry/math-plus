@@ -5,8 +5,58 @@
  * `Parameter`/`Module` instances via a reflection pass over own properties,
  * per the source design's explicit preference.
  */
-import { Tensor, random, allocate, isBigIntDType, type AnyTypedArray, type Rng } from "@johnhenry/math-plus-tensor-core";
+import { Tensor, random, allocate, isBigIntDType, isHalfDType, type AnyTypedArray, type DType, type Rng } from "@johnhenry/math-plus-tensor-core";
 import { Variable, constant } from "./variable.ts";
+import { LEGACY_LINEAR_LAYOUT } from "./io.ts";
+
+/**
+ * Parameter storage dtypes (issue #123). `f32` is the default everywhere.
+ * `f16`/`bf16` are STORAGE-only: tensor-core cannot compute in half
+ * precision, so layers upcast such parameters to the input's dtype on the
+ * fly (differentiably, via `Variable.cast`). That makes half parameters fine
+ * for inference and checkpoint fidelity, but NOT for training — `optim.*`
+ * updates run tensor-core arithmetic on the parameter itself, which throws
+ * for half dtypes. Train in f32/f64.
+ */
+export type ParamDType = "f32" | "f64" | "f16" | "bf16";
+
+/** Uniform(-k, k) init in `dtype` (half dtypes are drawn in f32, then rounded). */
+function uniformParam(shape: number[], k: number, dtype: ParamDType, rng: Rng | undefined): Tensor {
+  const drawDtype = isHalfDType(dtype) ? "f32" : dtype;
+  const t = random.uniform(shape, { min: -k, max: k, dtype: drawDtype, rng });
+  return drawDtype === dtype ? t : t.cast(dtype);
+}
+
+function filledParam(shape: number[], value: number, dtype: ParamDType): Tensor {
+  return Tensor.full(shape, value, { dtype });
+}
+
+/**
+ * `p` as seen by a computation in `dtype`: unchanged if it already matches
+ * or is a full-precision dtype (a real f32-vs-f64 mismatch should still hit
+ * tensor-core's loud no-implicit-promotion error), upcast if it is a
+ * half-precision storage dtype.
+ */
+export function asCompute(p: Variable, dtype: DType): Variable {
+  return p.dtype !== dtype && isHalfDType(p.dtype) ? p.cast(dtype) : p;
+}
+
+export interface LoadStateDictOptions {
+  /**
+   * Default `true`: every module parameter must be present and every dict key
+   * must name a parameter. `false` loads the intersection and ignores the
+   * rest (PyTorch's `strict=False`; useful for checkpoints carrying buffers or
+   * heads you don't model). Shape mismatches ALWAYS throw.
+   */
+  strict?: boolean;
+  /**
+   * Treat `nn.Linear` weights in `dict` as the pre-#123 `[in, out]` layout
+   * and transpose them on load. Set automatically for dicts returned by
+   * `io.loadCheckpoint` on version-1 files; pass it yourself only for old
+   * state dicts obtained some other way.
+   */
+  legacyLinearLayout?: boolean;
+}
 
 /** A leaf Variable that always requires grad and is collected by `Module.parameters()`. */
 export class Parameter extends Variable {
@@ -62,28 +112,82 @@ export abstract class Module {
   }
 
   /**
+   * Every sub-`Module` reachable through own-property fields, keyed by dotted
+   * path, INCLUDING this module itself under `""` (PyTorch's
+   * `named_modules()`).
+   */
+  namedModules(): Record<string, Module> {
+    const found: Record<string, Module> = { "": this };
+    for (const key of Object.keys(this)) {
+      const v = (this as unknown as Record<string, unknown>)[key];
+      if (v instanceof Module) {
+        for (const [subKey, m] of Object.entries(v.namedModules())) {
+          found[subKey === "" ? key : `${key}.${subKey}`] = m;
+        }
+      }
+    }
+    return found;
+  }
+
+  /**
    * Reassigns each named `Parameter`'s mutable `.value` from `dict` (the
    * SAME "leaf reassignment between steps" mechanism `optim.*` already uses
    * — see `Variable.value`'s own doc comment: a JS object-reference repoint,
-   * not an in-place Tensor mutation). Throws naming any parameter this
-   * module has that's missing from `dict`, or any `dict` key that doesn't
-   * match a real parameter — a checkpoint silently loading onto the wrong
-   * architecture is exactly the kind of mistake that should be loud, not
-   * silently partial.
+   * not an in-place Tensor mutation).
+   *
+   * PyTorch `load_state_dict` semantics (issue #123):
+   * - strict by default — throws naming any parameter missing from `dict`,
+   *   or any `dict` key that doesn't match a real parameter (a checkpoint
+   *   silently loading onto the wrong architecture should be loud); see
+   *   {@link LoadStateDictOptions.strict}.
+   * - shapes must match exactly (always checked, throws otherwise).
+   * - values are CAST to the parameter's existing dtype (like
+   *   `param.copy_(src)`): an f16 safetensors checkpoint loads into f32
+   *   parameters, an old f64 checkpoint into today's f32 default. Construct
+   *   the module with `{ dtype }` to choose the storage dtype.
+   * - pre-#123 `[in, out]` Linear weights are transposed when the dict is
+   *   marked legacy — see {@link LoadStateDictOptions.legacyLinearLayout}.
    */
-  loadStateDict(dict: Readonly<Record<string, Tensor>>): void {
+  loadStateDict(dict: Readonly<Record<string, Tensor>>, options: LoadStateDictOptions = {}): void {
+    const strict = options.strict ?? true;
+    const legacy =
+      options.legacyLinearLayout ?? (dict as unknown as Record<symbol, unknown>)[LEGACY_LINEAR_LAYOUT] === true;
     const named = this.namedParameters();
     const moduleKeys = new Set(Object.keys(named));
     const dictKeys = new Set(Object.keys(dict));
-    for (const key of moduleKeys) {
-      if (!dictKeys.has(key)) throw new Error(`loadStateDict: missing parameter "${key}" in the given state dict`);
+    if (strict) {
+      for (const key of moduleKeys) {
+        if (!dictKeys.has(key)) throw new Error(`loadStateDict: missing parameter "${key}" in the given state dict`);
+      }
+      for (const key of dictKeys) {
+        if (!moduleKeys.has(key)) throw new Error(`loadStateDict: state dict has unexpected parameter "${key}" (not in this module)`);
+      }
     }
-    for (const key of dictKeys) {
-      if (!moduleKeys.has(key)) throw new Error(`loadStateDict: state dict has unexpected parameter "${key}" (not in this module)`);
+
+    const legacyWeights = new Set<string>();
+    if (legacy) {
+      for (const [path, m] of Object.entries(this.namedModules())) {
+        if (m instanceof Linear) legacyWeights.add(path === "" ? "weight" : `${path}.weight`);
+      }
     }
+
+    // Validate everything before assigning anything: a failed load must not
+    // leave the module half-updated.
+    const updates: Array<[Parameter, Tensor]> = [];
     for (const [name, p] of Object.entries(named)) {
-      p.value = dict[name] as Tensor;
+      if (!dictKeys.has(name)) continue;
+      let t = dict[name] as Tensor;
+      if (legacyWeights.has(name) && t.ndim === 2) t = t.transpose().contiguous();
+      const want = p.value.shape;
+      if (t.ndim !== want.length || t.shape.some((d, i) => d !== want[i])) {
+        throw new Error(
+          `loadStateDict: shape mismatch for "${name}": checkpoint [${t.shape}] vs parameter [${want}]` +
+            (legacy ? "" : " (a pre-#123 [in, out] Linear weight? see the legacyLinearLayout option)"),
+        );
+      }
+      updates.push([p, t.dtype === p.value.dtype ? t : t.cast(p.value.dtype)]);
     }
+    for (const [p, t] of updates) p.value = t;
   }
 
   zeroGrad(): void {
@@ -91,43 +195,58 @@ export abstract class Module {
   }
 }
 
+/**
+ * `y = x W^T + b` with PyTorch's layout (issue #123): `weight` is
+ * `[outFeatures, inFeatures]`, `bias` is `[outFeatures]` — so PyTorch, Hugging
+ * Face, MLX and safetensors checkpoints load with no transposes.
+ *
+ * BREAKING vs. <= 0.2: weights used to be `[in, out]` and always f64. Old
+ * MPCK checkpoints still load (see `io.loadCheckpoint` /
+ * `LoadStateDictOptions.legacyLinearLayout`); code that indexed
+ * `linear.weight.value` directly must swap its axes.
+ *
+ * `x` may have any number of leading batch axes (`[..., in] -> [..., out]`),
+ * or be 1-D (`[in] -> [out]`). Init matches PyTorch's default distribution
+ * (uniform(-k, k), k = 1/sqrt(in)) but not its RNG stream.
+ */
 export class Linear extends Module {
   readonly weight: Parameter;
   readonly bias: Parameter | null;
+  readonly inFeatures: number;
+  readonly outFeatures: number;
 
   constructor(
     inFeatures: number,
     outFeatures: number,
-    options: { bias?: boolean; rng?: Rng } = {},
+    options: { bias?: boolean; rng?: Rng; dtype?: ParamDType } = {},
   ) {
     super();
+    this.inFeatures = inFeatures;
+    this.outFeatures = outFeatures;
     const useBias = options.bias ?? true;
-    // PyTorch's nn.Linear default init: uniform(-k, k), k = 1/sqrt(inFeatures).
+    const dtype = options.dtype ?? "f32";
     const k = 1 / Math.sqrt(inFeatures);
-    this.weight = new Parameter(
-      random.uniform([inFeatures, outFeatures], { min: -k, max: k, dtype: "f64", rng: options.rng }),
-    );
-    this.bias = useBias
-      ? new Parameter(
-          random.uniform([outFeatures], { min: -k, max: k, dtype: "f64", rng: options.rng }),
-        )
-      : null;
+    this.weight = new Parameter(uniformParam([outFeatures, inFeatures], k, dtype, options.rng));
+    this.bias = useBias ? new Parameter(uniformParam([outFeatures], k, dtype, options.rng)) : null;
   }
 
   forward(x: Variable): Variable {
-    const y = x.matmul(this.weight);
-    return this.bias ? y.add(this.bias) : y;
+    if (x.ndim === 1) return this.forward(x.reshape([1, x.shape[0] as number])).reshape([this.outFeatures]);
+    const y = x.matmul(asCompute(this.weight, x.dtype).transpose());
+    return this.bias ? y.add(asCompute(this.bias, x.dtype)) : y;
   }
 }
 
 export class Embedding extends Module {
   readonly weight: Parameter;
 
-  constructor(numEmbeddings: number, embeddingDim: number, options: { rng?: Rng } = {}) {
+  /** `dtype` default `"f32"` (was always f64 before issue #123). Half dtypes gather in half, then upcast the gathered rows to f32. */
+  constructor(numEmbeddings: number, embeddingDim: number, options: { rng?: Rng; dtype?: ParamDType } = {}) {
     super();
-    this.weight = new Parameter(
-      random.normal([numEmbeddings, embeddingDim], { std: 1, dtype: "f64", rng: options.rng }),
-    );
+    const dtype = options.dtype ?? "f32";
+    const drawDtype = isHalfDType(dtype) ? "f32" : dtype;
+    const w = random.normal([numEmbeddings, embeddingDim], { std: 1, dtype: drawDtype, rng: options.rng });
+    this.weight = new Parameter(drawDtype === dtype ? w : w.cast(dtype));
   }
 
   /**
@@ -148,9 +267,13 @@ export class Embedding extends Module {
    */
   forward(indices: Tensor): Variable {
     const idxArray = [...(indices.toArray() as (number | bigint)[])].map(Number);
-    const gathered = this.weight.value.take(idxArray, { axis: 0 });
+    const storageDtype = this.weight.value.dtype;
+    const gatheredRaw = this.weight.value.take(idxArray, { axis: 0 });
+    // Half storage: hand back f32 rows; the gradient is built in f32 and
+    // rounded back to the storage dtype.
+    const dtype: DType = isHalfDType(storageDtype) ? "f32" : storageDtype;
+    const gathered = dtype === storageDtype ? gatheredRaw : gatheredRaw.cast(dtype);
     const [numEmbeddings, embeddingDim] = this.weight.value.shape as [number, number];
-    const dtype = this.weight.value.dtype;
 
     return Variable.fromOp(gathered, [this.weight], (g) => {
       const gRows = g.contiguous().toArray() as number[][];
@@ -185,21 +308,30 @@ export class Embedding extends Module {
         }
       }
 
-      return [Tensor.fromTypedArray(flat, [numEmbeddings, embeddingDim], { dtype })];
+      const grad = Tensor.fromTypedArray(flat, [numEmbeddings, embeddingDim], { dtype });
+      return [dtype === storageDtype ? grad : grad.cast(storageDtype)];
     });
   }
 }
 
+/**
+ * Layer normalization over the LAST axis (biased variance, like PyTorch).
+ * `bias: false` drops the additive term entirely (PyTorch >= 2.1's
+ * `LayerNorm(bias=False)`, used by ModernBERT and `TransformerEncoderLayer(
+ * bias=False)`) — `bias` is then `null` and absent from the state dict.
+ * `dtype` default `"f32"` (was always f64 before issue #123).
+ */
 export class LayerNorm extends Module {
   readonly weight: Parameter;
-  readonly bias: Parameter;
+  readonly bias: Parameter | null;
   readonly eps: number;
 
-  constructor(normalizedShape: number, options: { eps?: number } = {}) {
+  constructor(normalizedShape: number, options: { eps?: number; bias?: boolean; dtype?: ParamDType } = {}) {
     super();
+    const dtype = options.dtype ?? "f32";
     this.eps = options.eps ?? 1e-5;
-    this.weight = new Parameter(Tensor.ones([normalizedShape], { dtype: "f64" }));
-    this.bias = new Parameter(Tensor.zeros([normalizedShape], { dtype: "f64" }));
+    this.weight = new Parameter(filledParam([normalizedShape], 1, dtype));
+    this.bias = (options.bias ?? true) ? new Parameter(filledParam([normalizedShape], 0, dtype)) : null;
   }
 
   /** Normalizes over the LAST axis of `x`. */
@@ -212,7 +344,8 @@ export class LayerNorm extends Module {
     const normalized = centered.div(std);
     // weight/bias shape [normalizedShape] broadcasts against [..., normalizedShape]
     // via ordinary trailing-axis alignment — no unsqueeze needed here.
-    return normalized.mul(this.weight).add(this.bias);
+    const scaled = normalized.mul(asCompute(this.weight, x.dtype));
+    return this.bias ? scaled.add(asCompute(this.bias, x.dtype)) : scaled;
   }
 }
 
