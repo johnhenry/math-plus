@@ -26,7 +26,7 @@ function randomMatrix(size: number, seed: number): Float32Array {
   return out;
 }
 
-test("runGemmWGSL: a second call (any shape) reuses the cached shader module + compute pipeline instead of recompiling", async (t) => {
+test("runGemmWGSL: a second call with a different shape in the same kernel variant reuses the cached shader module + compute pipeline", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) {
     t.skip(`headless WebGPU not available: ${harness.reason}`);
@@ -34,8 +34,8 @@ test("runGemmWGSL: a second call (any shape) reuses the cached shader module + c
   }
   const a1 = randomMatrix(4 * 3, 1);
   const b1 = randomMatrix(3 * 5, 2);
-  const a2 = randomMatrix(6 * 2, 3);
-  const b2 = randomMatrix(2 * 4, 4);
+  const a2 = randomMatrix(6 * 7, 3);
+  const b2 = randomMatrix(7 * 9, 4);
   const bundle = bundleForBrowser([path.join(SRC, "gemm.ts")]);
   const result = await harness.run<{
     shaderModuleCalls: number;
@@ -57,12 +57,14 @@ test("runGemmWGSL: a second call (any shape) reuses the cached shader module + c
     const b1 = new Float32Array(${JSON.stringify(Array.from(b1))});
     await runGemmWGSL(device, a1, b1, 4, 3, 5);
 
-    // A DIFFERENT shape -- GEMM's shader source is shape-independent (m/n/k
-    // travel via a uniform buffer, not baked into the WGSL text), so the
-    // pipeline cache should still hit.
+    // A DIFFERENT shape in the same variant (tiled kernel, K and N both not
+    // multiples of 4 -> scalar loads) -- m/n/k travel via a uniform buffer,
+    // not baked into the WGSL text, so the pipeline cache should still hit.
+    // (Shaders ARE specialized by kernel/dtype/alignment -- planGemm's unit
+    // test in gemm.test.ts pins which shape changes switch variants.)
     const a2 = new Float32Array(${JSON.stringify(Array.from(a2))});
     const b2 = new Float32Array(${JSON.stringify(Array.from(b2))});
-    await runGemmWGSL(device, a2, b2, 6, 2, 4);
+    await runGemmWGSL(device, a2, b2, 6, 7, 9);
 
     return { shaderModuleCalls, pipelineCalls, cacheSizeAfter: pipelineCacheSize(device) };
     `,
@@ -70,7 +72,7 @@ test("runGemmWGSL: a second call (any shape) reuses the cached shader module + c
   );
   assert.equal(result.shaderModuleCalls, 1, "createShaderModule should only run once across two calls");
   assert.equal(result.pipelineCalls, 1, "createComputePipeline should only run once across two calls");
-  assert.equal(result.cacheSizeAfter, 1, "pipeline cache should hold exactly one entry for GEMM_WGSL's fixed source");
+  assert.equal(result.cacheSizeAfter, 1, "pipeline cache should hold exactly one entry for the one tiled variant both shapes use");
 });
 
 test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers instead of allocating new ones", async (t) => {
@@ -220,4 +222,46 @@ test("runQKT/runSoftmax/runWeightedSum never call GPUTensor.fromFloat32Array int
     bundle,
   );
   assert.equal(result, 0, "the attention primitives should never re-upload a GPU-resident intermediate from a host array");
+});
+
+test("runGemm stays GPU-resident: chaining two GEMMs creates no MAP_READ staging buffer and no host re-upload until the caller reads back", async (t) => {
+  const harness = await getHarness();
+  if ("unavailable" in harness) {
+    t.skip(`headless WebGPU not available: ${harness.reason}`);
+    return;
+  }
+  const a = randomMatrix(8 * 12, 21);
+  const b = randomMatrix(12 * 16, 22);
+  const c = randomMatrix(16 * 4, 23);
+  const bundle = bundleForBrowser([path.join(SRC, "gemm.ts")]);
+  const result = await harness.run<{ mapReadDuringChain: number; uploadsDuringChain: number; mapReadAfterReadback: number }>(
+    `
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const A = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(a))}), [8, 12]);
+    const B = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(b))}), [12, 16]);
+    const C = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(c))}), [16, 4]);
+
+    let mapRead = 0;
+    let uploads = 0;
+    const origCreateBuffer = device.createBuffer.bind(device);
+    device.createBuffer = (desc) => { if ((desc.usage & GPUBufferUsage.MAP_READ) !== 0) mapRead++; return origCreateBuffer(desc); };
+    const origFrom = GPUTensor.fromFloat32Array;
+    GPUTensor.fromFloat32Array = (...args) => { uploads++; return origFrom(...args); };
+
+    const AB = await runGemm(device, A, B);
+    const ABC = await runGemm(device, AB, C);
+    const mapReadDuringChain = mapRead;
+    const uploadsDuringChain = uploads;
+    await ABC.toFloat32Array();
+    const mapReadAfterReadback = mapRead;
+    GPUTensor.fromFloat32Array = origFrom;
+    for (const x of [A, B, C, AB, ABC]) x.free();
+    return { mapReadDuringChain, uploadsDuringChain, mapReadAfterReadback };
+    `,
+    bundle,
+  );
+  assert.equal(result.mapReadDuringChain, 0, "no staging/readback buffer while chaining GPU-resident GEMMs");
+  assert.equal(result.uploadsDuringChain, 0, "the intermediate must not round-trip through the host");
+  assert.equal(result.mapReadAfterReadback, 1, "exactly one staging buffer once the caller reads the final result");
 });
