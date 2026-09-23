@@ -81,11 +81,23 @@ test("@johnhenry/math-plus-frame-arrow's package.json lists @johnhenry/math-plus
   const tensorCorePkg = JSON.parse(await fs.readFile(tensorCorePkgPath, "utf8"));
   assert.equal(pkg.dependencies?.["@johnhenry/math-plus-tensor-core"], undefined);
   // A caret range (possibly one of several `||` alternatives, so a 0.x minor
-  // bump of tensor-core doesn't force a major bump here) covering the ACTUAL version.
+  // bump of tensor-core doesn't force a major bump here) that SATISFIES the
+  // actual current version -- checked with caret semantics, not string equality.
   const peerRange: string = pkg.peerDependencies?.["@johnhenry/math-plus-tensor-core"] ?? "";
+  const alternatives = peerRange.split("||").map((r) => r.trim());
+  assert.ok(alternatives.every((r) => /^\^\d+\.\d+\.\d+$/.test(r)), `peer range ${JSON.stringify(peerRange)} must be caret ranges only`);
   assert.ok(
-    peerRange.split("||").map((r) => r.trim()).includes(`^${tensorCorePkg.version}`),
-    `peer range ${JSON.stringify(peerRange)} must include ^${tensorCorePkg.version}`,
+    alternatives.some((r) => caretSatisfies(r, tensorCorePkg.version)),
+    `peer range ${JSON.stringify(peerRange)} must cover tensor-core ${tensorCorePkg.version}`,
   );
   assert.equal(pkg.peerDependenciesMeta?.["@johnhenry/math-plus-tensor-core"]?.optional, true);
 });
+
+/** npm caret semantics for plain x.y.z (no prerelease): ^1.2.3 := >=1.2.3 <2, ^0.2.3 := >=0.2.3 <0.3, ^0.0.3 := 0.0.3. */
+function caretSatisfies(range: string, version: string): boolean {
+  const [a, b, c] = range.slice(1).split(".").map(Number) as [number, number, number];
+  const [x, y, z] = version.split(".").map(Number) as [number, number, number];
+  if (a > 0) return x === a && (y > b || (y === b && z >= c));
+  if (b > 0) return x === 0 && y === b && z >= c;
+  return x === 0 && y === 0 && z === c;
+}
