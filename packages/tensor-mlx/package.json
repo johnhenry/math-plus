@@ -1,0 +1,50 @@
+{
+  "name": "@johnhenry/math-plus-tensor-mlx",
+  "version": "0.0.0",
+  "description": "EXPERIMENTAL: native Apple Silicon (MLX/Metal) arrays for Math Plus on Node and Bun, with explicit transfers to/from tensor-core Tensor — built on @johnhenry/backend-mlx (issue #125, RFC 0001)",
+  "keywords": [
+    "tensor",
+    "mlx",
+    "apple-silicon",
+    "metal",
+    "gpu",
+    "math-plus"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "npm run typecheck && node --test --test-concurrency=1 test/*.test.ts",
+    "test:bun": "bun test test/"
+  },
+  "dependencies": {
+    "@johnhenry/backend-mlx": "^0.1.0",
+    "@johnhenry/math-plus-tensor-core": "^0.0.0",
+    "@johnhenry/tensor-backend": "^0.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnhenry/math-plus.git",
+    "directory": "packages/tensor-mlx"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=26.0.0",
+    "bun": ">=1.2.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/johnhenry/math-plus/tree/main/packages/tensor-mlx"
+}

@@ -132,3 +132,26 @@ IS tested against a live adapter; the WASM-vs-WebGPU crossover itself is a manua
 (`packages/tensor-webgpu/scripts/measure-gemm-threshold.ts`), recorded in
 `docs/spikes/webgpu-baseline.md`, the same way `docs/spikes/wasm-baseline.md` records the
 WASM-vs-pure-JS numbers.
+
+## MLX device tests (`@johnhenry/math-plus-tensor-mlx`, experimental)
+
+Three suites, all **skip-don't-fail** off darwin/arm64 or when no `libmlxc.dylib` resolves
+(`@johnhenry/backend-mlx`'s order: `$LAYA_MLXC_PATH`, the `@johnhenry/backend-mlx-darwin-arm64`
+optional dependency, a local build, Homebrew):
+
+- `test/differential.test.ts` — every op vs a batch NumPy oracle
+  (`packages/tensor-mlx/scripts/numpy_oracle.py`, one Python process for all cases; same
+  `$MATH_PLUS_ORACLE_PYTHON` / `python3` resolution as above). f32 at tight tolerances, f16 on
+  f16-rounded inputs at 2e-2, casts bit-exact vs `astype`.
+- `test/conformance.test.ts` — `@johnhenry/tensor-backend`'s shared conformance suite against the
+  GPU and CPU MLX devices.
+- `test/bridge.test.ts` — explicit-transfer and lifetime rules; its host-view half runs everywhere.
+
+CI's Linux runners skip the MLX parts; on an Apple Silicon machine with numpy a run must show
+**0 skipped** (`npm test -w @johnhenry/math-plus-tensor-mlx` and `npm run test:bun -w …`). Wrap
+runs in the `~/gpu.lock` convention on shared machines:
+
+```bash
+until shlock -p $$ -f ~/gpu.lock; do sleep 3; done
+npm test -w @johnhenry/math-plus-tensor-mlx; rm -f ~/gpu.lock
+```

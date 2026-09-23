@@ -50,6 +50,22 @@ const PACKAGE_DIRS = [
   "scalars/unit",
 ];
 
+/**
+ * npm workspace packages deliberately NOT published to JSR. Every entry needs
+ * a reason; test/manifest-drift.test.ts requires each workspace package to be
+ * in exactly one of PACKAGE_DIRS / JSR_EXCLUDED_DIRS.
+ */
+const JSR_EXCLUDED_DIRS = [
+  // Native (mlx-c over koffi/bun:ffi via @johnhenry/backend-mlx), Node + Bun
+  // on darwin/arm64 only: no Deno.dlopen path exists, so a JSR listing would
+  // advertise a Deno package that cannot load. Revisit if backend-mlx gains
+  // a Deno adapter (RFC 0001, open question 4).
+  "packages/tensor-mlx",
+];
+for (const dir of JSR_EXCLUDED_DIRS) {
+  if (PACKAGE_DIRS.includes(dir)) throw new Error(`${dir} is in both PACKAGE_DIRS and JSR_EXCLUDED_DIRS`);
+}
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -95,5 +111,5 @@ for (const dir of PACKAGE_DIRS) {
 
   const jsrPath = join(ROOT, dir, "jsr.json");
   writeFileSync(jsrPath, `${JSON.stringify(jsrConfig, null, 2)}\n`);
-  console.log(`wrote ${dir}/jsr.json (@johnhenry/${pkg.name}@${pkg.version})`);
+  console.log(`wrote ${dir}/jsr.json (${pkg.name}@${pkg.version})`);
 }

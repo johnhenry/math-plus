@@ -27,6 +27,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | Fuse elementwise expressions | [`tensor-compile`](./packages/tensor-compile) |
 | Go faster on CPU | [`tensor-wasm`](./packages/tensor-wasm) — read its README first; it's a separate storage type, not a drop-in backend |
 | Go faster on GPU | [`tensor-webgpu`](./packages/tensor-webgpu) — browser-only in v1, and read its "honest threshold" section |
+| Native Apple Silicon GPU from Node/Bun (experimental) | [`tensor-mlx`](./packages/tensor-mlx) — MLX via `@johnhenry/backend-mlx`; darwin/arm64 only; prototype for [RFC 0001](./docs/rfcs/0001-device-backends.md) |
 | FFTs / filters / peaks | [`fft`](./packages/fft), [`signal`](./packages/signal) |
 | Resize/normalize images | [`image`](./packages/image) |
 | Dataframes | [`frame-arrow`](./packages/frame-arrow) (+ [`frame-parquet`](./packages/frame-parquet) for Parquet I/O) |
@@ -45,6 +46,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | [`@johnhenry/math-plus-tensor-compile`](./packages/tensor-compile) | Expression IR + elementwise fusion (opt-in); the shared lowering target for WGSL |
 | [`@johnhenry/math-plus-tensor-wasm`](./packages/tensor-wasm) | Rust→WASM kernels (SIMD, arena allocator, zero-alloc `...Into` ops) + opt-in Deno-native FFI |
 | [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU GEMM, attention primitives, IR→WGSL fusion. Chromium-family browsers only. |
+| [`@johnhenry/math-plus-tensor-mlx`](./packages/tensor-mlx) | **Experimental.** MLX (Metal) arrays on Node/Bun with explicit `fromTensor`/`toTensor` transfers, over the `@johnhenry/tensor-backend` contract. darwin/arm64 only; not on JSR. |
 
 ### Signal & media
 
