@@ -25,7 +25,9 @@
  * contention-vs-genuinely-absent distinction in the skip reason.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import * as path from "node:path";
 import { evalWithGrad, type BinaryOp, type IRNode, type UnaryOp } from "@johnhenry/math-plus-tensor-compile";
 import {

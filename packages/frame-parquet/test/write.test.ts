@@ -13,7 +13,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, before, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import {
   Bool,
   Dictionary,
@@ -125,10 +127,10 @@ function sampleNestedFrame(): Frame {
 }
 
 let tmpDir: string;
-test.before(() => {
+before(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "frame-parquet-write-"));
 });
-test.after(() => {
+after(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

@@ -18,7 +18,9 @@
  * would mean a mismatch there too, and an agreement here transfers.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { SpecialFunctions } from "@johnhenry/math";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { compile, type Traced } from "../src/index.ts";

@@ -10,8 +10,9 @@
   "scripts": {
     "build:wasm": "npm run build:wasm -w @johnhenry/math-plus-tensor-wasm",
     "build": "npm run build:wasm && npm run build -w @johnhenry/math-plus-scalar-types -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-telemetry -w @johnhenry/math-plus-tensor-wasm -w @johnhenry/math-plus-tensor-autograd -w @johnhenry/math-plus-tensor-compile -w @johnhenry/math-plus-tensor-webgpu -w @johnhenry/math-plus-frame-arrow -w @johnhenry/math-plus-adapter-math -w @johnhenry/math-plus-unit -w @johnhenry/math-plus-adapter-onnx -w @johnhenry/math-plus-frame-parquet -w @johnhenry/math-plus-fft -w @johnhenry/math-plus-image -w @johnhenry/math-plus-signal -w @johnhenry/math-plus-mcp -w @johnhenry/math-plus-data",
-    "test:manifest": "node --test test/*.test.ts",
+    "test:manifest": "tsc --noEmit -p tsconfig.typecheck.json && node --test test/*.test.ts",
     "test": "npm run test:manifest && npm run test -w @johnhenry/math-plus-scalar-types -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-telemetry -w @johnhenry/math-plus-tensor-wasm -w @johnhenry/math-plus-tensor-autograd -w @johnhenry/math-plus-tensor-compile -w @johnhenry/math-plus-tensor-webgpu -w @johnhenry/math-plus-adapter-math -w @johnhenry/math-plus-unit -w @johnhenry/math-plus-adapter-onnx -w @johnhenry/math-plus-frame-arrow -w @johnhenry/math-plus-frame-parquet -w @johnhenry/math-plus-fft -w @johnhenry/math-plus-image -w @johnhenry/math-plus-signal -w @johnhenry/math-plus-mcp -w @johnhenry/math-plus-data",
+    "test:bun": "node scripts/test-bun.mjs",
     "check": "npm run check --workspaces --if-present",
     "examples": "for f in examples/*.mjs; do case \"$f\" in *10-wasm*) continue;; esac; echo \"== $f\"; node \"$f\" || exit 1; done",
     "examples:all": "for f in examples/*.mjs; do echo \"== $f\"; node \"$f\" || exit 1; done",
@@ -34,7 +35,7 @@
     "typescript": "^5.7.0"
   },
   "engines": {
-    "node": ">=26.0.0"
+    "node": ">=24.0.0"
   },
   "license": "MIT",
   "homepage": "https://opensource.johnhenry.me/math/"

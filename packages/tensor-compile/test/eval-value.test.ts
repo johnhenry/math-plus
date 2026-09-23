@@ -11,7 +11,9 @@
  * forward-vs-backward-vs-forward-again value mismatch elsewhere.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { evalValue, evalWithGrad, type BinaryOp, type CmpOp, type IRNode, type UnaryOp } from "../src/index.ts";
 
 function agree(node: IRNode, inputs: readonly number[], numInputs: number, label: string): void {

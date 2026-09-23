@@ -6,7 +6,9 @@
  * native kernel sits ALONGSIDE that reference path, not replacing it.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { linalg } from "@johnhenry/math-plus-adapter-math";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { Kernels } from "../src/index.ts";
