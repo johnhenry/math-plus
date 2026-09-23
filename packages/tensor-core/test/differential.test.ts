@@ -358,6 +358,81 @@ test("differential vs NumPy", { skip }, async (t) => {
     }
   });
 
+  // ---- f16/bf16 (storage dtypes: exact bit-pattern comparisons) ----------
+
+  /** Values exercising every rounding regime of binary16/bfloat16. */
+  const HALF_EDGE_VALUES = [
+    0, -0, 1, -1, 1.5, 0.1, -2.25, 1 / 3, 65504, 65519.99, 65520, 70000, -1e6,
+    Infinity, -Infinity, 2 ** -14, 2 ** -24, 2 ** -25, 3 * 2 ** -26, 2 ** -26,
+    6e-8, 1e-10, 1 + 2 ** -11, 1 + 3 * 2 ** -11, 2049, 2051, 1 + 2 ** -8,
+    1 + 3 * 2 ** -8, 3.4e38, 3.4e38 * 1.01, 1e-40, 257, 259, 0.2, -123.456,
+  ];
+
+  await t.test("cast f64/f32 -> f16 matches NumPy astype(float16) bit-for-bit (RNE, subnormals, overflow)", () => {
+    for (const src of ["f64", "f32"] as const) {
+      const rnd = Array.from({ length: 200 }, () => (Math.random() - 0.5) * 10 ** (Math.random() * 12 - 7));
+      const a = Tensor.from([...HALF_EDGE_VALUES, Number.NaN, ...rnd], { dtype: src });
+      const aPath = saveTensor(dir, `f16-src-${src}`, a);
+      const expected = runOracle(dir, { op: "cast", inputs: [aPath], dtype: "f16" });
+      assert.equal(expected.dtype, "f16"); // NumPy wrote <f2 and tensor-core read it
+      assertClose(a.cast("f16"), expected, "cast"); // exact: raw bit patterns
+    }
+  });
+
+  await t.test("cast f16 -> f32/f64/i32/i64/bool matches NumPy for every finite f16 bit pattern", () => {
+    const bits = new Uint16Array(65536);
+    for (let i = 0; i < bits.length; i++) bits[i] = i;
+    const all = Tensor.fromTypedArray(bits, [65536], { dtype: "f16" });
+    const aPath = saveTensor(dir, "f16-all", all);
+    for (const dtype of ["f32", "f64"] as const) {
+      const expected = runOracle(dir, { op: "cast", inputs: [aPath], dtype });
+      const actual = all.cast(dtype);
+      for (let i = 0; i < 65536; i++) {
+        const av = actual.data[i] as number;
+        const ev = expected.data[i] as number;
+        assert.ok(Object.is(av, ev) || (Number.isNaN(av) && Number.isNaN(ev)), `bits 0x${i.toString(16)}: ${av} vs ${ev}`);
+      }
+    }
+    // Integer targets: only values that are finite and in range (NumPy's
+    // out-of-range float->int conversion is undefined behaviour in C).
+    const finiteSmall = Tensor.from(
+      Array.from({ length: 400 }, (_, i) => (i - 200) * 0.37),
+      { dtype: "f16" },
+    );
+    const fPath = saveTensor(dir, "f16-small", finiteSmall);
+    for (const dtype of ["i32", "i64", "bool"] as const) {
+      const expected = runOracle(dir, { op: "cast", inputs: [fPath], dtype });
+      assertClose(finiteSmall.cast(dtype), expected, "cast");
+    }
+  });
+
+  await t.test("cast integers -> f16 rounds like NumPy (large ints round, not wrap)", () => {
+    const a = Tensor.from([0, 1, 2047, 2049, 2051, 4097, 65504, 65519, 65520, 100000, -3001], { dtype: "i32" });
+    const aPath = saveTensor(dir, "i32-to-f16", a);
+    const expected = runOracle(dir, { op: "cast", inputs: [aPath], dtype: "f16" });
+    assertClose(a.cast("f16"), expected, "cast");
+  });
+
+  await t.test("cast f32 -> bf16 matches the reference RNE bit trick bit-for-bit", () => {
+    const rnd = Array.from({ length: 300 }, () => (Math.random() - 0.5) * 10 ** (Math.random() * 60 - 30));
+    // Round through f32 first so the JS (direct-from-double) and the
+    // reference (from-f32) conversions see the same input.
+    const a = Tensor.from([...HALF_EDGE_VALUES, ...rnd], { dtype: "f32" });
+    const aPath = saveTensor(dir, "bf16-src", a);
+    const expected = runOracle(dir, { op: "bf16_bits", inputs: [aPath] });
+    const actual = a.cast("bf16");
+    for (let i = 0; i < a.size; i++) {
+      assert.equal(actual.data[i], Number(expected.data[i]), `element ${i} (${a.at(i)})`);
+    }
+  });
+
+  await t.test(".npy <f2 round-trips through NumPy (read and write)", () => {
+    const a = Tensor.from([1.5, -0.1, 65504, 2 ** -24], { dtype: "f16" });
+    const aPath = saveTensor(dir, "f16-npy", a);
+    const expected = runOracle(dir, { op: "f16_bits", inputs: [aPath] });
+    for (let i = 0; i < a.size; i++) assert.equal(a.data[i], expected.data[i]);
+  });
+
   await t.test("comparisons match NumPy, incl. broadcasting", () => {
     const a = randomTensor([4, 3], "f64");
     const b = randomTensor([3], "f64");
