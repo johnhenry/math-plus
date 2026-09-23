@@ -37,7 +37,7 @@ test("evalValue agrees with evalWithGrad's .value: every UnaryOp", () => {
     "asin", "acos", "atan", "sinh", "cosh", "tanh", "cot", "sec", "csc",
     "asinh", "acosh", "atanh", "coth", "sech", "csch", "acot", "asec", "acsc",
     "acoth", "asech", "acsch", "abs", "log10", "log2", "cbrt", "floor",
-    "ceil", "round", "sign", "trunc", "expm1", "log1p", "erf",
+    "ceil", "round", "sign", "trunc", "expm1", "log1p", "erf", "gelu_tanh",
   ];
   // A domain-safe-ish positive value works for every op above (acosh/asech
   // need x >= 1 / 0 < x <= 1 respectively; the two probes below cover both).

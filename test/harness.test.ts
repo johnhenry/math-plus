@@ -70,6 +70,30 @@ test("bun shim: t.skip is reported once per test and does not fail it", async ()
   assert.deepEqual(lines, ["[skip] skipper: x"]);
 });
 
+test("bun shim: t.test(name, { skip }, fn) skips the subtest and t.diagnostic prints", async () => {
+  const { registered, mod } = fakeBun();
+  const ran: string[] = [];
+  makeTest(mod).test("parent", async (t) => {
+    t.diagnostic("hello");
+    await t.test("skipped", { skip: "no oracle" }, () => {
+      ran.push("skipped");
+    });
+    await t.test("ran", {}, () => {
+      ran.push("ran");
+    });
+  });
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (s: string) => lines.push(s);
+  try {
+    await registered[0]!.fn!();
+  } finally {
+    console.log = orig;
+  }
+  assert.deepEqual(ran, ["ran"]);
+  assert.deepEqual(lines, ["# parent: hello", "[skip] skipped: no oracle"]);
+});
+
 test("spyMethod counts calls, forwards them, and restores the original", () => {
   class C {
     v = 2;

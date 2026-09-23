@@ -60,16 +60,25 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
 - **Copies:** `contiguous`, `take`, `gather`, `mask`, `cast`, `pad`,
   `split`, `repeat`, `flip`, `roll`, `nonzero`, `clip`, `flatten`.
 - **Math:** `add/sub/mul/div` (tensor or scalar), full unary set (`sqrt`,
-  `exp`, `log*`, trig, hyperbolic, `relu`/`sigmoid`/`gelu`/`softmax`),
+  `exp`, `log*`, trig, hyperbolic, `erf`/`erfc`, `relu`/`sigmoid`/`gelu`/`softmax`),
   `matmul`, `dot`, comparisons/logic, reductions (`sum mean min max
   argmin argmax variance std prod cumsum cumprod sort argsort topK`).
 - **I/O:** `toNpy()` / `Tensor.fromNpy(bytes)` — NPY v1.0.
+- **Special functions (scalar):** `erf`, `erfc`, `gelu(x, approximate)`,
+  `geluErf`, `geluTanh`, `geluDerivative` — the monorepo's ONE canonical
+  double-precision erf (`src/special.ts`, ~1e-15 relative, SciPy-verified).
+  tensor-compile's IR and tensor-webgpu's WGSL `erf` derive from it; don't
+  add another.
 - **Random:** `random.seed`, `random.uniform`, `random.normal`,
   `random.randint`; plus `broadcastShapes`, `allocate`, `BYTES_PER_ELEMENT`,
   `isBigIntDType`.
 
 ## Traps
 
+- **`gelu()` defaults to EXACT erf-GELU** (`approximate: "none"`, like
+  PyTorch's `nn.GELU()`), since issue #122. Earlier versions always used the
+  tanh approximation; pass `gelu({ approximate: "tanh" })` for those numbers
+  (they differ by up to ~4.7e-4).
 - **Default dtype is `f32`** for `zeros`/`ones`/`full`/`arange`/`from`
   (`random.randint` defaults to `i32`). Most numerical work here wants an
   explicit `{ dtype: "f64" }`.
@@ -82,10 +91,23 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
   integer conversion **truncates toward zero**, not rounds.
 - **`fromTypedArray` does not copy** — aliasing is your problem.
 - **`.npy` scope:** little-endian, C-order only (`fortran_order: True`
-  throws); `f16`/`bf16` have no `.npy` representation and throw. A
-  non-contiguous view serializes packed.
-- `f16`/`bf16` are declared in the `DType` union but stored as `Uint16Array`
-  until `Float16Array` is universal.
+  throws); `f16` round-trips as `<f2`; `bf16` has no NumPy dtype and
+  throws. A non-contiguous view serializes packed.
+- **`f16`/`bf16` are storage dtypes.** Elements are raw IEEE binary16 /
+  bfloat16 bit patterns in a `Uint16Array` (the layout safetensors, ONNX
+  Runtime and WebGPU use — zero-copy across those boundaries). Values
+  cross the boundary correctly: `from`/`full`/`arange`/`random.*` encode
+  (round-to-nearest-even, direct from the double), `at`/`item`/`toArray`
+  decode, and `cast()` converts values both ways (bit-for-bit equal to
+  NumPy's `astype(float16)`; bf16 equal to the standard f32→bf16 RNE).
+  Structural ops (views, `contiguous`, `concat`/`stack`/`take`/`flip`/
+  `pad`/`where`/`mask`…) just move bits and work. **Arithmetic, comparison,
+  reduction, sort and matmul kernels throw** `TypeError` on half dtypes —
+  `cast("f32")`, compute, `cast("f16")` back. (Computing internally in f32
+  would be implicit promotion, which this package forbids; a fused f16
+  kernel is a WASM/WebGPU concern.) `.data` of a half tensor is bits, not
+  values. The codec is exported as `encodeHalf`/`decodeHalf`/`isHalfDType`
+  — the one f16/bf16 implementation in Math Plus.
 - `shape` is frozen; an `Rng`'s state advances between calls (not reset).
 
 ## Tests

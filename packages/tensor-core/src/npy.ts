@@ -2,8 +2,9 @@
  * NPY v1.0 serialization (Tensor-agnostic: works on {data, shape, dtype}).
  *
  * Little-endian only, C-order only (fortran_order: True throws — M1 scope).
- * Dtype coverage matches tensor-core's fixed-width table; f16/bf16 excluded
- * until a portable Float16 story exists.
+ * Dtype coverage matches tensor-core's fixed-width table, including f16
+ * (`<f2`, IEEE binary16 — stored as the same Uint16Array bit patterns, so
+ * no conversion is needed). bf16 has no NumPy dtype and throws.
  */
 import {
   allocate,
@@ -23,6 +24,7 @@ const DTYPE_TO_DESCR: Partial<Record<DType, string>> = {
   i32: "<i4",
   u64: "<u8",
   i64: "<i8",
+  f16: "<f2",
   f32: "<f4",
   f64: "<f8",
 };

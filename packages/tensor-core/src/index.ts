@@ -10,11 +10,22 @@
  */
 import {
   allocate,
+  decodeHalf,
+  encodeHalf,
   isBigIntDType,
+  isHalfDType,
   type AnyTypedArray,
   type DType,
 } from "./dtype.ts";
 import { parseNpy, serializeNpy } from "./npy.ts";
+import {
+  checkGeluApproximate,
+  erf as erfScalar,
+  erfc as erfcScalar,
+  geluErf,
+  geluTanh,
+  type GeluApproximate,
+} from "./special.ts";
 import {
   fillFrom,
   normalSample,
@@ -28,12 +39,29 @@ import {
 export {
   allocate,
   isBigIntDType,
+  isHalfDType,
+  encodeHalf,
+  decodeHalf,
   BYTES_PER_ELEMENT,
   type AnyTypedArray,
   type DType,
   type TypedArrayFor,
 } from "./dtype.ts";
 export { Rng, type RandomOptions } from "./random.ts";
+export {
+  erf,
+  erfc,
+  gelu,
+  geluErf,
+  geluTanh,
+  geluDerivative,
+  erfSeries,
+  erfcContinuedFraction,
+  ERF_SERIES_CUTOFF,
+  ERF_F32_PARAMS,
+  checkGeluApproximate,
+  type GeluApproximate,
+} from "./special.ts";
 
 export type Shape = readonly number[];
 export type Axis = number;
@@ -58,6 +86,25 @@ function contiguousStrides(shape: Shape): number[] {
     acc *= shape[i] as number;
   }
   return strides;
+}
+
+/** Decode one raw storage element to its numeric value (f16/bf16 bits -> number). */
+function decodeElement(dtype: DType, raw: number | bigint): number | bigint {
+  return isHalfDType(dtype) ? decodeHalf(dtype, raw as number) : raw;
+}
+
+/**
+ * f16/bf16 are storage-only dtypes (see dtype.ts): arithmetic kernels read
+ * `data[i]` as a number, which for half dtypes would be the raw bit pattern.
+ * Rather than silently computing on bits — or implicitly promoting, which
+ * the no-implicit-promotion rule forbids — every numeric kernel rejects them.
+ */
+function assertNotHalf(dtype: DType, op: string): void {
+  if (isHalfDType(dtype)) {
+    throw new TypeError(
+      `${op} is not supported on ${dtype} (a storage dtype: Uint16Array bit patterns) -- cast("f32") first, then cast back if needed`,
+    );
+  }
 }
 
 /**
@@ -239,6 +286,8 @@ export class Tensor {
     const data = allocate(dtype, shapeSize(shape));
     if (isBigIntDType(dtype)) {
       (data as BigInt64Array | BigUint64Array).fill(BigInt(value));
+    } else if (isHalfDType(dtype)) {
+      (data as Uint16Array).fill(encodeHalf(dtype, value));
     } else {
       (data as Float64Array).fill(value);
     }
@@ -262,6 +311,9 @@ export class Tensor {
     if (isBigIntDType(dtype)) {
       const big = data as BigInt64Array | BigUint64Array;
       for (let i = 0; i < length; i++) big[i] = BigInt(start + i * step);
+    } else if (isHalfDType(dtype)) {
+      const bits = data as Uint16Array;
+      for (let i = 0; i < length; i++) bits[i] = encodeHalf(dtype, start + i * step);
     } else {
       const num = data as Float64Array;
       for (let i = 0; i < length; i++) num[i] = start + i * step;
@@ -277,6 +329,9 @@ export class Tensor {
       for (let i = 0; i < values.length; i++) {
         big[i] = BigInt(values[i] as number);
       }
+    } else if (isHalfDType(dtype)) {
+      const bits = data as Uint16Array;
+      for (let i = 0; i < values.length; i++) bits[i] = encodeHalf(dtype, values[i] as number);
     } else {
       (data as Float64Array).set(values);
     }
@@ -618,6 +673,7 @@ export class Tensor {
 
   /** Elementwise bound: values below `min` become `min`, above `max` become `max`. Either bound may be omitted. Distinct from the REDUCTION `min()`/`max()`. Any dtype. */
   clip(min?: number, max?: number): Tensor {
+    assertNotHalf(this.dtype, "clip");
     let out: Tensor = this;
     if (min !== undefined) {
       out = Tensor.where(out.lt(min), Tensor.full(out.shape, min, { dtype: out.dtype }), out);
@@ -630,6 +686,7 @@ export class Tensor {
 
   /** Product over all elements (axis omitted) or along one axis — the full-reduction dual of {@link sum} (which `cumsum`/`cumprod` already have a cumulative pair for, but `sum` didn't have a `prod` counterpart). Built on the existing `cumprod`: the running product's LAST entry along the scan axis IS the full product. */
   prod(axis?: Axis): Tensor {
+    assertNotHalf(this.dtype, "prod");
     if (axis === undefined) return this.cumprod().select(0, -1);
     const ax = this.#normalizeAxis(axis);
     return this.cumprod(ax).select(ax, -1);
@@ -755,6 +812,7 @@ export class Tensor {
    * documented deviation, not an oversight).
    */
   nonzero(): Tensor {
+    assertNotHalf(this.dtype, "nonzero");
     const ndim = this.ndim;
     const shape = this.shape;
     const big = isBigIntDType(this.dtype);
@@ -927,7 +985,7 @@ export class Tensor {
       }
       elementOffset += index * (this.strides[axis] as number);
     }
-    return this.data[elementOffset] as number | bigint;
+    return decodeElement(this.dtype, this.data[elementOffset] as number | bigint);
   }
 
   /** The single element of a size-1 tensor. */
@@ -935,7 +993,7 @@ export class Tensor {
     if (this.size !== 1) {
       throw new RangeError(`item() requires size 1, got ${this.size}`);
     }
-    return this.data[this.offset] as number | bigint;
+    return decodeElement(this.dtype, this.data[this.offset] as number | bigint);
   }
 
   /** Nested plain-array copy (edge/API use only — never a kernel format). */
@@ -947,7 +1005,7 @@ export class Tensor {
       for (let i = 0; i < dim; i++) {
         out[i] =
           axis === this.ndim - 1
-            ? this.data[offset + i * stride]
+            ? decodeElement(this.dtype, this.data[offset + i * stride] as number | bigint)
             : build(axis + 1, offset + i * stride);
       }
       return out;
@@ -1005,6 +1063,7 @@ export class Tensor {
   // ---- elementwise (broadcasting) -----------------------------------------
 
   #binary(op: BinaryOp, other: Tensor | number): Tensor {
+    assertNotHalf(this.dtype, op);
     const rhs =
       typeof other === "number"
         ? Tensor.full([], other, { dtype: this.dtype })
@@ -1083,6 +1142,7 @@ export class Tensor {
 
   /** Elementwise square root. Float dtypes only (cast() first). */
   sqrt(): Tensor {
+    assertNotHalf(this.dtype, "sqrt");
     if (isBigIntDType(this.dtype)) {
       throw new TypeError(`sqrt requires a float dtype, got ${this.dtype}`);
     }
@@ -1097,6 +1157,7 @@ export class Tensor {
 
   /** Elementwise natural log. Float dtypes only; domain is (0, +Inf) same as Math.log. */
   log(): Tensor {
+    assertNotHalf(this.dtype, "log");
     if (isBigIntDType(this.dtype)) {
       throw new TypeError(`log requires a float dtype, got ${this.dtype}`);
     }
@@ -1110,6 +1171,7 @@ export class Tensor {
   }
 
   #unaryFloat(fn: (v: number) => number): Tensor {
+    assertNotHalf(this.dtype, "this elementwise op");
     if (isBigIntDType(this.dtype)) {
       throw new TypeError(`this op requires a float dtype, got ${this.dtype}`);
     }
@@ -1132,10 +1194,33 @@ export class Tensor {
     return this.#unaryFloat((v) => 1 / (1 + Math.exp(-v)));
   }
 
-  /** Elementwise GELU (tanh approximation, matching common ML-library defaults). Float dtypes only. */
-  gelu(): Tensor {
-    const c = Math.sqrt(2 / Math.PI);
-    return this.#unaryFloat((v) => 0.5 * v * (1 + Math.tanh(c * (v + 0.044715 * v ** 3))));
+  /**
+   * Elementwise GELU, same modes and default as PyTorch's
+   * `torch.nn.functional.gelu(x, approximate=...)`:
+   *
+   * - `approximate: "none"` (**the default**): exact `x·Φ(x) = 0.5·x·(1 + erf(x/√2))`,
+   *   via the canonical double-precision `erf` (src/special.ts) — what BERT,
+   *   ModernBERT and `nn.GELU()` use.
+   * - `approximate: "tanh"`: `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` —
+   *   GPT-2-style; up to ~4.7e-4 absolute away from exact GELU (at |x| ≈ 2.7).
+   *
+   * BREAKING (issue #122): before this option existed `gelu()` always used
+   * the tanh approximation. Pass `{ approximate: "tanh" }` to keep the old
+   * numbers. Float dtypes only.
+   */
+  gelu(options: { approximate?: GeluApproximate } = {}): Tensor {
+    const approximate = checkGeluApproximate(options.approximate);
+    return this.#unaryFloat(approximate === "tanh" ? geluTanh : geluErf);
+  }
+
+  /** Elementwise error function, via the canonical double-precision `erf` (src/special.ts, ~1e-15 relative). Float dtypes only. */
+  erf(): Tensor {
+    return this.#unaryFloat(erfScalar);
+  }
+
+  /** Elementwise complementary error function `1 - erf(x)`, computed without cancellation in the right tail (src/special.ts). Float dtypes only. */
+  erfc(): Tensor {
+    return this.#unaryFloat(erfcScalar);
   }
 
   // ---- unary op-table parity with the compiled IR (issue #64) --------------
@@ -1160,6 +1245,7 @@ export class Tensor {
 
   /** Elementwise absolute value. Works on any numeric dtype (unlike the float-only ops above — `Math.abs` is exact on integers too), so this bypasses `#unaryFloat`'s float-dtype guard. */
   abs(): Tensor {
+    assertNotHalf(this.dtype, "abs");
     const out = Tensor.zeros(this.shape, { dtype: this.dtype });
     if (isBigIntDType(this.dtype)) {
       const outData = out.data as BigInt64Array | BigUint64Array;
@@ -1276,6 +1362,7 @@ export class Tensor {
 
   /** Softmax along `axis` (default: last axis). Numerically stable (subtracts the per-row max first). */
   softmax(axis: Axis = -1): Tensor {
+    assertNotHalf(this.dtype, "softmax");
     if (isBigIntDType(this.dtype)) {
       throw new TypeError(`softmax requires a float dtype, got ${this.dtype}`);
     }
@@ -1299,6 +1386,7 @@ export class Tensor {
    * kernel swaps in underneath this same signature later (issue #3).
    */
   matmul(other: Tensor): Tensor {
+    assertNotHalf(this.dtype, "matmul");
     if (other.dtype !== this.dtype) {
       throw new TypeError(
         `dtype mismatch: ${this.dtype} vs ${other.dtype} (no implicit promotion; cast() first)`,
@@ -1417,6 +1505,8 @@ export class Tensor {
    * Explicit dtype conversion — the only way values cross dtypes (no
    * implicit promotion anywhere else, per non-goal). Truncates toward zero
    * when converting to an integer type (matches `Math.trunc`, not rounding);
+   * to/from `f16`/`bf16` converts VALUES (decode the source bits, round to
+   * nearest-even into the target bits), matching NumPy's `astype(float16)`;
    * `bool` maps any non-zero value to 1. Always a copy, even when `dtype`
    * equals `this.dtype`, so callers can rely on `cast()` never aliasing.
    */
@@ -1428,8 +1518,12 @@ export class Tensor {
     const sourceOffsets = this.elementOffsets();
     let t = targetOffsets.next();
     let s = sourceOffsets.next();
+    const srcDtype = this.dtype;
+    const outHalf = isHalfDType(dtype) ? dtype : undefined;
     while (!t.done && !s.done) {
-      const raw = this.data[s.value];
+      // Decode f16/bf16 bit patterns to their value first (they were once
+      // read as raw integers here, silently turning 1.5 into 15872).
+      const raw = decodeElement(srcDtype, this.data[s.value] as number | bigint);
       let converted: number | bigint;
       if (outBig) {
         converted = srcBig ? (raw as bigint) : BigInt(Math.trunc(raw as number));
@@ -1440,7 +1534,9 @@ export class Tensor {
             ? (num !== 0 ? 1 : 0)
             : dtype === "f32" || dtype === "f64"
               ? num
-              : Math.trunc(num);
+              : outHalf
+                ? encodeHalf(outHalf, num) // round-to-nearest-even, not truncation
+                : Math.trunc(num);
       }
       out.data[t.value] = converted as never;
       t = targetOffsets.next();
@@ -1452,6 +1548,7 @@ export class Tensor {
   // ---- comparisons & logicals (issue #4) -------------------------------------
 
   #compare(op: CompareOp, other: Tensor | number): Tensor {
+    assertNotHalf(this.dtype, op);
     const rhs =
       typeof other === "number"
         ? Tensor.full([], other, { dtype: this.dtype })
@@ -1604,6 +1701,7 @@ export class Tensor {
   }
 
   #boolReduce(axis: Axis | undefined, requireAll: boolean): Tensor {
+    assertNotHalf(this.dtype, "any/all");
     if (axis === undefined) {
       let result = requireAll;
       for (const off of this.elementOffsets()) {
@@ -1655,6 +1753,7 @@ export class Tensor {
   }
 
   #reduce(axis: Axis | undefined, mean: boolean): Tensor {
+    assertNotHalf(this.dtype, mean ? "mean" : "sum");
     const big = isBigIntDType(this.dtype);
     // NumPy: mean of any integer dtype yields f64; sum keeps the dtype.
     const isFloat = this.dtype === "f32" || this.dtype === "f64";
@@ -1734,6 +1833,7 @@ export class Tensor {
   }
 
   #extremum(axis: Axis | undefined, wantMax: boolean): Tensor {
+    assertNotHalf(this.dtype, wantMax ? "max" : "min");
     const label = wantMax ? "max" : "min";
     const big = isBigIntDType(this.dtype);
     const better = (v: number | bigint, best: number | bigint): boolean =>
@@ -1796,6 +1896,7 @@ export class Tensor {
   }
 
   #argExtremum(axis: Axis | undefined, wantMax: boolean): Tensor {
+    assertNotHalf(this.dtype, wantMax ? "argmax" : "argmin");
     const label = wantMax ? "argmax" : "argmin";
     const big = isBigIntDType(this.dtype);
     const better = (v: number | bigint, best: number | bigint): boolean =>
@@ -1867,6 +1968,7 @@ export class Tensor {
    * semantics) → `mean` → broadcast-subtract → square → `sum` → `div`.
    */
   variance(axis?: Axis, options: { ddof?: number } = {}): Tensor {
+    assertNotHalf(this.dtype, "variance");
     const ddof = options.ddof ?? 0;
     const isFloat = this.dtype === "f32" || this.dtype === "f64";
     const working = isFloat ? this : this.cast("f64");
@@ -1910,6 +2012,7 @@ export class Tensor {
   }
 
   #cumulative(axis: Axis | undefined, op: "add" | "mul"): Tensor {
+    assertNotHalf(this.dtype, op === "add" ? "cumsum" : "cumprod");
     const source = axis === undefined ? this.#contiguousView().reshape([this.size]) : this;
     const ax = axis === undefined ? 0 : source.#normalizeAxis(axis);
     const big = isBigIntDType(source.dtype);
@@ -1968,6 +2071,7 @@ export class Tensor {
   }
 
   #sortAlong(axis: Axis): { values: Tensor; indices: Tensor } {
+    assertNotHalf(this.dtype, "sort/argsort/topK");
     const ax = this.#normalizeAxis(axis);
     const reduceDim = this.shape[ax] as number;
     const reduceStride = this.strides[ax] as number;

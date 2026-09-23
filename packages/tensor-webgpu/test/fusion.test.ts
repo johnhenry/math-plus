@@ -15,6 +15,7 @@ import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { evalWithGrad, Traced, type IRNode } from "@johnhenry/math-plus-tensor-compile";
+import { erf, geluErf, geluTanh } from "@johnhenry/math-plus-tensor-core";
 import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
 
 after(closeHarness);
@@ -96,6 +97,7 @@ test("fusion cross-check: single unary ops", async (t) => {
     { op: "relu", data: x },
     { op: "sigmoid", data: x },
     { op: "gelu", data: x },
+    { op: "gelu_tanh", data: x },
     { op: "exp", data: x },
     { op: "log", data: positiveX },
     { op: "sqrt", data: positiveX },
@@ -125,7 +127,9 @@ test("fusion cross-check: single unary ops", async (t) => {
     { op: "atanh", data: x },
   ];
   for (const { op, data } of cases) {
-    const node = Traced.input(0)[op]().node;
+    // Built directly (not via a Traced method) since "gelu_tanh" is reached
+    // through Traced.gelu({ approximate: "tanh" }), not a same-named method.
+    const node: IRNode = { kind: "unary", op, arg: { kind: "input", index: 0 } };
     await crossCheck(t, op, node, [data]);
   }
 });
@@ -175,4 +179,57 @@ test("fusion cross-check: cmp ops produce 0.0/1.0 matching CPU", async (t) => {
     const expr = Traced.input(0).cmp(op, Traced.input(1));
     await crossCheck(t, `cmp ${op}`, expr.node, [a, b]);
   }
+});
+
+/**
+ * Issue #122: the WGSL erf/erfc/GELU are an f32 lowering of tensor-core's
+ * canonical f64 erf (src/special.ts), so the GPU result is checked against
+ * that canonical implementation directly, over the full range the f32
+ * lowering claims ([-6, 6] for erf, both tails for GELU) and at a much tighter
+ * bound than the generic 1e-2 cross-check above. The bound is f32 rounding
+ * (inputs are exactly representable f32 values, the reference is f64) plus
+ * WGSL's loosely-specified `exp` — see ERF_WGSL_FN's doc comment.
+ */
+test("fusion: WGSL erf / exact gelu / tanh gelu track the canonical f64 implementation (#122)", async (t) => {
+  const harness = await getHarness();
+  if ("unavailable" in harness) {
+    t.skip(`headless WebGPU not available: ${harness.reason}`);
+    return;
+  }
+  const n = 481;
+  const xs = new Float32Array(n);
+  for (let i = 0; i < n; i++) xs[i] = -6 + (12 * i) / (n - 1); // [-6, 6], includes both series/CF regions and the |x| = 1 seam
+  const bundle = bundleForBrowser([path.join(SRC, "elementwise.ts")]);
+  const run = async (op: "erf" | "gelu" | "gelu_tanh", data: Float32Array): Promise<number[]> =>
+    harness.run<number[]>(
+      `
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      const node = { kind: "unary", op: ${JSON.stringify(op)}, arg: { kind: "input", index: 0 } };
+      return Array.from(await runElementwiseWGSL(device, node, [new Float32Array(${JSON.stringify(Array.from(data))})], ${data.length}));
+      `,
+      bundle,
+    );
+
+  const erfGpu = await run("erf", xs);
+  let worstErf = 0;
+  for (let i = 0; i < n; i++) worstErf = Math.max(worstErf, Math.abs(erfGpu[i]! - erf(xs[i]!)));
+  assert.ok(worstErf < 1e-6, `WGSL erf worst absolute error ${worstErf} over [-6, 6]`);
+
+  // GELU over [-12, 12]: relative bound (exact GELU's left tail is tiny but
+  // must not collapse to 0 early -- the whole point of computing it via erfc).
+  const gs = xs.map((v) => v * 2);
+  const geluGpu = await run("gelu", gs);
+  const geluTanhGpu = await run("gelu_tanh", gs);
+  let worstGelu = 0;
+  let worstGeluTanh = 0;
+  for (let i = 0; i < n; i++) {
+    const x = gs[i]!;
+    const exact = geluErf(x);
+    worstGelu = Math.max(worstGelu, Math.abs(geluGpu[i]! - exact) / Math.max(Math.abs(exact), 1e-30));
+    worstGeluTanh = Math.max(worstGeluTanh, Math.abs(geluTanhGpu[i]! - geluTanh(x)) / Math.max(1, Math.abs(geluTanh(x))));
+  }
+  assert.ok(worstGelu < 1e-4, `WGSL exact gelu worst relative error ${worstGelu} over [-12, 12]`);
+  assert.ok(worstGeluTanh < 1e-5, `WGSL tanh gelu worst error ${worstGeluTanh} over [-12, 12]`);
+  t.diagnostic(`WGSL erf max abs err ${worstErf.toExponential(2)}; exact gelu max rel err ${worstGelu.toExponential(2)}; tanh gelu ${worstGeluTanh.toExponential(2)}`);
 });

@@ -12,6 +12,7 @@ import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Traced, type BinaryOp, type CmpOp, type UnaryOp } from "@johnhenry/math-plus-tensor-compile";
+import { ERF_F32_PARAMS, ERF_SERIES_CUTOFF } from "@johnhenry/math-plus-tensor-core";
 import { compileIRToWGSL } from "../src/fusion-wgsl.ts";
 
 const ALL_UNARY: readonly UnaryOp[] = [
@@ -19,7 +20,7 @@ const ALL_UNARY: readonly UnaryOp[] = [
   "asin", "acos", "atan", "sinh", "cosh", "tanh", "cot", "sec", "csc",
   "asinh", "acosh", "atanh", "coth", "sech", "csch", "acot", "asec", "acsc",
   "acoth", "asech", "acsch", "abs", "log10", "log2", "cbrt", "floor", "ceil",
-  "round", "sign", "trunc", "expm1", "log1p", "erf",
+  "round", "sign", "trunc", "expm1", "log1p", "erf", "gelu_tanh",
 ];
 
 const ALL_BINARY: readonly BinaryOp[] = ["add", "sub", "mul", "div", "pow", "atan2", "hypot", "min", "max"];
@@ -75,9 +76,18 @@ test("compileIRToWGSL: select node lowers using WGSL select() with the cond comp
   assert.match(code, /select\(.*!= 0\.0\)/s);
 });
 
-test("compileIRToWGSL: emits the erf helper function only when erf is used", () => {
+test("compileIRToWGSL: emits the erf helper functions only when erf or exact gelu is used", () => {
   const withErf = compileIRToWGSL({ kind: "unary", op: "erf", arg: { kind: "input", index: 0 } }, 1);
   assert.match(withErf.code, /fn math_plus_erf/);
+
+  // Exact gelu (the default since #122) lowers through math_plus_erfc; the
+  // tanh approximation needs no helper.
+  const withGelu = compileIRToWGSL({ kind: "unary", op: "gelu", arg: { kind: "input", index: 0 } }, 1);
+  assert.match(withGelu.code, /fn math_plus_gelu/);
+  assert.match(withGelu.code, /math_plus_gelu\(input0\[gid\.x\]\)/);
+  const withGeluTanh = compileIRToWGSL({ kind: "unary", op: "gelu_tanh", arg: { kind: "input", index: 0 } }, 1);
+  assert.doesNotMatch(withGeluTanh.code, /fn math_plus_erf/);
+  assert.match(withGeluTanh.code, /tanh\(/);
 
   const withoutErf = compileIRToWGSL({ kind: "unary", op: "neg", arg: { kind: "input", index: 0 } }, 1);
   assert.doesNotMatch(withoutErf.code, /fn math_plus_erf/);
@@ -100,4 +110,14 @@ test("compileIRToWGSL: an input the expression never references is still statica
   const { code } = compileIRToWGSL(node, 2);
   assert.match(code, /_ = input0\[0\];/);
   assert.match(code, /_ = input1\[0\];/);
+});
+
+test("compileIRToWGSL: the WGSL erf is lowered from tensor-core's canonical erf parameters, not a separate approximation (#122)", () => {
+  const { code } = compileIRToWGSL({ kind: "unary", op: "erf", arg: { kind: "input", index: 0 } }, 1);
+  // Loop bounds come straight from ERF_F32_PARAMS, the region split from ERF_SERIES_CUTOFF.
+  assert.ok(code.includes(`n <= ${ERF_F32_PARAMS.seriesTerms};`), "series term count not taken from ERF_F32_PARAMS");
+  assert.ok(code.includes(`var n: i32 = ${ERF_F32_PARAMS.cfDepth};`), "continued-fraction depth not taken from ERF_F32_PARAMS");
+  assert.ok(code.includes(`if (ax < ${ERF_SERIES_CUTOFF}.0)`), "series/CF cutoff not taken from ERF_SERIES_CUTOFF");
+  // The Abramowitz & Stegun 7.1.26 coefficients it replaced must be gone.
+  assert.doesNotMatch(code, /0\.3275911|1\.061405429/);
 });

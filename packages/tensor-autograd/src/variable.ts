@@ -23,7 +23,7 @@
  * immutable style — there's nothing to reject at runtime because the
  * mutating method doesn't exist.
  */
-import { Tensor, type Axis } from "@johnhenry/math-plus-tensor-core";
+import { checkGeluApproximate, Tensor, type Axis, type GeluApproximate } from "@johnhenry/math-plus-tensor-core";
 import { timed } from "@johnhenry/math-plus-telemetry";
 import { sumToShape } from "./shape-utils.ts";
 
@@ -311,12 +311,26 @@ export class Variable {
   }
 
   /**
-   * GELU backward via the tanh-approximation's exact derivative. Uses the
-   * identity tanh(x) = 2*sigmoid(2x)-1 to avoid needing a tensor-core
-   * `.tanh()` method for a single niche gradient.
+   * GELU with the same `approximate` option and default as `Tensor.gelu()`
+   * (`"none"` = exact erf-GELU, the default since #122; `"tanh"` = the tanh
+   * approximation). The backward pass differentiates whichever forward was
+   * actually computed:
+   * - exact: `Φ(x) + x·φ(x)`, with `Φ(x) = 0.5·erfc(-x/√2)` from the
+   *   canonical `Tensor.erfc()` (tensor-core src/special.ts);
+   * - tanh: the exact derivative of the tanh approximation, using the
+   *   identity tanh(x) = 2*sigmoid(2x)-1.
    */
-  gelu(): Variable {
-    const value = this.value.gelu();
+  gelu(options: { approximate?: GeluApproximate } = {}): Variable {
+    const approximate = checkGeluApproximate(options.approximate);
+    const value = this.value.gelu({ approximate });
+    if (approximate === "none") {
+      return Variable.fromOp(value, [this], (g) => {
+        const x = this.value;
+        const cdf = x.mul(-Math.SQRT1_2).erfc().mul(0.5); // Φ(x) = 0.5·erfc(-x/√2), no cancellation for x << 0
+        const pdf = x.mul(x).mul(-0.5).exp().mul(1 / Math.sqrt(2 * Math.PI)); // φ(x)
+        return [g.mul(cdf.add(x.mul(pdf)))];
+      });
+    }
     return Variable.fromOp(value, [this], (g) => {
       const c = Math.sqrt(2 / Math.PI);
       const x = this.value;

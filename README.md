@@ -29,6 +29,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | Go faster on GPU | [`tensor-webgpu`](./packages/tensor-webgpu) — browser-only in v1, and read its "honest threshold" section |
 | FFTs / filters / peaks | [`fft`](./packages/fft), [`signal`](./packages/signal) |
 | Resize/normalize images | [`image`](./packages/image) |
+| Load/save model weights (`.safetensors`) | [`safetensors`](./packages/safetensors) — lazy reads from files, Blobs and HTTP ranges |
 | Dataframes | [`frame-arrow`](./packages/frame-arrow) (+ [`frame-parquet`](./packages/frame-parquet) for Parquet I/O) |
 | Dataset pipelines for training | [`data`](./packages/data) |
 | Talk to it from an agent | [`mcp`](./packages/mcp) (`npx math-plus-mcp`) |
@@ -45,6 +46,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | [`@johnhenry/math-plus-tensor-compile`](./packages/tensor-compile) | Expression IR + elementwise fusion (opt-in); the shared lowering target for WGSL |
 | [`@johnhenry/math-plus-tensor-wasm`](./packages/tensor-wasm) | Rust→WASM kernels (SIMD, arena allocator, zero-alloc `...Into` ops) + opt-in Deno-native FFI |
 | [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU GEMM, attention primitives, IR→WGSL fusion. Chromium-family browsers only. |
+| [`@johnhenry/math-plus-safetensors`](./packages/safetensors) | safetensors reader/writer: validated headers, typed views (F16 as `Float16Array`), lazy reads from files/Blobs/HTTP ranges, optional tensor-core interop. Zero deps. |
 
 ### Signal & media
 

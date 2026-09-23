@@ -3,7 +3,7 @@ import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { DualNumber } from "@johnhenry/math";
-import { Tensor } from "@johnhenry/math-plus-tensor-core";
+import { erf, Tensor } from "@johnhenry/math-plus-tensor-core";
 import { Variable, constant, enableGrad, grad, noGrad, variable } from "../src/index.ts";
 import { assertGradientMatches, randomTensor } from "./gradcheck.ts";
 
@@ -125,8 +125,28 @@ test("gradcheck: sigmoid", () => {
   assertGradientMatches((x) => x.sigmoid().sum(), randomTensor([5]));
 });
 
-test("gradcheck: gelu", () => {
+test("gradcheck: gelu (default: exact erf-GELU since #122)", () => {
   assertGradientMatches((x) => x.gelu().sum(), randomTensor([5]));
+  assertGradientMatches((x) => x.gelu({ approximate: "none" }).sum(), randomTensor([5]));
+});
+
+test("gradcheck: gelu({ approximate: 'tanh' })", () => {
+  assertGradientMatches((x) => x.gelu({ approximate: "tanh" }).sum(), randomTensor([5]));
+});
+
+test("gelu backward differentiates the forward actually computed (exact vs tanh gradients differ)", () => {
+  const x = Tensor.from([-2.5, -1, 0.5, 2.7], { dtype: "f64" });
+  const a = Variable.variable(x);
+  a.gelu().sum().backward();
+  const b = Variable.variable(x);
+  b.gelu({ approximate: "tanh" }).sum().backward();
+  const ga = Array.from((a.grad as Tensor).data as Float64Array);
+  const gb = Array.from((b.grad as Tensor).data as Float64Array);
+  assert.ok(ga.some((v, i) => Math.abs(v - gb[i]!) > 1e-5), `exact ${ga} vs tanh ${gb}`);
+  // Exact GELU's derivative is Φ(x) + x·φ(x) (checked at x = 0.5 against erf directly).
+  const phi = 0.5 * (1 + erf(0.5 / Math.SQRT2));
+  const pdf = Math.exp(-0.125) / Math.sqrt(2 * Math.PI);
+  assert.ok(Math.abs(ga[2]! - (phi + 0.5 * pdf)) < 1e-15);
 });
 
 test("gradcheck: softmax", () => {

@@ -61,7 +61,7 @@ test("fn.ln matches Math.log (spelled 'ln' to match @johnhenry/math's Symbolic F
   assert.deepEqual(result, [0, 1, Math.log(10)]);
 });
 
-test("fn.erf matches the same Abramowitz & Stegun approximation tensor-compile's IR evaluator uses", () => {
+test("fn.erf is within its Abramowitz & Stegun 7.1.26 error bound (a known non-canonical copy, see eval-expr.ts / #122)", () => {
   const frame = Frame.fromArrow(new Table({ x: vectorFromArray([-1, 0, 1, 2], new Float64()) }));
   const result = frame.withColumns({ y: fn.erf(col("x")) }).toRows().map((r) => r.y as number);
   // erf is odd, erf(0) = 0, and it should be within the approximation's documented error bound of the true values.

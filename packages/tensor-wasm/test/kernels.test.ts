@@ -251,3 +251,95 @@ test("subInto/divInto agree with @johnhenry/math-plus-tensor-core's Tensor.sub/T
     assert.ok(Math.abs(gotDiv[i]! - expectedDiv[i]!) < 1e-4, `div[${i}]: ${gotDiv[i]} vs ${expectedDiv[i]}`);
   }
 });
+
+// ---- blocked SIMD128 GEMM (issue #121) --------------------------------------
+
+/** Deterministic data in [-1, 1) without Math.random (reproducible failures). */
+function det(len: number, seed: number): Float32Array {
+  return Float32Array.from({ length: len }, (_, i) => Math.sin(i * 12.9898 + seed * 78.233));
+}
+
+test("matmulInto: SIMD128 GEMM is bit-for-bit identical to the scalar fallback, across block edges and transposed views", async () => {
+  const withSimd = await Kernels.load();
+  const scalarOnly = await Kernels.load(undefined, new Uint8Array([0, 1, 2, 3]));
+  assert.equal(withSimd.simdAvailable, true);
+  assert.equal(scalarOnly.simdAvailable, false);
+  // (m, k, n) straddling MR=4 / NR=8 / MC=64 / KC=256 / NC=256.
+  for (const [m, k, n] of [[1, 1, 1], [5, 7, 9], [67, 300, 261], [64, 256, 256]] as const) {
+    for (const [ta, tb] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+      const results: Float32Array[] = [];
+      for (const kernels of [withSimd, scalarOnly]) {
+        // A "transposed" operand is stored physically transposed and read
+        // back through .transposed()'s swapped strides.
+        const a = ta ? kernels.fromArray(det(m * k, 1), [k, m]).transposed() : kernels.fromArray(det(m * k, 1), [m, k]);
+        const b = tb ? kernels.fromArray(det(k * n, 2), [n, k]).transposed() : kernels.fromArray(det(k * n, 2), [k, n]);
+        const out = kernels.zeros([m, n]);
+        kernels.matmulInto(out, a, b);
+        results.push(out.toFloat32Array());
+        a.free();
+        b.free();
+        out.free();
+      }
+      const [simd, scalar] = results as [Float32Array, Float32Array];
+      for (let i = 0; i < simd.length; i++) {
+        if (!Object.is(simd[i], scalar[i])) {
+          assert.fail(`${m}x${k}@${k}x${n} tA=${ta} tB=${tb} [${i}]: simd ${simd[i]} vs scalar ${scalar[i]}`);
+        }
+      }
+    }
+  }
+});
+
+test("matmulInto allocates ZERO times across repeated calls (packing scratch lives on the wasm stack)", async () => {
+  const kernels = await Kernels.load();
+  const a = kernels.fromArray(det(96 * 80, 3), [96, 80]);
+  const b = kernels.fromArray(det(80 * 72, 4), [80, 72]);
+  const out = kernels.zeros([96, 72]);
+  const before = kernels.allocCallCount;
+  for (let i = 0; i < 20; i++) kernels.matmulInto(out, a, b);
+  assert.equal(kernels.allocCallCount, before);
+});
+
+test("matmulInto rejects an `out` of the wrong shape instead of writing past its buffer", async () => {
+  const kernels = await Kernels.load();
+  const a = kernels.zeros([2, 3]);
+  const b = kernels.zeros([3, 4]);
+  assert.throws(() => kernels.matmulInto(kernels.zeros([2, 2]), a, b), RangeError);
+  assert.throws(() => kernels.matmulInto(kernels.zeros([4, 2]), a, b), RangeError);
+});
+
+test("Kernels.load() refuses a SIMD module whose static data would clobber the shared memory — memory restored, SIMD off, scalar path intact", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const simdBytes = new Uint8Array(
+    await readFile(new URL("../wasm/tensor_wasm_kernels_simd128.wasm", import.meta.url)),
+  );
+  // Flip one byte inside the module's .rodata (a panic-message string, so
+  // the module stays valid) -- instantiating it would then overwrite the
+  // scalar module's copy of that string in the shared memory.
+  const needle = new TextEncoder().encode("index out of bounds");
+  let at = -1;
+  outer: for (let i = 0; i + needle.length <= simdBytes.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (simdBytes[i + j] !== needle[j]) continue outer;
+    at = i;
+    break;
+  }
+  assert.ok(at >= 0, "expected a rodata string to patch in the SIMD module");
+  const patched = simdBytes.slice();
+  patched[at] = "X".charCodeAt(0);
+
+  const kernels = await Kernels.load(undefined, patched);
+  assert.equal(kernels.simdAvailable, false);
+  const mem = new Uint8Array(kernels.exports.memory.buffer);
+  let found = false;
+  outer2: for (let i = 0; i + needle.length <= mem.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (mem[i + j] !== needle[j]) continue outer2;
+    found = true;
+    break;
+  }
+  assert.ok(found, "the scalar module's original rodata must be restored");
+  const a = kernels.fromArray(new Float32Array([1, 2, 3, 4, 5, 6]), [2, 3]);
+  const b = kernels.fromArray(new Float32Array([7, 8, 9, 10, 11, 12]), [3, 2]);
+  const out = kernels.zeros([2, 2]);
+  kernels.matmulInto(out, a, b);
+  assert.deepEqual([...out.toFloat32Array()], [58, 64, 139, 154]);
+});

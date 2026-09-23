@@ -21,7 +21,8 @@
  *
  * - `test(name, [options], fn)` with `options.skip` / `options.todo` /
  *   `options.timeout` (`concurrency` is accepted and ignored).
- * - `t.name`, `t.skip(reason)`, `t.after(fn)`, `t.test(name, fn)` (subtests
+ * - `t.name`, `t.skip(reason)`, `t.after(fn)`, `t.diagnostic(msg)`,
+ *   `t.test(name, [options], fn)` (subtests; `options.skip`/`todo` honoured;
  *   run sequentially inside the parent; a failing subtest fails the parent).
  * - file-level `before` / `after` / `afterEach` (Bun's `beforeAll` /
  *   `afterAll` / `afterEach`).
@@ -45,7 +46,10 @@ export interface TestContext {
   readonly name: string;
   skip(reason?: string): void;
   after(fn: () => unknown): void;
+  /** Informational message (node:test's `t.diagnostic`; printed under Bun). */
+  diagnostic(message: string): void;
   test(name: string, fn: (t: TestContext) => unknown): Promise<void>;
+  test(name: string, options: TestOptions, fn: (t: TestContext) => unknown): Promise<void>;
 }
 
 export interface TestOptions {
@@ -124,7 +128,17 @@ async function runWithContext(name: string, fn: TestBody): Promise<void> {
     after(f) {
       afters.push(f);
     },
-    test(subName, subFn) {
+    diagnostic(message) {
+      console.log(`# ${name}: ${message}`);
+    },
+    test(subName: string, a: TestOptions | TestBody, b?: TestBody) {
+      const options: TestOptions = typeof a === "function" ? {} : a;
+      const subFn = (typeof a === "function" ? a : b) as TestBody;
+      const off = options.skip || options.todo;
+      if (off) {
+        console.log(`[skip] ${subName}${typeof off === "string" ? `: ${off}` : ""}`);
+        return Promise.resolve();
+      }
       // node:test runs a parent's subtests one at a time; keep that ordering.
       const p = queue.then(() => runWithContext(subName, subFn));
       queue = p.catch(() => {});
