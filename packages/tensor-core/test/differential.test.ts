@@ -55,6 +55,7 @@ interface OracleJob {
   largest?: boolean;
   condition?: string;
   fn?: string; // "unary" op dispatch (issue #64)
+  approximate?: "none" | "tanh"; // gelu (issue #122)
   min?: number; // clip
   max?: number; // clip
   padding?: Array<[number, number]>; // pad
@@ -712,6 +713,18 @@ test("differential vs NumPy", { skip }, async (t) => {
     const aPath = saveTensor(dir, "act-a", a);
     for (const op of ["relu", "sigmoid", "gelu"] as const) {
       assertClose(a[op](), runOracle(dir, { op, inputs: [aPath] }), op);
+    }
+  });
+
+  await t.test("gelu: default is exact erf-GELU (libm math.erf reference), approximate: 'tanh' keeps the tanh formula (#122)", () => {
+    for (const dtype of ["f64", "f32"] as const) {
+      const a = randomTensor([32], dtype).mul(0.6); // ~[-6, 6)
+      const aPath = saveTensor(dir, `gelu-${dtype}-a`, a);
+      const exact = runOracle(dir, { op: "gelu", inputs: [aPath], approximate: "none" });
+      const tanh = runOracle(dir, { op: "gelu", inputs: [aPath], approximate: "tanh" });
+      assertClose(a.gelu(), exact, "gelu");
+      assertClose(a.gelu({ approximate: "none" }), exact, "gelu");
+      assertClose(a.gelu({ approximate: "tanh" }), tanh, "gelu");
     }
   });
 

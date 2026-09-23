@@ -19,6 +19,14 @@ import {
 } from "./dtype.ts";
 import { parseNpy, serializeNpy } from "./npy.ts";
 import {
+  checkGeluApproximate,
+  erf as erfScalar,
+  erfc as erfcScalar,
+  geluErf,
+  geluTanh,
+  type GeluApproximate,
+} from "./special.ts";
+import {
   fillFrom,
   normalSample,
   randintSample,
@@ -40,6 +48,20 @@ export {
   type TypedArrayFor,
 } from "./dtype.ts";
 export { Rng, type RandomOptions } from "./random.ts";
+export {
+  erf,
+  erfc,
+  gelu,
+  geluErf,
+  geluTanh,
+  geluDerivative,
+  erfSeries,
+  erfcContinuedFraction,
+  ERF_SERIES_CUTOFF,
+  ERF_F32_PARAMS,
+  checkGeluApproximate,
+  type GeluApproximate,
+} from "./special.ts";
 
 export type Shape = readonly number[];
 export type Axis = number;
@@ -1172,10 +1194,33 @@ export class Tensor {
     return this.#unaryFloat((v) => 1 / (1 + Math.exp(-v)));
   }
 
-  /** Elementwise GELU (tanh approximation, matching common ML-library defaults). Float dtypes only. */
-  gelu(): Tensor {
-    const c = Math.sqrt(2 / Math.PI);
-    return this.#unaryFloat((v) => 0.5 * v * (1 + Math.tanh(c * (v + 0.044715 * v ** 3))));
+  /**
+   * Elementwise GELU, same modes and default as PyTorch's
+   * `torch.nn.functional.gelu(x, approximate=...)`:
+   *
+   * - `approximate: "none"` (**the default**): exact `x·Φ(x) = 0.5·x·(1 + erf(x/√2))`,
+   *   via the canonical double-precision `erf` (src/special.ts) — what BERT,
+   *   ModernBERT and `nn.GELU()` use.
+   * - `approximate: "tanh"`: `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` —
+   *   GPT-2-style; up to ~4.7e-4 absolute away from exact GELU (at |x| ≈ 2.7).
+   *
+   * BREAKING (issue #122): before this option existed `gelu()` always used
+   * the tanh approximation. Pass `{ approximate: "tanh" }` to keep the old
+   * numbers. Float dtypes only.
+   */
+  gelu(options: { approximate?: GeluApproximate } = {}): Tensor {
+    const approximate = checkGeluApproximate(options.approximate);
+    return this.#unaryFloat(approximate === "tanh" ? geluTanh : geluErf);
+  }
+
+  /** Elementwise error function, via the canonical double-precision `erf` (src/special.ts, ~1e-15 relative). Float dtypes only. */
+  erf(): Tensor {
+    return this.#unaryFloat(erfScalar);
+  }
+
+  /** Elementwise complementary error function `1 - erf(x)`, computed without cancellation in the right tail (src/special.ts). Float dtypes only. */
+  erfc(): Tensor {
+    return this.#unaryFloat(erfcScalar);
   }
 
   // ---- unary op-table parity with the compiled IR (issue #64) --------------
