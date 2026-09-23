@@ -33,8 +33,37 @@ import sys
 
 import numpy as np
 import safetensors
-from safetensors import deserialize, safe_open, serialize
+from safetensors import deserialize, safe_open
+from safetensors import serialize as _rust_serialize
 from safetensors.numpy import save_file as np_save_file
+
+
+def serialize(tensors, metadata=None):
+    """The reference low-level serializer, across its two Python APIs.
+
+    safetensors < 0.8 takes {name: {"dtype", "shape", "data": bytes}}.
+    safetensors >= 0.8 takes {name: TensorSpec(dtype, shape, data_ptr,
+    data_len)} and rejects plain dicts ("'dict' object is not an instance of
+    'TensorSpec'"). Both produce the same bytes. Found when CI first installed
+    safetensors 0.8.0.
+    """
+    TensorSpec = getattr(safetensors, "TensorSpec", None)
+    if TensorSpec is None:
+        try:
+            from safetensors._safetensors_rust import TensorSpec  # noqa: F811
+        except ImportError:
+            TensorSpec = None
+    if TensorSpec is None:
+        return _rust_serialize(tensors, metadata)
+    keep = []  # the buffers must outlive the call (see TensorSpec's docs)
+    specs = {}
+    for name, t in tensors.items():
+        buf = np.frombuffer(bytearray(t["data"]), dtype=np.uint8)
+        keep.append(buf)
+        specs[name] = TensorSpec(dtype=t["dtype"], shape=list(t["shape"]), data_ptr=int(buf.ctypes.data), data_len=len(t["data"]))
+    out = _rust_serialize(specs, metadata)
+    del keep
+    return out
 
 SAFE_TO_NUMPY = {
     "BOOL": "bool", "U8": "uint8", "I8": "int8", "U16": "uint16", "I16": "int16",
