@@ -109,7 +109,11 @@ export function loadCheckpoint(bytes: Uint8Array): Record<string, Tensor> {
     const npyBytes = bytes.subarray(offset, offset + npyLen);
     offset += npyLen;
     if (name in out) throw new Error(`loadCheckpoint: duplicate parameter name "${name}" in checkpoint`);
-    out[name] = Tensor.fromNpy(npyBytes);
+    // Every entry was written by Tensor#toNpy, which emits the untyped '<V2'
+    // descr only for bf16 (the ml_dtypes convention), so reading it as bf16
+    // here is not a guess -- without it a bf16 checkpoint would save but
+    // never load.
+    out[name] = Tensor.fromNpy(npyBytes, { voidAs: "bf16" });
   }
   if (version === 1) Object.defineProperty(out, LEGACY_LINEAR_LAYOUT, { value: true, enumerable: false });
   return out;
