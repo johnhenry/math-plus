@@ -74,7 +74,9 @@ export function broadcastShapes(a: Shape, b: Shape): number[] {
         `shapes [${a}] and [${b}] are not broadcast-compatible at axis ${ndim - 1 - i}`,
       );
     }
-    out[ndim - 1 - i] = Math.max(da, db);
+    // A size-1 dim takes the other side's size — including 0 (NumPy:
+    // broadcasting [0, 4] with [4] is [0, 4]; `Math.max` wrongly gave [1, 4]).
+    out[ndim - 1 - i] = da === 1 ? db : da;
   }
   return out;
 }

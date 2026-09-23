@@ -174,6 +174,11 @@ test("broadcastShapes follows NumPy trailing-axis rules", () => {
   assert.deepEqual(broadcastShapes([2, 1], [1, 3]), [2, 3]);
   assert.deepEqual(broadcastShapes([], [4]), [4]);
   assert.throws(() => broadcastShapes([2, 3], [4]), RangeError);
+  // Zero-size dims broadcast against 1 to 0, not 1 (regression, found in #120).
+  assert.deepEqual(broadcastShapes([0, 4], [4]), [0, 4]);
+  assert.deepEqual(broadcastShapes([1], [0]), [0]);
+  assert.deepEqual(broadcastShapes([0, 1], [1, 3]), [0, 3]);
+  assert.deepEqual([...Tensor.zeros([0, 4]).add(Tensor.ones([4])).shape], [0, 4]);
 });
 
 test("add/sub/mul/div with broadcasting", () => {
