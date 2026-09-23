@@ -8,7 +8,7 @@ import { nn, optim, trainer, Variable } from "../src/index.ts";
 
 test("trainer.fit({x, y}): linear regression converges with plain SGD (same problem/threshold as the existing toy-training-loop test)", async () => {
   const rng = random.seed(3);
-  const model = new nn.Linear(1, 1, { rng });
+  const model = new nn.Linear(1, 1, { dtype: "f64", rng });
   const opt = new optim.SGD(model.parameters(), { lr: 0.01 });
 
   const xs = [1, 2, 3, 4, 5];
@@ -31,8 +31,8 @@ test("trainer.fit({x, y}): linear regression converges with plain SGD (same prob
 test("trainer.fit({x, y}): XOR-MLP converges with AdamW", async () => {
   const rng = random.seed(7);
   class XorNet extends nn.Module {
-    readonly fc1 = new nn.Linear(2, 8, { rng });
-    readonly fc2 = new nn.Linear(8, 1, { rng });
+    readonly fc1 = new nn.Linear(2, 8, { dtype: "f64", rng });
+    readonly fc2 = new nn.Linear(8, 1, { dtype: "f64", rng });
     forward(x: Variable): Variable {
       return this.fc2.forward(this.fc1.forward(x).relu()).sigmoid();
     }
@@ -52,7 +52,7 @@ test("trainer.fit({x, y}): XOR-MLP converges with AdamW", async () => {
 
 test("trainer.fit(dataLoader): converges on the SAME linear-regression problem using a hand-rolled async generator, no real `data` package involved", async () => {
   const rng = random.seed(3);
-  const model = new nn.Linear(1, 1, { rng });
+  const model = new nn.Linear(1, 1, { dtype: "f64", rng });
   const opt = new optim.SGD(model.parameters(), { lr: 0.01 });
 
   const xs = [1, 2, 3, 4, 5];
@@ -80,7 +80,7 @@ test("trainer.fit(dataLoader): converges on the SAME linear-regression problem u
 
 test("trainer.fit(dataLoader): each yielded batch is a genuine, independent training step (loss decreases across mini-batches, not just repeats of one batch)", async () => {
   const rng = random.seed(3);
-  const model = new nn.Linear(1, 1, { rng });
+  const model = new nn.Linear(1, 1, { dtype: "f64", rng });
   const opt = new optim.SGD(model.parameters(), { lr: 0.02 });
 
   async function* dataLoader(): AsyncGenerator<{ x: Tensor; y: Tensor }> {

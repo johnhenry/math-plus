@@ -33,6 +33,7 @@ save_npy("weights.npy", arr)
 ## Explicitly out of scope
 
 - **The Arrow C Data Interface / PyCapsule zero-copy bridge.** Deferred — it only pays off with a native Node addon in the same process, which is downstream of math-plus's WASM work.
+- **Python-identical float text formatting (`repr(float)`, `%g`, `json.dumps`) on the JS side.** Not needed: every interop path here is binary (Arrow IPC, Parquet, `.npy`/`.npz`), so floats never cross the language boundary as text, and on this side Python formats its own values. `@johnhenry/math-plus-scalar-types` only re-exports `@johnhenry/math` scalar classes and has no text output. If a JS surface ever has to produce Python-identical text, depend on [`@johnhenry/pyjson`](https://www.npmjs.com/package/@johnhenry/pyjson), the canonical implementation. Do not write a second copy (issue #128).
 - **Python's `__dataframe__()` DataFrame Interchange Protocol.** Rejected: pandas deprecates it and drops the fallback entirely in pandas 4.0. Arrow IPC is the portable interop format across browser/Node/Deno/Python.
 
 ## Development

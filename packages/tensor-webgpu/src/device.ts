@@ -67,10 +67,15 @@ export interface DetectWebGPUOptions {
    * unsafe: true })`; Chrome: `--enable-unsafe-webgpu`).
    */
   subgroupMatrix?: boolean;
+  /**
+   * Request `timestamp-query` when the adapter offers it (default false),
+   * which the GPU profiler (`startProfiling`/`stopProfiling`) needs.
+   */
+  timestampQuery?: boolean;
 }
 
-/** Adapter limits worth raising from their spec defaults when the hardware allows (large GEMM operands need big storage bindings). */
-const RAISED_LIMITS = ["maxStorageBufferBindingSize", "maxBufferSize"] as const;
+/** Adapter limits worth raising from their spec defaults when the hardware allows (large GEMM operands need big storage bindings; the head-dim-64 fused attention kernel needs ~20 KiB of workgroup memory). */
+const RAISED_LIMITS = ["maxStorageBufferBindingSize", "maxBufferSize", "maxComputeWorkgroupStorageSize"] as const;
 
 /**
  * Feature-detect WebGPU and, if present, actually request an adapter +
@@ -110,6 +115,7 @@ export async function detectWebGPU(options: DetectWebGPUOptions = {}): Promise<W
   if ((options.subgroupMatrix ?? true) && adapter.features.has(SUBGROUP_MATRIX_FEATURE)) {
     requiredFeatures.push(SUBGROUP_MATRIX_FEATURE as GPUFeatureName);
   }
+  if (options.timestampQuery && adapter.features.has("timestamp-query")) requiredFeatures.push("timestamp-query");
   const requiredLimits: Record<string, number> = {};
   for (const name of RAISED_LIMITS) {
     const v = (adapter.limits as unknown as Record<string, number>)[name];

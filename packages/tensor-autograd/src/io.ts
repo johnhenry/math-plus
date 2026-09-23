@@ -12,14 +12,36 @@
  * `johnhenry-math-plus-interop`'s `read_ipc`/`read_parquet` already handle the
  * dataframe side of Python interop).
  *
- * Layout: `"MPCK"` magic (4 bytes) + version (1 byte, currently 1) + entry
+ * Layout: `"MPCK"` magic (4 bytes) + version (1 byte, currently 2) + entry
  * count (u32 LE) + that many `[nameByteLen: u32 LE][npyByteLen: u32 LE]
  * [name utf8 bytes][npy bytes]` entries, back to back.
+ *
+ * Versions: the byte layout is unchanged between 1 and 2 — the version marks
+ * a SEMANTIC change. Version 1 checkpoints were written before issue #123,
+ * when `nn.Linear` stored its weight as `[in, out]`; version 2 (written by
+ * this build) stores PyTorch's `[out, in]`. `loadCheckpoint` still reads
+ * version 1 and tags the returned dict with {@link LEGACY_LINEAR_LAYOUT},
+ * which `Module.loadStateDict` honors by transposing every `nn.Linear`
+ * weight on load — so old checkpoints keep loading transparently.
+ *
+ * f16 round-trips (NumPy `<f2`); bf16 has no `.npy` dtype and throws here —
+ * use the `@johnhenry/math-plus-tensor-autograd/safetensors` subpath for
+ * bf16 and for interop with PyTorch/Hugging Face checkpoints.
  */
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 
 const MAGIC = [0x4d, 0x50, 0x43, 0x4b]; // "MPCK"
-const VERSION = 1;
+const VERSION = 2;
+const SUPPORTED_VERSIONS = new Set([1, 2]);
+
+/**
+ * Non-enumerable marker on a state dict whose `nn.Linear` weights are in the
+ * pre-#123 `[in, out]` layout (set by `loadCheckpoint` on version-1 files).
+ * `Module.loadStateDict` transposes Linear weights when it sees it — or when
+ * called with `{ legacyLinearLayout: true }`, for old state dicts that
+ * travelled some other way than an MPCK file.
+ */
+export const LEGACY_LINEAR_LAYOUT: unique symbol = Symbol.for("@johnhenry/math-plus-tensor-autograd/legacy-linear-layout");
 const HEADER_LEN = 9; // 4 magic + 1 version + 4 count
 
 /** Serialize a named-tensor dict (e.g. from `Module.stateDict()`) to a checkpoint byte buffer. */
@@ -67,8 +89,8 @@ export function loadCheckpoint(bytes: Uint8Array): Record<string, Tensor> {
     }
   }
   const version = view.getUint8(4);
-  if (version !== VERSION) {
-    throw new Error(`loadCheckpoint: unsupported checkpoint version ${version} (this build supports version ${VERSION})`);
+  if (!SUPPORTED_VERSIONS.has(version)) {
+    throw new Error(`loadCheckpoint: unsupported checkpoint version ${version} (this build supports versions ${[...SUPPORTED_VERSIONS].join(", ")})`);
   }
   const count = view.getUint32(5, true);
 
@@ -87,7 +109,12 @@ export function loadCheckpoint(bytes: Uint8Array): Record<string, Tensor> {
     const npyBytes = bytes.subarray(offset, offset + npyLen);
     offset += npyLen;
     if (name in out) throw new Error(`loadCheckpoint: duplicate parameter name "${name}" in checkpoint`);
-    out[name] = Tensor.fromNpy(npyBytes);
+    // Every entry was written by Tensor#toNpy, which emits the untyped '<V2'
+    // descr only for bf16 (the ml_dtypes convention), so reading it as bf16
+    // here is not a guess -- without it a bf16 checkpoint would save but
+    // never load.
+    out[name] = Tensor.fromNpy(npyBytes, { voidAs: "bf16" });
   }
+  if (version === 1) Object.defineProperty(out, LEGACY_LINEAR_LAYOUT, { value: true, enumerable: false });
   return out;
 }

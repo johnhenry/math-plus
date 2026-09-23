@@ -91,8 +91,15 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
   integer conversion **truncates toward zero**, not rounds.
 - **`fromTypedArray` does not copy** — aliasing is your problem.
 - **`.npy` scope:** little-endian, C-order only (`fortran_order: True`
-  throws); `f16` round-trips as `<f2`; `bf16` has no NumPy dtype and
-  throws. A non-contiguous view serializes packed.
+  throws); `f16` round-trips as `<f2`. A non-contiguous view serializes packed.
+- **`.npy` bf16 follows the `ml_dtypes` convention.** NumPy has no bfloat16.
+  `np.save` of an `ml_dtypes.bfloat16` array writes descr `'<V2'` (an untyped
+  2-byte void) plus the raw bits, and Python reads it back with
+  `np.load(f).view(ml_dtypes.bfloat16)`. `toNpy()` on a bf16 tensor writes
+  exactly those bytes; they are byte-identical to `np.save` (oracle-tested).
+  Reading one needs `Tensor.fromNpy(bytes, { voidAs: "bf16" })`, the JS
+  equivalent of that `.view()`. Without the option a `'<V2'`/`'|V2'` file
+  throws, because the file itself does not say it is bfloat16.
 - **`f16`/`bf16` are storage dtypes.** Elements are raw IEEE binary16 /
   bfloat16 bit patterns in a `Uint16Array` (the layout safetensors, ONNX
   Runtime and WebGPU use — zero-copy across those boundaries). Values
@@ -102,11 +109,22 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
   NumPy's `astype(float16)`; bf16 equal to the standard f32→bf16 RNE).
   Structural ops (views, `contiguous`, `concat`/`stack`/`take`/`flip`/
   `pad`/`where`/`mask`…) just move bits and work. **Arithmetic, comparison,
-  reduction, sort and matmul kernels throw** `TypeError` on half dtypes —
-  `cast("f32")`, compute, `cast("f16")` back. (Computing internally in f32
-  would be implicit promotion, which this package forbids; a fused f16
-  kernel is a WASM/WebGPU concern.) `.data` of a half tensor is bits, not
-  values. The codec is exported as `encodeHalf`/`decodeHalf`/`isHalfDType`
+  reduction, sort and matmul kernels throw** `TypeError` on half dtypes.
+  Computing internally in f32 would be implicit promotion, which this
+  package forbids; a fused f16 kernel is a WASM/WebGPU concern. `.data` of a
+  half tensor is bits, not values. There are two explicit ways to compute:
+  - `cast("f32")`, compute, then `cast("f16")` back, by hand.
+  - `withCompute("f32", [a, b], (a, b) => a.matmul(b).relu())`, which is
+    the opt-in form of the same thing. It casts the f16/bf16 inputs to the
+    named compute dtype (`"f32"` or `"f64"`) and passes other inputs through
+    unchanged. It runs `fn`, then casts every compute-dtype result back to
+    the inputs' half dtype; a bool or index result is returned as it is.
+    **Rounding happens once, when the region exits.** A single op is
+    bit-identical to NumPy's own float16 ufunc. A chain equals NumPy's
+    `f(a.astype(float32)).astype(float16)`, not a per-op f16 chain. Mixed
+    f16/bf16 inputs, or no half input at all, throw. All of this is
+    oracle-tested against NumPy and, for bf16, `ml_dtypes`.
+  The codec is exported as `encodeHalf`/`decodeHalf`/`isHalfDType`
   — the one f16/bf16 implementation in Math Plus.
 - `shape` is frozen; an `Rng`'s state advances between calls (not reset).
 
@@ -137,7 +155,11 @@ so which path ran is never observable except in time. Numbers:
 
 `npm test`. Differential tests against a NumPy oracle skip unless a Python
 with NumPy is found (`MATH_PLUS_ORACLE_PYTHON`); CI verifies the oracle is
-importable so they can't silently skip.
+importable so they can't silently skip. The bf16 oracle tests in
+`test/half-compute.test.ts` also need `ml_dtypes`. They use the first
+interpreter that can import it, falling back to
+`uv run --with numpy --with ml_dtypes python` when `uv` is installed, and
+skip otherwise.
 
 ## Provenance
 

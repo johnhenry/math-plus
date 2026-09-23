@@ -95,6 +95,27 @@ function buildImports(pkg) {
   return imports;
 }
 
+/**
+ * JSR `exports` from package.json's: a lone "." stays the plain
+ * `"./src/index.ts"` string; packages with subpath exports (e.g.
+ * `@johnhenry/math-plus-safetensors/tensor`,
+ * `@johnhenry/math-plus-tensor-autograd/safetensors`) get an exports MAP,
+ * each `./dist/<file>.js` target mapped to its `./src/<file>.ts` source —
+ * otherwise those subpaths would silently not exist on JSR.
+ */
+function buildExports(pkg) {
+  const exp = pkg.exports;
+  if (!exp || typeof exp !== "object" || Object.keys(exp).length <= 1) return "./src/index.ts";
+  const out = {};
+  for (const [subpath, target] of Object.entries(exp)) {
+    const dist = typeof target === "string" ? target : (target.default ?? target.import);
+    const match = /^\.\/dist\/(.+)\.js$/.exec(dist ?? "");
+    if (!match) throw new Error(`${pkg.name}: cannot map export "${subpath}" (${JSON.stringify(target)}) to a src/*.ts file`);
+    out[subpath] = `./src/${match[1]}.ts`;
+  }
+  return out;
+}
+
 for (const dir of PACKAGE_DIRS) {
   const pkgPath = join(ROOT, dir, "package.json");
   const pkg = readJson(pkgPath);
@@ -106,7 +127,7 @@ for (const dir of PACKAGE_DIRS) {
     // JSR hard-requires a license (error[missing-license] otherwise --
     // found on the first real publish run, 2026-08-14).
     license: pkg.license ?? "MIT",
-    exports: "./src/index.ts",
+    exports: buildExports(pkg),
     ...(Object.keys(imports).length > 0 ? { imports } : {}),
   };
 

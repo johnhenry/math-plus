@@ -18,9 +18,9 @@ const ds = fromAsync([1, 2, 3, 4, 5, 6, 7, 8])
 console.log(await ds.toArray()); // [40, 60]
 console.log(await ds.toArray()); // [40, 60] — again; the pipeline re-iterates
 
-// Batching into the trainer's exact Batch shape. TRAP: collate defaults to
-// f32, but nn.Linear's parameters are f64 and tensor-core has no implicit
-// promotion — pass { dtype: "f64" } explicitly.
+// Batching into the trainer's exact Batch shape. collate defaults to f32,
+// matching nn.Linear's default parameter dtype (tensor-core has no implicit
+// promotion — a { dtype: "f64" } model needs collate.xy({ dtype: "f64" })).
 const samples = Array.from({ length: 64 }, (_, i) => {
   const x = i / 32 - 1;
   return { x: [x], y: [3 * x + 2] };
@@ -28,7 +28,7 @@ const samples = Array.from({ length: 64 }, (_, i) => {
 
 const pipeline = fromAsync(samples)
   .epochs(60, { reshuffle: { seed: 42 } }) // per-epoch reshuffle, reproducible
-  .batch(16, { collate: collate.xy({ dtype: "f64" }) });
+  .batch(16, { collate: collate.xy() });
 
 const model = new nn.Linear(1, 1, { rng: random.seed(7) });
 const opt = new optim.SGD(model.parameters(), { lr: 0.05 });
