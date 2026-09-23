@@ -27,22 +27,9 @@
  * a caller-supplied input.
  */
 import { GPUTensor } from "./device.ts";
-import {
-  acquireBuffer,
-  allocateGPUResidentBuffer,
-  bindingOf,
-  getOrCreateComputePipeline,
-  releaseBuffer,
-  type SizedBuffer,
-} from "./gpu-runtime.ts";
+import { allocateGPUResidentBuffer, bindingOf, dispatchKernel, type SizedBuffer } from "./gpu-runtime.ts";
 
 const TILE = 8;
-
-function dims4Uniform(device: GPUDevice, values: readonly [number, number, number, number]): SizedBuffer {
-  const sized = acquireBuffer(device, 16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-  device.queue.writeBuffer(sized.buffer, 0, new Uint32Array(values));
-  return sized;
-}
 
 /** Attention kernels are f32-only: reject f16 `GPUTensor`s up front instead of reinterpreting their bits as f32. */
 function f32Binding(op: string, t: GPUTensor): SizedBuffer {
@@ -52,32 +39,23 @@ function f32Binding(op: string, t: GPUTensor): SizedBuffer {
 
 /**
  * Dispatch a compute shader (3-D workgroup grid) and wrap its output buffer
- * as a `GPUTensor` of `outShape` WITHOUT reading it back — the GPU-resident
- * counterpart of the old `dispatch3D`, which always staged the result out to
- * a `Float32Array` before returning.
+ * as a `GPUTensor` of `outShape` WITHOUT reading it back. `dims` travels in
+ * the runtime's uniform ring (gpu-runtime.ts `dispatchKernel`), and the
+ * bind group is cached across calls on the same buffers.
  */
 function dispatch3DResident(
   device: GPUDevice,
+  label: string,
   code: string,
   bindings: readonly SizedBuffer[],
+  dims: readonly [number, number, number, number],
   outputIndex: number,
   outShape: readonly number[],
   x: number,
   y: number,
   z: number,
 ): GPUTensor {
-  const pipeline = getOrCreateComputePipeline(device, code);
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: bindings.map((b, i) => ({ binding: i, resource: { buffer: b.buffer } })),
-  });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.max(1, x), Math.max(1, y), Math.max(1, z));
-  pass.end();
-  device.queue.submit([encoder.finish()]);
+  dispatchKernel(device, code, bindings, [x, y, z], { uniform: new Uint32Array(dims), label });
   return GPUTensor.fromBuffer(device, (bindings[outputIndex] as SizedBuffer).buffer, outShape);
 }
 
@@ -132,21 +110,18 @@ export async function runQKT(
     throw new RangeError(`runQKT: K shape [${k.shape}] does not match (batch=${batch}, seqK=${seqK}, dim=${dim})`);
   }
   const bufOut = allocateGPUResidentBuffer(device, batch * seqQ * seqK);
-  const dims = dims4Uniform(device, [seqQ, seqK, dim, batch]);
-  try {
-    return dispatch3DResident(
-      device,
-      QKT_WGSL,
-      [f32Binding("runQKT", q), f32Binding("runQKT", k), bufOut, dims],
-      2,
-      [batch, seqQ, seqK],
-      Math.ceil(seqK / TILE),
-      Math.ceil(seqQ / TILE),
-      batch,
-    );
-  } finally {
-    releaseBuffer(device, dims);
-  }
+  return dispatch3DResident(
+    device,
+    "attention:qkt",
+    QKT_WGSL,
+    [f32Binding("runQKT", q), f32Binding("runQKT", k), bufOut],
+    [seqQ, seqK, dim, batch],
+    2,
+    [batch, seqQ, seqK],
+    Math.ceil(seqK / TILE),
+    Math.ceil(seqQ / TILE),
+    batch,
+  );
 }
 
 const SOFTMAX_WGSL = `
@@ -196,12 +171,18 @@ export async function runSoftmax(
   const size = x.shape.reduce((a, b) => a * b, 1);
   if (size !== rows * cols) throw new RangeError(`runSoftmax: x has ${size} elements, expected rows*cols ${rows * cols}`);
   const bufOut = allocateGPUResidentBuffer(device, rows * cols);
-  const dims = dims4Uniform(device, [rows, cols, 0, 0]);
-  try {
-    return dispatch3DResident(device, SOFTMAX_WGSL, [f32Binding("runSoftmax", x), bufOut, dims], 1, [rows, cols], Math.ceil(rows / 64), 1, 1);
-  } finally {
-    releaseBuffer(device, dims);
-  }
+  return dispatch3DResident(
+    device,
+    "attention:softmax",
+    SOFTMAX_WGSL,
+    [f32Binding("runSoftmax", x), bufOut],
+    [rows, cols, 0, 0],
+    1,
+    [rows, cols],
+    Math.ceil(rows / 64),
+    1,
+    1,
+  );
 }
 
 const WEIGHTED_SUM_WGSL = `
@@ -252,19 +233,17 @@ export async function runWeightedSum(
     throw new RangeError(`runWeightedSum: V shape [${v.shape}] does not match (batch=${batch}, seqK=${seqK}, dim=${dim})`);
   }
   const bufOut = allocateGPUResidentBuffer(device, batch * seqQ * dim);
-  const dims = dims4Uniform(device, [seqQ, seqK, dim, batch]);
-  try {
-    return dispatch3DResident(
-      device,
-      WEIGHTED_SUM_WGSL,
-      [f32Binding("runWeightedSum", weights), f32Binding("runWeightedSum", v), bufOut, dims],
-      2,
-      [batch, seqQ, dim],
-      Math.ceil(dim / TILE),
-      Math.ceil(seqQ / TILE),
-      batch,
-    );
-  } finally {
-    releaseBuffer(device, dims);
-  }
+  return dispatch3DResident(
+    device,
+    "attention:weighted-sum",
+    WEIGHTED_SUM_WGSL,
+    [f32Binding("runWeightedSum", weights), f32Binding("runWeightedSum", v), bufOut],
+    [seqQ, seqK, dim, batch],
+    2,
+    [batch, seqQ, dim],
+    Math.ceil(dim / TILE),
+    Math.ceil(seqQ / TILE),
+    batch,
+  );
 }
+

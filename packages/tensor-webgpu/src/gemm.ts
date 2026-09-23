@@ -47,10 +47,10 @@ import {
   type TiledGemmConfig,
 } from "./gemm-kernels.ts";
 import {
-  acquireBuffer,
   allocateGPUResidentBuffer,
   allocateOutputBuffer,
   bindingOf,
+  dispatchKernel,
   getOrCreateComputePipeline,
   readBackBytes,
   releaseBuffer,
@@ -236,22 +236,10 @@ async function resolvePlan(
 // ---- dispatch ---------------------------------------------------------------
 
 function encodeGemm(device: GPUDevice, plan: GemmPlan, a: SizedBuffer, b: SizedBuffer, out: SizedBuffer, m: number, k: number, n: number): void {
-  const dims = acquireBuffer(device, 16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-  device.queue.writeBuffer(dims.buffer, 0, new Uint32Array([m, n, k, 0]));
-  const pipeline = getOrCreateComputePipeline(device, plan.code);
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [a, b, out, dims].map((s, i) => ({ binding: i, resource: { buffer: s.buffer } })),
+  dispatchKernel(device, plan.code, [a, b, out], [plan.groups[0], plan.groups[1]], {
+    uniform: new Uint32Array([m, n, k, 0]),
+    label: `gemm:${plan.kernel}`,
   });
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.max(1, plan.groups[0]), Math.max(1, plan.groups[1]));
-  pass.end();
-  device.queue.submit([encoder.finish()]);
-  // Safe to pool immediately: later writes to this buffer are queue-ordered after this submit.
-  releaseBuffer(device, dims);
 }
 
 function checkLengths(fn: string, aLen: number, bLen: number, m: number, k: number, n: number): void {
