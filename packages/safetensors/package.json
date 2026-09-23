@@ -23,7 +23,7 @@
     "test:bun": "bun test ./test/"
   },
   "peerDependencies": {
-    "@johnhenry/math-plus-tensor-core": "^0.0.0"
+    "@johnhenry/math-plus-tensor-core": "^0.0.0 || ^0.1.0"
   },
   "peerDependenciesMeta": {
     "@johnhenry/math-plus-tensor-core": {
