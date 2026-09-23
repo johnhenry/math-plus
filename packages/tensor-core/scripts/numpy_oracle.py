@@ -7,8 +7,10 @@ Reads a JSON job file:
         | "matmul" | "dot" | "cast" | "eq" | "ne" | "lt" | "lte" | "gt" | "gte"
         | "min" | "max" | "argmin" | "argmax" | "sqrt" | "variance" | "std"
         | "cumsum" | "cumprod" | "sort" | "argsort" | "topk_values" | "topk_indices"
-        | "concat" | "stack" | "where" | "relu" | "sigmoid" | "gelu" | "softmax" | "log",
+        | "concat" | "stack" | "where" | "relu" | "sigmoid" | "gelu" | "softmax" | "log"
+        | "f16_bits" | "bf16_bits",
     "ddof": 1,                            # optional (variance/std)
+    "approximate": "tanh",                # optional (gelu: "none" (default) | "tanh")
     "k": 3, "largest": true,              # optional (topk)
     "condition": "/path/cond.npy",        # optional (where -- npy dtype must be bool)
     "inputs": ["/path/a.npy", ...],       # .npy files written by tensor-core
@@ -39,7 +41,7 @@ DTYPE_MAP = {
     "u16": "uint16", "i16": "int16",
     "u32": "uint32", "i32": "int32",
     "u64": "uint64", "i64": "int64",
-    "f32": "float32", "f64": "float64",
+    "f16": "float16", "f32": "float32", "f64": "float64",
 }
 
 
@@ -84,6 +86,16 @@ def main() -> None:
         result = np.asarray(np.dot(inputs[0], inputs[1]))
     elif op == "cast":
         result = inputs[0].astype(to_numpy_dtype(job["dtype"]))
+    elif op == "bf16_bits":
+        # NumPy has no bfloat16; this is the reference float32 -> bfloat16
+        # round-to-nearest-even bit trick (PyTorch c10 / TensorFlow /
+        # safetensors writers all use it), producing the raw uint16 patterns.
+        # Callers only pass NaN-free inputs (the trick is not NaN-safe).
+        u = inputs[0].astype(np.float32).view(np.uint32).astype(np.uint64)
+        rounded = (u + 0x7FFF + ((u >> 16) & 1)) >> 16
+        result = rounded.astype(np.uint16)
+    elif op == "f16_bits":
+        result = inputs[0].astype(np.float16).view(np.uint16)
     elif op in ("eq", "ne", "lt", "lte", "gt", "gte"):
         a = inputs[0]
         b = job["scalar"] if "scalar" in job else inputs[1]
@@ -189,9 +201,17 @@ def main() -> None:
     elif op == "sigmoid":
         result = 1 / (1 + np.exp(-inputs[0]))
     elif op == "gelu":
+        # "approximate" mirrors torch.nn.functional.gelu: "none" (default, exact
+        # erf-GELU -- NumPy has no erf, so the C library's math.erf is the
+        # reference) or "tanh".
         x = inputs[0]
-        c = np.sqrt(2 / np.pi)
-        result = 0.5 * x * (1 + np.tanh(c * (x + 0.044715 * x**3)))
+        if job.get("approximate", "none") == "tanh":
+            c = np.sqrt(2 / np.pi)
+            result = 0.5 * x * (1 + np.tanh(c * (x + 0.044715 * x**3)))
+        else:
+            import math
+            erf = np.vectorize(math.erf, otypes=[np.float64])
+            result = (0.5 * x.astype(np.float64) * (1 + erf(x.astype(np.float64) / math.sqrt(2)))).astype(x.dtype)
     elif op == "softmax":
         x = inputs[0]
         axis = job.get("axis", -1)

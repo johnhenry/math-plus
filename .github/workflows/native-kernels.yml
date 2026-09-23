@@ -70,6 +70,30 @@ jobs:
       - name: Run crate tests
         run: cargo test --release -p tensor-wasm-kernels
 
+      # The Deno script imports packages/tensor-wasm/src (-> the
+      # @johnhenry/math-plus-telemetry workspace package, resolved through
+      # node_modules/ and its built dist/) and loads the WASM artifacts for
+      # the native-vs-WASM comparison, so it needs the npm workspace
+      # installed plus those two things built. Without this the step fails
+      # with Deno's "Could not resolve @johnhenry/math-plus-telemetry ...
+      # did you forget to run deno install?" (failing on main since the
+      # telemetry import landed; fixed alongside issue #121).
+      - name: Set up Node.js (workspace deps for the Deno verification)
+        if: ${{ matrix.verify }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install workspace + build WASM artifacts and telemetry
+        if: ${{ matrix.verify }}
+        run: |
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update && sudo apt-get install -y lld
+          npm ci
+          npm run build:wasm -w @johnhenry/math-plus-tensor-wasm
+          npm run build -w @johnhenry/math-plus-telemetry
+
       - name: Verify native-vs-WASM agreement under Deno
         if: ${{ matrix.verify }}
         uses: denoland/setup-deno@v2

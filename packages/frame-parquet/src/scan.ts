@@ -36,7 +36,7 @@
  * zero-row inputs itself), so `scanParquet` just calls `Frame.concat`
  * directly below — no local workaround needed anymore.
  */
-import { glob } from "node:fs/promises";
+import { glob, stat } from "node:fs/promises";
 import { Frame } from "@johnhenry/math-plus-frame-arrow";
 import { readParquet, type ReadParquetOptions } from "./read.ts";
 
@@ -45,8 +45,26 @@ export type ScanParquetOptions = ReadParquetOptions;
 /** Shared by `scanParquet` and `scan-lazy.ts`'s `scanParquetLazy` — resolves
  * a glob pattern to a deterministically-ordered list of matching paths
  * (filesystem readdir order isn't guaranteed, so both scanners need the same
- * explicit sort for reproducible results/tests). */
+ * explicit sort for reproducible results/tests).
+ *
+ * A pattern with no glob metacharacters is resolved with `stat` instead of
+ * `glob`: Bun 1.2's `fs.promises.glob` returns NOTHING for an absolute
+ * literal path (`glob("/abs/part-0.parquet")` -> [], while
+ * `glob("/abs/part-*.parquet")` and relative literals work) — verified on
+ * Bun 1.2.17, caught by this package's own "single file" tests under
+ * `bun test`. Node's glob returns the path itself, which is what this
+ * reproduces on both runtimes. */
 export async function globSortedParquetPaths(pattern: string): Promise<string[]> {
+  // Metacharacters: `*?[]{}` plus extglob openers like `@(`/`!(`/`+(` (a
+  // bare `@` is literal — e.g. an npm-scope directory in the path).
+  if (!/[*?[\]{}]|[!+@]\(/.test(pattern)) {
+    try {
+      await stat(pattern);
+      return [pattern];
+    } catch {
+      return [];
+    }
+  }
   const paths: string[] = [];
   for await (const p of glob(pattern)) paths.push(p);
   paths.sort();

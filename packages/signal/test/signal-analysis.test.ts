@@ -4,7 +4,9 @@
  * it designed, and stft had no aggregate (power spectral density).
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { butter, convolve1D, correlate, correlate1D, freqz, welch } from "../src/index.ts";
 import { runScipyOracle, SCIPY_SKIP_REASON } from "./helpers.ts";

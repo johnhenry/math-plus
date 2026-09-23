@@ -37,6 +37,7 @@ const PACKAGE_DIRS = [
   "packages/frame-parquet",
   "packages/image",
   "packages/mcp",
+  "packages/safetensors",
   "packages/scalar-types",
   "packages/signal",
   "packages/telemetry",
