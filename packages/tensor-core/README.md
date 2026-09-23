@@ -110,6 +110,29 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
   — the one f16/bf16 implementation in Math Plus.
 - `shape` is frozen; an `Rng`'s state advances between calls (not reset).
 
+## Performance: fast paths and their limits
+
+Contiguous inputs (C-order, any storage offset) take flat typed-array
+kernels; everything else falls back to the general strided path. Both
+produce **bit-identical** results (`test/fast-paths.test.ts` asserts it),
+so which path ran is never observable except in time. Numbers:
+[`docs/spikes/tensor-core-fast-paths.md`](../../docs/spikes/tensor-core-fast-paths.md).
+
+- **Fast:** `add/sub/mul/div` when both sides are full-shape, one side is
+  a single element, or one side is broadcast as a trailing block
+  (`[B,T,C] + [C]`) or per row (`[B,T,C] - [B,T,1]`); unary math ops;
+  `cast`; `contiguous`; comparisons (same shape or scalar); `sum`/`mean`/
+  `min`/`max` (full or any axis); fused `softmax` and `variance`/`std`
+  (f32/f64). `matmul` always packs operands into f64 panels and runs a
+  4×4 register-blocked GEMM (strided operands included).
+- **Not fast-pathed:** strided views (transposes, stepped/negative slices,
+  stride-0 `broadcastTo` views, other broadcast patterns such as
+  `[B,T,C] + [1,T,1]`), `i64`/`u64` (BigInt), `argmin`/`argmax`,
+  cumulative scans, sorting, `where`, logical ops. These are correct, just
+  slower.
+- Single-threaded, no SIMD. `matmul` allocates up to `(m+n)·k + m·n` f64
+  scratch per call. For more, see tensor-wasm above.
+
 ## Tests
 
 `npm test`. Differential tests against a NumPy oracle skip unless a Python
@@ -120,5 +143,5 @@ importable so they can't silently skip.
 
 Built across issues #1 (indexing/slicing), #2 (matmul), #4 (concat/stack/
 where), #5 (random), #64/#65 (op-table parity with the compiled IR), #84
-(unfold). Part of the [math-plus](https://github.com/johnhenry/math-plus)
+(unfold), #120 (contiguous fast paths, blocked GEMM). Part of the [math-plus](https://github.com/johnhenry/math-plus)
 monorepo; family docs at <https://opensource.johnhenry.me/math/>.
