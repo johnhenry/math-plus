@@ -18,5 +18,12 @@ export function sumToShape(grad: Tensor, targetShape: readonly number[]): Tensor
       g = g.sum(axis).unsqueeze(axis);
     }
   }
-  return g.reshape(targetShape as number[]);
+  // A gradient that reached here unreduced may be a strided view (e.g. from
+  // a permute/transpose backward); Tensor.reshape refuses those.
+  return contiguousOf(g).reshape(targetShape as number[]);
+}
+
+/** `t` itself if already C-contiguous (reshape-able), else a packed copy. */
+export function contiguousOf(t: Tensor): Tensor {
+  return t.isContiguous ? t : t.contiguous();
 }

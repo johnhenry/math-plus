@@ -19,10 +19,9 @@ test("trainer.fit consumes a @johnhenry/math-plus-data pipeline: linear regressi
 
   const pipeline = fromAsync(samples)
     .epochs(60, { reshuffle: { seed: 42 } })
-    // f64 to match nn.Linear's parameter dtype (tensor-core has no implicit
-    // promotion, by design) — collate's default stays f32, the family's
-    // ML-oriented default.
-    .batch(16, { collate: collate.xy({ dtype: "f64" }) });
+    // collate's default f32 matches nn.Linear's default parameter dtype
+    // (since tensor-autograd #123; tensor-core has no implicit promotion).
+    .batch(16, { collate: collate.xy() });
 
   const model = new nn.Linear(1, 1);
   const t = trainer.configure({

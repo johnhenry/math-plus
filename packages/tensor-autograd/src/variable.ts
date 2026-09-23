@@ -23,9 +23,44 @@
  * immutable style — there's nothing to reject at runtime because the
  * mutating method doesn't exist.
  */
-import { Tensor, type Axis } from "@johnhenry/math-plus-tensor-core";
+import { Tensor, allocate, type AnyTypedArray, type Axis, type DType, type SliceSpec } from "@johnhenry/math-plus-tensor-core";
 import { timed } from "@johnhenry/math-plus-telemetry";
-import { sumToShape } from "./shape-utils.ts";
+import { contiguousOf, sumToShape } from "./shape-utils.ts";
+import { geluExact, geluExactDerivative } from "./erf.ts";
+
+/** Swap the last two axes (a view) — matmul's transpose for batched operands. */
+function swapLastTwo(t: Tensor): Tensor {
+  const axes = Array.from({ length: t.ndim }, (_, i) => i);
+  axes[t.ndim - 1] = t.ndim - 2;
+  axes[t.ndim - 2] = t.ndim - 1;
+  return t.permute(axes);
+}
+
+/** Elementwise `fn` over a float tensor into a fresh contiguous tensor of the same dtype. */
+function mapFloat(t: Tensor, fn: (v: number) => number): Tensor {
+  const src = t.contiguous().data as Float64Array;
+  const out = allocate(t.dtype, t.size) as Exclude<AnyTypedArray, BigInt64Array | BigUint64Array>;
+  for (let i = 0; i < t.size; i++) out[i] = fn(src[i] as number);
+  return Tensor.fromTypedArray(out, [...t.shape], { dtype: t.dtype });
+}
+
+/**
+ * Gradient of `x.slice(...specs)`: zeros shaped like `x`, with `g` written at
+ * the sliced positions. Flat target indices come from slicing an `arange`
+ * index tensor the same way — tensor-core's public API has no strided
+ * scatter, and this keeps the (subtle) slice-resolution rules in exactly one
+ * place: `Tensor.slice` itself.
+ */
+function scatterIntoZeros(g: Tensor, x: Tensor, specs: Array<SliceSpec | null>): Tensor {
+  const index = Tensor.arange(0, x.size, 1, { dtype: "f64" })
+    .reshape([...x.shape])
+    .slice(...specs)
+    .contiguous().data as Float64Array;
+  const src = g.contiguous().data as Float64Array;
+  const out = allocate(g.dtype, x.size) as Float64Array;
+  for (let i = 0; i < index.length; i++) out[index[i] as number] = src[i] as number;
+  return Tensor.fromTypedArray(out, [...x.shape], { dtype: g.dtype });
+}
 
 let gradEnabled = true;
 
@@ -222,7 +257,11 @@ export class Variable {
     ]);
   }
 
-  div(other: Variable): Variable {
+  div(other: Variable | number): Variable {
+    if (typeof other === "number") {
+      const value = this.value.div(other);
+      return Variable.fromOp(value, [this], (g) => [g.div(other)]);
+    }
     const value = this.value.div(other.value);
     return Variable.fromOp(value, [this, other], (g) => [
       sumToShape(g.div(other.value), this.value.shape),
@@ -231,15 +270,23 @@ export class Variable {
     ]);
   }
 
-  /** 2-D only in v1 — batched/1-D matmul gradients are a follow-up, not scoped here. */
+  /**
+   * NumPy/PyTorch `matmul` for operands with ndim >= 2: the last two axes
+   * multiply, leading (batch) axes broadcast — e.g. attention's
+   * `[B, H, L, D] @ [B, H, D, S]`, or `[B, T, in] @ [in, out]`. Backward is
+   * `g @ b^T` / `a^T @ g` (transposing the last two axes), reduced back over
+   * any broadcast batch axes with {@link sumToShape}. 1-D operands are still
+   * rejected (unsqueeze first) — their squeeze-back semantics would need
+   * their own backward rules for no current caller.
+   */
   matmul(other: Variable): Variable {
-    if (this.value.ndim !== 2 || other.value.ndim !== 2) {
-      throw new TypeError("Variable.matmul: only 2-D operands are supported in v1");
+    if (this.value.ndim < 2 || other.value.ndim < 2) {
+      throw new TypeError("Variable.matmul: operands must have ndim >= 2 (unsqueeze a 1-D operand first)");
     }
     const value = this.value.matmul(other.value);
     return Variable.fromOp(value, [this, other], (g) => [
-      g.matmul(other.value.transpose()),
-      this.value.transpose().matmul(g),
+      sumToShape(g.matmul(swapLastTwo(other.value)), this.value.shape),
+      sumToShape(swapLastTwo(this.value).matmul(g), other.value.shape),
     ]);
   }
 
@@ -311,11 +358,26 @@ export class Variable {
   }
 
   /**
-   * GELU backward via the tanh-approximation's exact derivative. Uses the
-   * identity tanh(x) = 2*sigmoid(2x)-1 to avoid needing a tensor-core
-   * `.tanh()` method for a single niche gradient.
+   * GELU. `approximate: "tanh"` (the DEFAULT here, for backward
+   * compatibility — tensor-core's `Tensor.gelu()` is the tanh form) or
+   * `"none"` for the exact erf form `x * Phi(x)`, which is PyTorch's
+   * `F.gelu` default and what BERT/ModernBERT checkpoints expect. Note the
+   * default is the OPPOSITE of PyTorch's; pass `{ approximate: "none" }`
+   * explicitly when porting PyTorch code.
+   *
+   * The tanh backward uses tanh(x) = 2*sigmoid(2x)-1 (historical; identical
+   * values). The exact form's erf lives in `./erf.ts` until tensor-core
+   * grows a canonical `erf` (issue #122) — see the overlap note there.
    */
-  gelu(): Variable {
+  gelu(options: { approximate?: "tanh" | "none" } = {}): Variable {
+    const approximate = options.approximate ?? "tanh";
+    if (approximate === "none") {
+      const value = mapFloat(this.value, geluExact);
+      return Variable.fromOp(value, [this], (g) => [g.mul(mapFloat(this.value, geluExactDerivative))]);
+    }
+    if (approximate !== "tanh") {
+      throw new RangeError(`gelu: approximate must be "tanh" or "none", got ${JSON.stringify(approximate)}`);
+    }
     const value = this.value.gelu();
     return Variable.fromOp(value, [this], (g) => {
       const c = Math.sqrt(2 / Math.PI);
@@ -339,6 +401,139 @@ export class Variable {
       return [value.mul(g.sub(dot))];
     });
   }
+  exp(): Variable {
+    const value = this.value.exp();
+    return Variable.fromOp(value, [this], (g) => [g.mul(value)]);
+  }
+
+  tanh(): Variable {
+    const value = this.value.tanh();
+    // d/dx tanh(x) = 1 - tanh(x)^2
+    return Variable.fromOp(value, [this], (g) => [g.mul(value.mul(value).mul(-1).add(1))]);
+  }
+
+  // ---- views & structure (issue #123) ----------------------------------------
+  //
+  // Gradients of view ops are made contiguous before they flow on, so no
+  // downstream backward ever has to care whether its incoming gradient is a
+  // strided view.
+
+  /**
+   * New shape (one -1 allowed), like `Tensor.reshape` — but a
+   * non-contiguous input (e.g. after `permute`) is packed first instead of
+   * throwing, matching PyTorch's `reshape` (view when possible, else copy).
+   */
+  reshape(shape: readonly number[]): Variable {
+    const src = this.value.isContiguous ? this.value : this.value.contiguous();
+    const value = src.reshape(shape as number[]);
+    const inShape = [...this.value.shape];
+    return Variable.fromOp(value, [this], (g) => [contiguousOf(g).reshape(inShape)]);
+  }
+
+  /** Axis permutation (a view). Negative axes allowed. Backward applies the inverse permutation. */
+  permute(axes: readonly number[]): Variable {
+    const nd = this.value.ndim;
+    const norm = axes.map((a) => (a < 0 ? a + nd : a));
+    const value = this.value.permute(norm);
+    const inverse = new Array<number>(nd);
+    norm.forEach((a, i) => {
+      inverse[a] = i;
+    });
+    return Variable.fromOp(value, [this], (g) => [g.permute(inverse).contiguous()]);
+  }
+
+  /**
+   * PyTorch-style `transpose(dim0, dim1)`: swap two axes (negative allowed).
+   * With no arguments, reverses all axes (tensor-core's `Tensor.transpose()`
+   * / NumPy `.T`) — for a 2-D Variable both spellings mean the same thing.
+   */
+  transpose(dim0?: number, dim1?: number): Variable {
+    const nd = this.value.ndim;
+    if (dim0 === undefined && dim1 === undefined) {
+      return this.permute(Array.from({ length: nd }, (_, i) => nd - 1 - i));
+    }
+    if (dim0 === undefined || dim1 === undefined) {
+      throw new TypeError("Variable.transpose: pass both dim0 and dim1, or neither");
+    }
+    const a = dim0 < 0 ? dim0 + nd : dim0;
+    const b = dim1 < 0 ? dim1 + nd : dim1;
+    const axes = Array.from({ length: nd }, (_, i) => i);
+    axes[a] = b;
+    axes[b] = a;
+    return this.permute(axes);
+  }
+
+  /**
+   * Strided slice with tensor-core's `Tensor.slice` semantics (specs align
+   * to leading axes; Python `slice.indices()` rules incl. negative
+   * start/end/step). Backward scatters the incoming gradient into a zero
+   * tensor of the input's shape at exactly the sliced positions.
+   */
+  slice(...specs: Array<SliceSpec | null>): Variable {
+    const value = this.value.slice(...specs);
+    return Variable.fromOp(value, [this], (g) => [scatterIntoZeros(g, this.value, specs)]);
+  }
+
+  /** PyTorch `narrow(dim, start, length)`: `length` entries of axis `dim` from `start` — a {@link slice} along one axis. */
+  narrow(dim: number, start: number, length: number): Variable {
+    const nd = this.value.ndim;
+    const ax = dim < 0 ? dim + nd : dim;
+    const specs: Array<SliceSpec | null> = new Array(ax + 1).fill(null);
+    specs[ax] = { start, end: start + length };
+    return this.slice(...specs);
+  }
+
+  /** Join along an existing axis (like `Tensor.concat`); backward slices the gradient back apart. */
+  static concat(vars: readonly Variable[], axis = 0): Variable {
+    if (vars.length === 0) throw new RangeError("Variable.concat requires at least one Variable");
+    const nd = (vars[0] as Variable).ndim;
+    const ax = axis < 0 ? axis + nd : axis;
+    const value = Tensor.concat(
+      vars.map((v) => v.value),
+      { axis: ax },
+    );
+    return Variable.fromOp(value, vars, (g) => {
+      let cursor = 0;
+      return vars.map((v) => {
+        const size = v.value.shape[ax] as number;
+        const specs: Array<SliceSpec | null> = new Array(ax + 1).fill(null);
+        specs[ax] = { start: cursor, end: cursor + size };
+        cursor += size;
+        return g.slice(...specs).contiguous();
+      });
+    });
+  }
+
+  /**
+   * `where(mask, value, this)` — PyTorch `masked_fill`. `mask` is a plain
+   * bool Tensor (not differentiable), broadcast against `this`. Positions
+   * where `mask` is true get `value` (e.g. `-Infinity` for attention) and
+   * receive zero gradient.
+   */
+  maskedFill(mask: Tensor, value: number): Variable {
+    if (mask.dtype !== "bool") {
+      throw new TypeError(`maskedFill: mask must be a bool tensor, got ${mask.dtype}`);
+    }
+    const fill = Tensor.full([], value, { dtype: this.value.dtype });
+    const out = Tensor.where(mask, fill, this.value);
+    return Variable.fromOp(out, [this], (g) => [
+      sumToShape(Tensor.where(mask, Tensor.zeros([], { dtype: g.dtype }), g), this.value.shape),
+    ]);
+  }
+
+  /**
+   * Differentiable dtype conversion (`Tensor.cast`); backward casts the
+   * gradient back to the source dtype. The mechanism behind half-precision
+   * (f16/bf16) parameter STORAGE: layers upcast such parameters to the
+   * input's compute dtype on the fly (tensor-core cannot compute in half).
+   */
+  cast(dtype: DType): Variable {
+    if (dtype === this.value.dtype) return this;
+    const srcDtype = this.value.dtype;
+    const value = this.value.cast(dtype);
+    return Variable.fromOp(value, [this], (g) => [g.cast(srcDtype)]);
+  }
+
 }
 
 /** `Tensor.variable(x)` from the source design — see the naming note above. */

@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./safetensors": {
+      "types": "./dist/safetensors.d.ts",
+      "default": "./dist/safetensors.js"
     }
   },
   "files": [
@@ -21,8 +25,17 @@
     "@johnhenry/math-plus-tensor-core": "^0.0.0",
     "@johnhenry/math-plus-telemetry": "^0.0.0"
   },
+  "peerDependencies": {
+    "@johnhenry/math-plus-safetensors": "^0.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@johnhenry/math-plus-safetensors": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "@johnhenry/math": "^0.0.1"
+    "@johnhenry/math": "^0.0.1",
+    "@johnhenry/math-plus-safetensors": "^0.0.0"
   },
   "repository": {
     "type": "git",

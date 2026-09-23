@@ -54,9 +54,10 @@ const { lossHistory } = await trainer.fit(pipeline); // tensor-autograd
   `AsyncIterable` is assumed one-shot — a second pass throws with a hint, and
   `.epochs()` refuses one-shot sources *up front*. Pass a factory
   (`fromAsync(() => stream())`) for multi-pass pipelines.
-- **`collate` defaults to `f32`, but `nn.Linear` parameters are `f64`** and
-  tensor-core has no implicit dtype promotion by design — pass
-  `collate.xy({ dtype: "f64" })` when feeding the trainer.
+- **`collate` defaults to `f32`**, matching `nn.*` parameters' default
+  dtype (f32 since `@johnhenry/math-plus-tensor-autograd` #123). tensor-core
+  has no implicit dtype promotion by design, so if you build a model with
+  `{ dtype: "f64" }` parameters, pass `collate.xy({ dtype: "f64" })` too.
 - **Shuffle:** omitting `seed` is non-reproducible. `bufferSize` defaults to
   `Infinity` (full materialize + Fisher-Yates); a finite buffer is the
   tf.data streaming shuffle with mixing quality bounded by the buffer.
