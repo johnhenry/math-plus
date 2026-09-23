@@ -200,7 +200,7 @@ test("fusion: WGSL erf / exact gelu / tanh gelu track the canonical f64 implemen
   const xs = new Float32Array(n);
   for (let i = 0; i < n; i++) xs[i] = -6 + (12 * i) / (n - 1); // [-6, 6], includes both series/CF regions and the |x| = 1 seam
   const bundle = bundleForBrowser([path.join(SRC, "elementwise.ts")]);
-  const run = async (op: "erf" | "gelu" | "gelu_tanh", data: Float32Array): Promise<number[]> =>
+  const run = async (op: "erf" | "gelu" | "gelu_tanh" | "tanh", data: Float32Array): Promise<number[]> =>
     harness.run<number[]>(
       `
       const adapter = await navigator.gpu.requestAdapter();
@@ -231,5 +231,10 @@ test("fusion: WGSL erf / exact gelu / tanh gelu track the canonical f64 implemen
   }
   assert.ok(worstGelu < 1e-4, `WGSL exact gelu worst relative error ${worstGelu} over [-12, 12]`);
   assert.ok(worstGeluTanh < 1e-5, `WGSL tanh gelu worst error ${worstGeluTanh} over [-12, 12]`);
+  // Regression: Metal (via Dawn) computes tanh through exp and returned NaN
+  // once that overflowed (|x| > ~44); the generated WGSL clamps to ±15.
+  const big = Float32Array.from([-1e4, -100, -45, -15, 0, 15, 45, 100, 1e4]);
+  const tanhGpu = await run("tanh", big);
+  big.forEach((v, i) => assert.equal(tanhGpu[i], Math.tanh(v) === 0 ? 0 : Math.fround(Math.tanh(v)), `WGSL tanh(${v})`));
   t.diagnostic(`WGSL erf max abs err ${worstErf.toExponential(2)}; exact gelu max rel err ${worstGelu.toExponential(2)}; tanh gelu ${worstGeluTanh.toExponential(2)}`);
 });

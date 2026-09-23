@@ -30,6 +30,7 @@ import { GPUTensor } from "./device.ts";
 import {
   acquireBuffer,
   allocateGPUResidentBuffer,
+  bindingOf,
   getOrCreateComputePipeline,
   releaseBuffer,
   type SizedBuffer,
@@ -43,9 +44,10 @@ function dims4Uniform(device: GPUDevice, values: readonly [number, number, numbe
   return sized;
 }
 
-/** A read-only view of a `GPUTensor`'s buffer as a dispatch binding — this module never releases/destroys it, ownership stays with whoever holds the `GPUTensor`. */
-function bindingOf(t: GPUTensor): SizedBuffer {
-  return { buffer: t.buffer, byteLength: t.buffer.size, usage: GPUBufferUsage.STORAGE };
+/** Attention kernels are f32-only: reject f16 `GPUTensor`s up front instead of reinterpreting their bits as f32. */
+function f32Binding(op: string, t: GPUTensor): SizedBuffer {
+  if (t.dtype !== "f32") throw new TypeError(`${op}: f32 GPUTensors only (got ${t.dtype}); only GEMM supports f16`);
+  return bindingOf(t);
 }
 
 /**
@@ -135,7 +137,7 @@ export async function runQKT(
     return dispatch3DResident(
       device,
       QKT_WGSL,
-      [bindingOf(q), bindingOf(k), bufOut, dims],
+      [f32Binding("runQKT", q), f32Binding("runQKT", k), bufOut, dims],
       2,
       [batch, seqQ, seqK],
       Math.ceil(seqK / TILE),
@@ -196,7 +198,7 @@ export async function runSoftmax(
   const bufOut = allocateGPUResidentBuffer(device, rows * cols);
   const dims = dims4Uniform(device, [rows, cols, 0, 0]);
   try {
-    return dispatch3DResident(device, SOFTMAX_WGSL, [bindingOf(x), bufOut, dims], 1, [rows, cols], Math.ceil(rows / 64), 1, 1);
+    return dispatch3DResident(device, SOFTMAX_WGSL, [f32Binding("runSoftmax", x), bufOut, dims], 1, [rows, cols], Math.ceil(rows / 64), 1, 1);
   } finally {
     releaseBuffer(device, dims);
   }
@@ -255,7 +257,7 @@ export async function runWeightedSum(
     return dispatch3DResident(
       device,
       WEIGHTED_SUM_WGSL,
-      [bindingOf(weights), bindingOf(v), bufOut, dims],
+      [f32Binding("runWeightedSum", weights), f32Binding("runWeightedSum", v), bufOut, dims],
       2,
       [batch, seqQ, dim],
       Math.ceil(dim / TILE),
