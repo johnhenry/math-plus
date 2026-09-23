@@ -59,11 +59,13 @@ jobs:
           python-version: "3.12"
 
       # ml_dtypes: bfloat16 for NumPy -- tensor-core's bf16 .npy and
-      # withCompute oracle tests (test/half-compute.test.ts).
-      - run: pip install numpy pyarrow pandas ml_dtypes
+      # withCompute oracle tests (test/half-compute.test.ts). safetensors:
+      # the reference reader/writer @johnhenry/math-plus-safetensors' oracle
+      # tests compare against (they skipped in CI without it).
+      - run: pip install numpy pyarrow pandas ml_dtypes safetensors
 
       - name: Verify the oracles are importable (differential/round-trip tests must not skip)
-        run: python3 -c "import numpy, pyarrow, pandas, ml_dtypes; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__, 'pandas', pandas.__version__, 'ml_dtypes', ml_dtypes.__version__)"
+        run: python3 -c "import numpy, pyarrow, pandas, ml_dtypes, safetensors.numpy; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__, 'pandas', pandas.__version__, 'ml_dtypes', ml_dtypes.__version__, 'safetensors', safetensors.__version__)"
 
       # Headless-WebGPU oracle for @johnhenry/math-plus-tensor-webgpu's GPU-correctness
       # tests (docs/TESTING.md "Headless WebGPU oracle"). Chrome-for-Testing
