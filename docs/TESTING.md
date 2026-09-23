@@ -204,7 +204,12 @@ result. Individual tests call `getHarness()` and `t.skip(reason)` when unavailab
 GEMM correctness (`test/gemm.test.ts`) additionally uses a NumPy float64 oracle
 (`packages/tensor-webgpu/scripts/gemm_oracle.py`, same `$MATH_PLUS_ORACLE_PYTHON` / `python3`
 resolution and skip-don't-fail rule as above), with error bounds derived from `|A|·|B|` rather than
-hand-tuned per case. A healthy local run shows `skipped 0`; the one test that skips on adapters
+hand-tuned per case. Fused attention (`test/flash-attention.test.ts`) uses a second NumPy oracle
+(`packages/tensor-webgpu/scripts/attention_oracle.py`, same resolution and skip rule). The
+`queue.writeBuffer` byteOffset regression (`test/write-buffer.test.ts`) also runs a standalone
+Bun script, `packages/tensor-webgpu/test/bun/write-buffer-offset.bun.ts`, with `bun` from `PATH`;
+the bug it guards against exists only under Bun, and the node:test suite runs under Node. That
+test skips when no `bun` binary is on `PATH`. A healthy local run shows `skipped 0`; the one test that skips on adapters
 without f32 8x8x8 subgroup matrices (anything but Apple GPUs today) says so in its skip reason.
 
 Resolution order for the Chrome binary: `$MATH_PLUS_CHROME_PATH` (explicit override), else the usual

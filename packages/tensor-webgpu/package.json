@@ -1,7 +1,7 @@
 {
   "name": "@johnhenry/math-plus-tensor-webgpu",
   "version": "0.0.0",
-  "description": "WebGPU-accelerated GEMM (tiled / skinny / subgroup-matrix kernels, f32 and f16 storage with f32 accumulation), attention-adjacent primitives, and #11-IR elementwise fusion for Math Plus tensors — browsers via navigator.gpu, Node/Bun via Dawn",
+  "description": "WebGPU-accelerated GEMM (tiled / skinny / subgroup-matrix kernels, f32 and f16 storage with f32 accumulation), fused masked flash attention, attention-adjacent primitives, and #11-IR elementwise fusion for Math Plus tensors — browsers via navigator.gpu, Node/Bun via Dawn",
   "type": "module",
   "exports": {
     ".": {
