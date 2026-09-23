@@ -8,7 +8,9 @@
  * fusion.test.ts.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Traced, type BinaryOp, type CmpOp, type UnaryOp } from "@johnhenry/math-plus-tensor-compile";
 import { ERF_F32_PARAMS, ERF_SERIES_CUTOFF } from "@johnhenry/math-plus-tensor-core";
 import { compileIRToWGSL } from "../src/fusion-wgsl.ts";

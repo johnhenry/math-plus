@@ -5,7 +5,9 @@ import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { after, before, test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { after, before, test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import {
   HttpSource,
   SafetensorsError,

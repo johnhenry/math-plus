@@ -17,7 +17,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { erf, erfc, geluErf, Tensor } from "../src/index.ts";
 
 const ORACLE_SCRIPT = new URL("../scripts/special_oracle.py", import.meta.url).pathname;

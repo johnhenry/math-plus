@@ -1,7 +1,7 @@
 {
   "name": "@johnhenry/math-plus-safetensors",
   "version": "0.0.0",
-  "description": "Universal safetensors reader/writer: validated headers, typed views (F16 as Float16Array, BF16 bits), lazy reads from Blob, HTTP ranges and file handles, tensor-core interop \u2014 part of Math Plus",
+  "description": "Universal safetensors reader/writer: validated headers, typed views (F16 as Float16Array, BF16 bits), lazy reads from Blob, HTTP ranges and file handles, tensor-core interop — part of Math Plus",
   "type": "module",
   "exports": {
     ".": {
@@ -19,9 +19,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
-    "test": "npm run typecheck && node --test test/*.test.ts"
+    "test": "npm run typecheck && node --test test/*.test.ts",
+    "test:bun": "bun test ./test/"
   },
-  "dependencies": {},
   "peerDependencies": {
     "@johnhenry/math-plus-tensor-core": "^0.0.0"
   },

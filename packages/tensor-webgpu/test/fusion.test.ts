@@ -11,7 +11,9 @@
  */
 import assert from "node:assert/strict";
 import path from "node:path";
-import test, { after } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { evalWithGrad, Traced, type IRNode } from "@johnhenry/math-plus-tensor-compile";
 import { erf, geluErf, geluTanh } from "@johnhenry/math-plus-tensor-core";
 import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
@@ -41,7 +43,7 @@ function cpuForward(node: IRNode, inputs: readonly Float32Array[], elementCount:
 }
 
 async function crossCheck(
-  t: import("node:test").TestContext,
+  t: import("../../../test/harness.ts").TestContext,
   label: string,
   node: IRNode,
   inputs: readonly Float32Array[],
