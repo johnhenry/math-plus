@@ -7,11 +7,12 @@
 import { loadOpCases, runConformance, type TestApi } from "@johnhenry/tensor-backend/conformance";
 import { createMlxDevice } from "../src/index.ts";
 import { mlxSkip, testFns } from "./helpers.ts";
+import { makeTest } from "../../../test/harness.ts";
 
-// Each file imports bun:test itself (see testFns in helpers.ts).
-// @ts-ignore -- bun types are not installed
-const bunTest: unknown = (globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null;
-const { describe, it, itUnless } = testFns(bunTest);
+// Each file imports bun:test itself (see test/harness.ts).
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const harness = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
+const { describe, it, itUnless } = testFns(harness);
 
 if (mlxSkip) {
   describe("tensor-backend conformance (tensor-mlx)", () => itUnless(mlxSkip, "conformance", () => {}));

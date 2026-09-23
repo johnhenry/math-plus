@@ -9,11 +9,21 @@
  * `FuncName` 1:1 (`ln` -> `log` is the one rename).
  */
 
+import {
+  checkGeluApproximate,
+  erf,
+  geluDerivative,
+  geluErf,
+  geluTanh,
+  type GeluApproximate,
+} from "@johnhenry/math-plus-tensor-core";
+
 export type UnaryOp =
   | "neg"
   | "relu"
   | "sigmoid"
   | "gelu"
+  | "gelu_tanh"
   | "exp"
   | "log"
   | "sqrt"
@@ -82,26 +92,6 @@ function zeros(n: number): number[] {
   return new Array(n).fill(0);
 }
 
-/**
- * `erf` via Abramowitz & Stegun 7.1.26 (|error| <= 1.5e-7) — @johnhenry/math has
- * an exact-enough `SpecialFunctions.erf`, but tensor-compile stays
- * dependency-free of @johnhenry/math (one-way: adapters -> core, never back),
- * so this is a small self-contained approximation instead.
- */
-function erf(x: number): number {
-  const sign = x < 0 ? -1 : 1;
-  const ax = Math.abs(x);
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-  const t = 1 / (1 + p * ax);
-  const y = 1 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t) * Math.exp(-ax * ax);
-  return sign * y;
-}
-
 /** value/derivative pairs for every UnaryOp — d(value)/d(a.value), evaluated at a.value. Derivatives cross-checked against @johnhenry/math's Symbolic.differentiate's "func" case (same formulas, written numerically instead of symbolically). */
 function unaryValueAndDeriv(op: UnaryOp, x: number): { value: number; deriv: number } {
   switch (op) {
@@ -113,16 +103,13 @@ function unaryValueAndDeriv(op: UnaryOp, x: number): { value: number; deriv: num
       const s = 1 / (1 + Math.exp(-x));
       return { value: s, deriv: s * (1 - s) };
     }
-    case "gelu": {
-      // Same tanh-approximation derivative as Variable.gelu()'s backward.
-      const c = Math.sqrt(2 / Math.PI);
-      const inner = c * (x + 0.044715 * x ** 3);
-      const t = Math.tanh(inner);
-      const value = 0.5 * x * (1 + t);
-      const sech2 = 1 - t * t;
-      const dInner = c * (1 + 3 * 0.044715 * x * x);
-      return { value, deriv: 0.5 * (1 + t) + 0.5 * x * sech2 * dInner };
-    }
+    // "gelu" is EXACT erf-GELU (Tensor.gelu()'s default since #122);
+    // "gelu_tanh" is the tanh approximation (Tensor.gelu({ approximate: "tanh" })).
+    // Both value and derivative come from tensor-core's canonical src/special.ts.
+    case "gelu":
+      return { value: geluErf(x), deriv: geluDerivative(x, "none") };
+    case "gelu_tanh":
+      return { value: geluTanh(x), deriv: geluDerivative(x, "tanh") };
     case "exp": {
       const value = Math.exp(x);
       return { value, deriv: value };
@@ -221,6 +208,8 @@ function unaryValueAndDeriv(op: UnaryOp, x: number): { value: number; deriv: num
     }
     case "log1p":
       return { value: Math.log1p(x), deriv: 1 / (1 + x) };
+    // Canonical double-precision erf (tensor-core src/special.ts, #122) —
+    // replaced the Abramowitz & Stegun 7.1.26 copy (~1.5e-7 absolute) that lived here.
     case "erf":
       return { value: erf(x), deriv: (2 / Math.sqrt(Math.PI)) * Math.exp(-x * x) };
   }
@@ -482,8 +471,13 @@ export class Traced {
   sigmoid(): Traced {
     return this.#unary("sigmoid");
   }
-  gelu(): Traced {
-    return this.#unary("gelu");
+  /**
+   * GELU; `approximate` mirrors `Tensor.gelu()` / PyTorch: `"none"` (default,
+   * exact erf-GELU, IR op `"gelu"`) or `"tanh"` (IR op `"gelu_tanh"`).
+   */
+  gelu(options: { approximate?: GeluApproximate } = {}): Traced {
+    const approximate = checkGeluApproximate(options.approximate);
+    return this.#unary(approximate === "tanh" ? "gelu_tanh" : "gelu");
   }
   exp(): Traced {
     return this.#unary("exp");

@@ -29,9 +29,12 @@
  * shading language) has no builtin `sinh`/`cosh`/`coth`/`sech`/`csch`/inverse
  * hyperbolics/`erf`/`cbrt`/`log10`, so those are expanded to the same formulas
  * `unaryValueAndDeriv` in tensor-compile/src/ir.ts uses (documented per-op
- * below), not re-derived independently — same math, different backend.
+ * below), not re-derived independently — same math, different backend
+ * (`erf`/exact `gelu`: an f32 lowering of tensor-core's canonical
+ * src/special.ts, see `ERF_WGSL_FN`).
  */
 import type { BinaryOp, CmpOp, IRNode, UnaryOp } from "@johnhenry/math-plus-tensor-compile";
+import { ERF_F32_PARAMS, ERF_SERIES_CUTOFF } from "@johnhenry/math-plus-tensor-core";
 
 /** WGSL source `x` is bound to the node's own value; produces an `f32` expression string (parenthesized, safe to splice into a larger expression without precedence surprises). */
 function unaryExpr(op: UnaryOp, x: string): string {
@@ -43,8 +46,14 @@ function unaryExpr(op: UnaryOp, x: string): string {
     case "sigmoid":
       return `(1.0 / (1.0 + exp(-(${x}))))`;
     case "gelu":
-      // Same tanh approximation as Tensor.gelu()/unaryValueAndDeriv's "gelu" case.
-      return `(0.5 * (${x}) * (1.0 + tanh(0.7978845608028654 * ((${x}) + 0.044715 * (${x}) * (${x}) * (${x})))))`;
+      // Exact erf-GELU 0.5·x·erfc(-x/√2) (Tensor.gelu()'s default since #122),
+      // via the f32 lowering of the canonical erfc — see ERF_WGSL_FN below.
+      return `(math_plus_gelu(${x}))`;
+    case "gelu_tanh":
+      // Same tanh approximation as Tensor.gelu({ approximate: "tanh" }) / tensor-core's geluTanh.
+      // tanh's argument is clamped to ±15 (tanh(15) == 1.0 in f32): Metal via Dawn
+      // computes tanh through exp and returns NaN once that overflows.
+      return `(0.5 * (${x}) * (1.0 + tanh(clamp(0.7978845608028654 * ((${x}) + 0.044715 * (${x}) * (${x}) * (${x})), -15.0, 15.0))))`;
     case "exp":
       return `(exp(${x}))`;
     case "log":
@@ -69,7 +78,8 @@ function unaryExpr(op: UnaryOp, x: string): string {
     case "cosh":
       return `((exp(${x}) + exp(-(${x}))) * 0.5)`;
     case "tanh":
-      return `(tanh(${x}))`;
+      // Clamped for the same reason as gelu_tanh (Metal/Dawn overflow → NaN).
+      return `(tanh(clamp(${x}, -15.0, 15.0)))`;
     case "cot":
       return `(1.0 / tan(${x}))`;
     case "sec":
@@ -201,19 +211,73 @@ function formatFloatLiteral(value: number): string {
 }
 
 /**
- * `erf` via the same Abramowitz & Stegun 7.1.26 formula as tensor-compile's
- * `erf()` helper (|error| <= 1.5e-7) — kept as a real WGSL function (not
- * inlined per call site) since it's used at most once per compiled expression
- * but is long; inlining would bloat the shader source for no benefit.
+ * f32 lowering of the canonical double-precision `erf`/`erfc`
+ * (`@johnhenry/math-plus-tensor-core`'s src/special.ts, issue #122) — the SAME
+ * algorithm, not an independent approximation: Maclaurin series below
+ * `ERF_SERIES_CUTOFF`, the even-contracted Laplace continued fraction for
+ * `erfc` at or above it, with the loop counts taken from tensor-core's
+ * `ERF_F32_PARAMS` (whose truncation error tensor-core's own tests verify
+ * against the f64 original: < 2^-24 relative). `exp(-z²)` uses the same
+ * `s = round(z·64)/64` split as the f64 code so `z*z`'s rounding doesn't
+ * multiply the tail's relative error by ~2z².
+ *
+ * What f32 + WGSL costs relative to the f64 original (disclosed, measured by
+ * test/fusion.test.ts on a real adapter): WGSL's `exp` is only specified to
+ * `3 + 2·|x|` ULP, so `erfc`'s RELATIVE error grows toward ~1e-5 as z → 9;
+ * `erf`'s absolute error stays ~1e-7. The previous Abramowitz & Stegun 7.1.26
+ * helper had ~1.5e-7 absolute error and no relative accuracy in erfc's tail.
+ *
+ * Kept as real WGSL functions (not inlined per call site) since they're long
+ * and loop-based; emitted only when the IR uses `erf` or `gelu`.
  */
 const ERF_WGSL_FN = `
+fn math_plus_erf_series(x: f32) -> f32 {
+  let x2: f32 = x * x;
+  var term: f32 = x;
+  var sum: f32 = x;
+  for (var n: i32 = 1; n <= ${ERF_F32_PARAMS.seriesTerms}; n = n + 1) {
+    let nf: f32 = f32(n);
+    term = term * (-x2 / nf);
+    sum = sum + term / (2.0 * nf + 1.0);
+  }
+  return 1.1283791670955126 * sum;
+}
+
+fn math_plus_erfc_cf(z: f32) -> f32 {
+  if (z > ${formatFloatLiteral(ERF_F32_PARAMS.underflow)}) {
+    return 0.0;
+  }
+  let t: f32 = 2.0 * z * z + 1.0;
+  var f: f32 = 0.0;
+  for (var n: i32 = ${ERF_F32_PARAMS.cfDepth}; n >= 1; n = n - 1) {
+    let nf: f32 = f32(n);
+    f = ((2.0 * nf - 1.0) * (2.0 * nf)) / (t + 4.0 * nf - f);
+  }
+  let s: f32 = round(z * 64.0) / 64.0;
+  let e: f32 = exp(-s * s) * exp(-(z - s) * (z + s));
+  return (e * 0.5641895835477563 * 2.0 * z) / (t - f);
+}
+
 fn math_plus_erf(x: f32) -> f32 {
-  let s: f32 = sign(x);
   let ax: f32 = abs(x);
-  let t: f32 = 1.0 / (1.0 + 0.3275911 * ax);
-  let poly: f32 = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
-  let y: f32 = 1.0 - poly * exp(-ax * ax);
-  return s * y;
+  if (ax < ${formatFloatLiteral(ERF_SERIES_CUTOFF)}) {
+    return math_plus_erf_series(x);
+  }
+  return sign(x) * (1.0 - math_plus_erfc_cf(ax));
+}
+
+fn math_plus_erfc(x: f32) -> f32 {
+  if (x >= ${formatFloatLiteral(ERF_SERIES_CUTOFF)}) {
+    return math_plus_erfc_cf(x);
+  }
+  if (x <= -${formatFloatLiteral(ERF_SERIES_CUTOFF)}) {
+    return 2.0 - math_plus_erfc_cf(-x);
+  }
+  return 1.0 - math_plus_erf_series(x);
+}
+
+fn math_plus_gelu(x: f32) -> f32 {
+  return 0.5 * x * math_plus_erfc(-x * 0.7071067811865476);
 }
 `;
 
@@ -237,7 +301,7 @@ export interface ElementwiseWGSL {
  * layout concern, this function only compiles the math).
  */
 export function compileIRToWGSL(node: IRNode, numInputs: number): ElementwiseWGSL {
-  const usesErf = irUsesErf(node);
+  const usesErf = irUsesErfHelpers(node);
   const inputVar = (index: number): string => {
     if (index < 0 || index >= numInputs) {
       throw new RangeError(`IR references input ${index}, but numInputs is ${numInputs}`);
@@ -275,18 +339,19 @@ ${phonyUses}
   return { code, numInputs, outputBinding };
 }
 
-function irUsesErf(node: IRNode): boolean {
+/** Whether the IR needs {@link ERF_WGSL_FN}'s helpers (`erf` directly, or exact `gelu` through `math_plus_erfc`). */
+function irUsesErfHelpers(node: IRNode): boolean {
   switch (node.kind) {
     case "input":
     case "const":
       return false;
     case "unary":
-      return node.op === "erf" || irUsesErf(node.arg);
+      return node.op === "erf" || node.op === "gelu" || irUsesErfHelpers(node.arg);
     case "binary":
-      return irUsesErf(node.left) || irUsesErf(node.right);
+      return irUsesErfHelpers(node.left) || irUsesErfHelpers(node.right);
     case "cmp":
-      return irUsesErf(node.left) || irUsesErf(node.right);
+      return irUsesErfHelpers(node.left) || irUsesErfHelpers(node.right);
     case "select":
-      return irUsesErf(node.cond) || irUsesErf(node.then) || irUsesErf(node.else);
+      return irUsesErfHelpers(node.cond) || irUsesErfHelpers(node.then) || irUsesErfHelpers(node.else);
   }
 }

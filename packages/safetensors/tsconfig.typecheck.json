@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": [
+      "ES2023",
+      "ESNext.Float16"
+    ]
+  },
+  "include": [
+    "src",
+    "test"
+  ]
+}

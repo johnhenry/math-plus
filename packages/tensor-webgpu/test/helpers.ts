@@ -40,6 +40,26 @@
  * also respect it, not with `node --test`'s own worker pool), this
  * package's `test` script passes `--test-concurrency=1` so its own test
  * files never run their Chrome instances at the same time as each other.
+ *
+ * ## Two backends: Dawn (in-process) and Chrome (CDP)
+ *
+ * `getHarness()` hands back one `WebGPUHarness` whose `run(body, bundle)`
+ * executes the same flat bundle + test body either
+ *
+ *  - **in this Node process against Dawn** (the `webgpu` npm package, via
+ *    `src/dawn.ts`'s `requestDawnGPU({ unsafe: true })`): the body runs as
+ *    an `AsyncFunction` whose `navigator` parameter is `{ gpu: <Dawn> }`, so
+ *    test bodies written against `navigator.gpu` run unmodified. No browser,
+ *    no display server — this is what makes the kernels testable in plain
+ *    local runs (e.g. macOS, where the Xvfb path below doesn't exist). The
+ *    instance is created with `allow_unsafe_apis` so Dawn's experimental
+ *    subgroup-matrix feature (and hence that GEMM kernel) is exercised too.
+ *  - **in headless Chrome over CDP** (everything described above).
+ *
+ * Selection: `$MATH_PLUS_WEBGPU_HARNESS` = `dawn` | `chrome` forces one;
+ * unset/`auto` tries Dawn first and falls back to Chrome, so environments
+ * where Dawn has no adapter (a GPU-less CI runner) keep the established
+ * Chrome+SwiftShader path. Either way "no adapter" -> skip, never fail.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
@@ -50,6 +70,8 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const CHROME_CANDIDATES = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
   "google-chrome-stable",
   "/opt/google/chrome/chrome",
   "google-chrome",
@@ -88,6 +110,9 @@ function resolveChrome(): string | undefined {
 function hasXvfb(): boolean {
   return which("Xvfb") !== undefined;
 }
+
+/** macOS Chrome needs no X display: it runs `--headless=new` against Metal directly. */
+const IS_MAC = process.platform === "darwin";
 
 // ---- tiny TS->JS browser bundler -------------------------------------------
 //
@@ -247,6 +272,7 @@ let xvfbProc: ChildProcess | undefined;
 let xvfbDisplay: string | undefined;
 
 async function ensureDisplay(): Promise<string> {
+  if (IS_MAC) return "";
   if (process.env.DISPLAY) {
     return process.env.DISPLAY;
   }
@@ -269,9 +295,11 @@ async function ensureDisplay(): Promise<string> {
 }
 
 function launchChrome(chromePath: string, display: string, port: number, userDataDir: string): ChromeHandle {
+  const platformArgs = IS_MAC
+    ? ["--headless=new", "--use-angle=metal"]
+    : ["--use-angle=gl", "--use-gl=angle"];
   const args = [
-    "--use-angle=gl",
-    "--use-gl=angle",
+    ...platformArgs,
     "--ignore-gpu-blocklist",
     "--enable-unsafe-webgpu",
     "--enable-unsafe-swiftshader",
@@ -282,7 +310,7 @@ function launchChrome(chromePath: string, display: string, port: number, userDat
     "about:blank",
   ];
   const child = spawn(chromePath, args, {
-    env: { ...process.env, DISPLAY: display, LIBGL_ALWAYS_SOFTWARE: "1" },
+    env: IS_MAC ? process.env : { ...process.env, DISPLAY: display, LIBGL_ALWAYS_SOFTWARE: "1" },
     stdio: "ignore",
     detached: true,
   });
@@ -347,6 +375,8 @@ async function connectCdp(cdpBase: string, pageUrl: string): Promise<CdpConnecti
 }
 
 export interface WebGPUHarness {
+  /** Which backend this harness drives (see the module doc). */
+  kind: "dawn" | "chrome";
   /** Run an async JS expression (source text of an `async () => {...}` body's *contents*, i.e. what goes between the braces) in the page and return its JSON-serializable result. Throws with the page-side error message on failure. */
   run<T = unknown>(asyncBody: string, extraCode?: string): Promise<T>;
   close(): void;
@@ -383,8 +413,67 @@ let cachedHarness: Promise<WebGPUHarness | { unavailable: true; reason: string }
  * state this package must degrade gracefully in.
  */
 export function getHarness(): Promise<WebGPUHarness | { unavailable: true; reason: string }> {
-  if (!cachedHarness) cachedHarness = buildHarness();
+  if (!cachedHarness) cachedHarness = selectHarness();
   return cachedHarness;
+}
+
+type HarnessResult = WebGPUHarness | { unavailable: true; reason: string };
+
+async function selectHarness(): Promise<HarnessResult> {
+  const want = (process.env.MATH_PLUS_WEBGPU_HARNESS ?? "auto").toLowerCase();
+  if (want === "chrome") return buildHarness();
+  const dawn = await buildDawnHarness();
+  if (want === "dawn" || !("unavailable" in dawn)) return dawn;
+  const chrome = await buildHarness();
+  if (!("unavailable" in chrome)) return chrome;
+  return { unavailable: true, reason: `${dawn.reason}; and Chrome: ${chrome.reason}` };
+}
+
+// ---- Dawn (in-process) harness ----------------------------------------------
+
+const AsyncFunction = (async () => {}).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<unknown>;
+
+/**
+ * Dawn in this process. Devices a test body requests are tracked (by
+ * wrapping the adapter's `requestDevice`) and destroyed when that `run()`
+ * finishes — in Chrome a page owns its devices, here nothing else would,
+ * and leaked Dawn devices keep native resources (and sometimes the event
+ * loop) alive.
+ */
+async function buildDawnHarness(): Promise<HarnessResult> {
+  const { requestDawnGPU } = await import("../src/dawn.ts");
+  const gpu = await requestDawnGPU({ unsafe: true });
+  if (!gpu) return { unavailable: true, reason: "Dawn: the `webgpu` npm package is not installed or its native addon failed to load" };
+  const probe = await gpu.requestAdapter().catch(() => null);
+  if (!probe) return { unavailable: true, reason: "Dawn: requestAdapter() resolved null (no GPU adapter)" };
+
+  const run = async <T>(asyncBody: string, extraCode = ""): Promise<T> => {
+    const devices: GPUDevice[] = [];
+    const trackingGpu = {
+      requestAdapter: async (options?: GPURequestAdapterOptions): Promise<GPUAdapter | null> => {
+        const adapter = await gpu.requestAdapter(options);
+        if (!adapter) return adapter;
+        const requestDevice = adapter.requestDevice.bind(adapter);
+        (adapter as { requestDevice: GPUAdapter["requestDevice"] }).requestDevice = async (desc?: GPUDeviceDescriptor) => {
+          const device = await requestDevice(desc);
+          devices.push(device);
+          return device;
+        };
+        return adapter;
+      },
+      getPreferredCanvasFormat: () => gpu.getPreferredCanvasFormat(),
+      wgslLanguageFeatures: gpu.wgslLanguageFeatures,
+    };
+    try {
+      const fn = new AsyncFunction("navigator", `${extraCode}\n${asyncBody}`);
+      return (await fn({ gpu: trackingGpu })) as T;
+    } catch (err) {
+      throw new Error(`dawn-side error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    } finally {
+      for (const d of devices) d.destroy();
+    }
+  };
+  return { kind: "dawn", run, close: () => {} };
 }
 
 /**
@@ -419,7 +508,7 @@ async function buildHarness(): Promise<WebGPUHarness | { unavailable: true; reas
   if (!chromePath) {
     return { unavailable: true, reason: "no Chrome/Chromium binary found on PATH or at /opt/google/chrome/chrome" };
   }
-  if (!process.env.DISPLAY && !hasXvfb()) {
+  if (!IS_MAC && !process.env.DISPLAY && !hasXvfb()) {
     return { unavailable: true, reason: "no DISPLAY and no Xvfb on PATH to create one" };
   }
 
@@ -552,5 +641,5 @@ async function attemptHarness(chromePath: string): Promise<WebGPUHarness | { fai
   // remembering to call close()" reason.
   process.once("exit", close);
 
-  return { run, close };
+  return { kind: "chrome", run, close };
 }

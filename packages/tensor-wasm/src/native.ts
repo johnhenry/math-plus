@@ -3,8 +3,10 @@
  * same Rust source (`crates/tensor-wasm-kernels`) compiled as a platform
  * cdylib instead of to wasm32, called through `Deno.dlopen`. Measured on
  * this family's baseline machine (docs/spikes/deno-ffi-baseline.md):
- * `solve` 2.97–5.27x, elementwise 1.75–4.65x, gemm 1.18–1.36x over the
- * WASM path — plus the structural win that kernels operate on host
+ * `solve` 2.97–5.27x, elementwise 1.75–4.65x over the WASM path (gemm:
+ * after issue #121's blocked kernels, native-portable is ~1.4–1.8x the
+ * SIMD128 WASM path, and the opt-in `accelerate` cargo feature on macOS
+ * ~34x — see that doc's re-measurement section) — plus the structural win that kernels operate on host
  * `Float32Array`s directly, so there is no copy-in/copy-out residency tax
  * and no resident-tensor lifecycle at all.
  *

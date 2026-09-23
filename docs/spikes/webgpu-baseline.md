@@ -1,5 +1,10 @@
 # WebGPU pipeline baseline (2026-08-12)
 
+> **Superseded for GEMM** by [`webgpu-tiled-gemm.md`](webgpu-tiled-gemm.md) (2026-09-23): the
+> naive kernel measured here was replaced by tiled / skinny / subgroup-matrix kernels, and
+> `GEMM_ELEMENT_THRESHOLD` is now `128 * 128` (measured on an Apple M2; this machine's Intel iGPU
+> has not been re-measured). The harness findings below still apply.
+
 Status check on the headless-WebGPU seam for `@johnhenry/math-plus-tensor-webgpu` (issue #12). **Headless
 WebGPU is real and working on this machine — genuinely hardware-accelerated, not
 SwiftShader-only as expected going in. The naive v1 GEMM kernel, however, never beats

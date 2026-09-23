@@ -76,7 +76,25 @@ const kernels = native ?? await Kernels.load(); // WASM stays the zero-install d
   `Kernels.load()`. Ordinary JS validation errors and IEEE division-by-zero
   (±Infinity/NaN, same as JS) do *not* poison.
 - **SIMD:** used only when the SIMD module validated *and* all operands are
-  stride-1; only `addInto`/`mulInto` have SIMD kernels. A wasm32 module
+  stride-1 for `addInto`/`mulInto`; `matmulInto` uses the SIMD module's
+  blocked f32x4 GEMM for *any* strides (issue #121 — ~37 GFLOP/s at
+  1024³ on an M2 vs ~10 scalar-blocked, ~1.7 for the old naive loop).
+  `out` must not alias `a`/`b`. sub/div have no SIMD kernels.
+- **GEMM scope (issue #121):** single-threaded, f32 only, no FMA (WASM
+  SIMD128 has none; relaxed-SIMD's `relaxed_madd` is deliberately unused —
+  it's engine-dependent fused-or-not, and a module using it fails
+  validation on Safari, taking the whole SIMD module down with it). The
+  two modules share one linear memory, so `Kernels.load()` also verifies
+  that instantiating the SIMD module leaves that memory byte-identical
+  (their static data must match); if it doesn't, the memory is restored
+  and `simdAvailable` is `false` — scalar-only, never corrupt.
+- **Native Accelerate (opt-in):** building the cdylib with
+  `cargo build --release -p tensor-wasm-kernels --features accelerate` on
+  macOS routes BLAS-expressible `gemm_f32` layouts to Apple's
+  `cblas_sgemm` (~970 GFLOP/s at 1024³ on an M2 — AMX); strided views fall
+  back to the portable blocked kernel. Off by default (CI artifacts stay
+  dependency-free); results differ from the portable kernel in the last
+  ulps (FMA, different blocking). A wasm32 module
   containing any v128 instruction fails validation *in its entirety* on a
   non-SIMD runtime — that's why two modules ship. Results are bit-identical
   to scalar.
@@ -95,12 +113,15 @@ const kernels = native ?? await Kernels.load(); // WASM stays the zero-install d
 
 `npm test` — differential legs against tensor-core's `Tensor` ops (dev
 dependency, oracle only) and adapter-math's `linalg.solve` (issue #39),
-poisoning-state coverage, SIMD tail-loop and graceful-degradation tests.
+poisoning-state coverage, SIMD tail-loop and graceful-degradation tests,
+and a NumPy oracle for `matmulInto` on both paths (`test/gemm-differential.test.ts`,
+skip-don't-fail like tensor-core's — assert `skipped 0`).
 
 ## Provenance
 
 Built across issues #3 (`...Into` zero-alloc), #13 (SIMD), #46 (trap
-poisoning), #55 (defined alloc failure), #66 (`subInto`/`divInto`). Measured
+poisoning), #55 (defined alloc failure), #66 (`subInto`/`divInto`), #121
+(blocked/SIMD GEMM). Measured
 baselines in `docs/spikes/wasm-baseline.md` / `wasm-simd.md` /
 `deno-ffi-baseline.md`. Part of the
 [math-plus](https://github.com/johnhenry/math-plus) monorepo; family docs at

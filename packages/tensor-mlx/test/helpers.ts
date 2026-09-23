@@ -1,41 +1,48 @@
 /**
- * Shared test plumbing: runtime-neutral describe/it (Node's node:test or
- * Bun's bun:test), the skip-don't-fail MLX gate, and the NumPy oracle.
+ * Shared test plumbing: describe/it/itUnless over the repo's runtime-neutral
+ * test harness (test/harness.ts), the skip-don't-fail MLX gate, and the
+ * NumPy oracle.
  */
-import * as nodeTest from "node:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
+import type { Harness } from "../../../test/harness.ts";
 import { mlxUnavailableReason } from "../src/index.ts";
 
-type ItFn = (name: string, fn: () => void | Promise<void>) => unknown;
+type Body = () => void | Promise<void>;
 
 export interface TestFns {
-  describe: (name: string, fn: () => void) => unknown;
-  it: ItFn;
-  beforeAll: (fn: () => void | Promise<void>) => unknown;
+  /** Groups tests by name prefix ("outer > inner > test"); `fn` must register synchronously. */
+  describe: (name: string, fn: () => void) => void;
+  it: (name: string, fn: Body) => void;
+  /** Runs once before the file's tests (the harness's file-level `before`). */
+  beforeAll: (fn: Body) => void;
   /** `it`, or a skipped test carrying `reason` when `reason` is set (skip, never fail). */
-  itUnless: (reason: string | null, name: string, fn: () => void | Promise<void>) => void;
+  itUnless: (reason: string | null, name: string, fn: Body) => void;
 }
 
 /**
- * node:test, or bun:test when the CALLING FILE passes its own `bun:test`
- * module: Bun 1.2's node:test shim only registers tests from the first file
- * of a run, and bun:test binds describe/it per importing file (issue #127),
- * so each test file must do the `import("bun:test")` itself.
+ * describe/it on top of a {@link Harness}. Each test file must create its own
+ * harness with its own `import("bun:test")` (Bun 1.2 binds tests per importing
+ * file; see test/harness.ts), then pass it here.
  */
-export function testFns(bunTest: any): TestFns {
-  const rawIt: ItFn & { skip: ItFn } = bunTest?.it ?? nodeTest.it;
+export function testFns(h: Harness): TestFns {
+  const prefix: string[] = [];
+  const full = (name: string): string => [...prefix, name].join(" > ");
   return {
-    describe: bunTest?.describe ?? nodeTest.describe,
-    it: rawIt,
-    beforeAll: bunTest?.beforeAll ?? nodeTest.before,
-    itUnless(reason, name, fn) {
-      if (reason) rawIt.skip(`${name} (skipped: ${reason})`, () => {});
-      else rawIt(name, fn);
+    describe(name, fn) {
+      prefix.push(name);
+      try {
+        fn();
+      } finally {
+        prefix.pop();
+      }
     },
+    it: (name, fn) => h.test(full(name), () => fn()),
+    beforeAll: (fn) => h.before(fn),
+    itUnless: (reason, name, fn) => h.test(full(name), reason ? { skip: reason } : {}, () => fn()),
   };
 }
 

@@ -10,11 +10,45 @@
  */
 import {
   allocate,
+  decodeHalf,
+  encodeHalf,
   isBigIntDType,
+  isHalfDType,
   type AnyTypedArray,
   type DType,
 } from "./dtype.ts";
+import {
+  binaryFlat,
+  binaryScalarLeft,
+  binaryScalarRight,
+  CMP_EQ,
+  CMP_GT,
+  CMP_GTE,
+  CMP_LT,
+  CMP_LTE,
+  CMP_NE,
+  compareFlat,
+  OP_ADD,
+  OP_DIV,
+  OP_MUL,
+  OP_SUB,
+  extremumAxis,
+  gemmNT,
+  packPanel,
+  softmaxAxis,
+  sumAxis,
+  varianceAxis,
+  type NumArray,
+} from "./kernels.ts";
 import { parseNpy, serializeNpy } from "./npy.ts";
+import {
+  checkGeluApproximate,
+  erf as erfScalar,
+  erfc as erfcScalar,
+  geluErf,
+  geluTanh,
+  type GeluApproximate,
+} from "./special.ts";
 import {
   fillFrom,
   normalSample,
@@ -28,12 +62,29 @@ import {
 export {
   allocate,
   isBigIntDType,
+  isHalfDType,
+  encodeHalf,
+  decodeHalf,
   BYTES_PER_ELEMENT,
   type AnyTypedArray,
   type DType,
   type TypedArrayFor,
 } from "./dtype.ts";
 export { Rng, type RandomOptions } from "./random.ts";
+export {
+  erf,
+  erfc,
+  gelu,
+  geluErf,
+  geluTanh,
+  geluDerivative,
+  erfSeries,
+  erfcContinuedFraction,
+  ERF_SERIES_CUTOFF,
+  ERF_F32_PARAMS,
+  checkGeluApproximate,
+  type GeluApproximate,
+} from "./special.ts";
 
 export type Shape = readonly number[];
 export type Axis = number;
@@ -60,6 +111,25 @@ function contiguousStrides(shape: Shape): number[] {
   return strides;
 }
 
+/** Decode one raw storage element to its numeric value (f16/bf16 bits -> number). */
+function decodeElement(dtype: DType, raw: number | bigint): number | bigint {
+  return isHalfDType(dtype) ? decodeHalf(dtype, raw as number) : raw;
+}
+
+/**
+ * f16/bf16 are storage-only dtypes (see dtype.ts): arithmetic kernels read
+ * `data[i]` as a number, which for half dtypes would be the raw bit pattern.
+ * Rather than silently computing on bits — or implicitly promoting, which
+ * the no-implicit-promotion rule forbids — every numeric kernel rejects them.
+ */
+function assertNotHalf(dtype: DType, op: string): void {
+  if (isHalfDType(dtype)) {
+    throw new TypeError(
+      `${op} is not supported on ${dtype} (a storage dtype: Uint16Array bit patterns) -- cast("f32") first, then cast back if needed`,
+    );
+  }
+}
+
 /**
  * NumPy broadcasting: align from trailing axes; dims must match or be 1.
  */
@@ -74,7 +144,9 @@ export function broadcastShapes(a: Shape, b: Shape): number[] {
         `shapes [${a}] and [${b}] are not broadcast-compatible at axis ${ndim - 1 - i}`,
       );
     }
-    out[ndim - 1 - i] = Math.max(da, db);
+    // A size-1 dim takes the other side's size — including 0 (NumPy:
+    // broadcasting [0, 4] with [4] is [0, 4]; `Math.max` wrongly gave [1, 4]).
+    out[ndim - 1 - i] = da === 1 ? db : da;
   }
   return out;
 }
@@ -137,7 +209,64 @@ function broadcastStrides(
   return out;
 }
 
+function sameShape(a: Shape, b: Shape): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** `[outer, dim, inner]` sizes of a shape split around axis `ax`. */
+function splitAround(shape: Shape, ax: number): [number, number, number] {
+  let outer = 1;
+  let inner = 1;
+  for (let i = 0; i < ax; i++) outer *= shape[i] as number;
+  for (let i = ax + 1; i < shape.length; i++) inner *= shape[i] as number;
+  return [outer, shape[ax] as number, inner];
+}
+
+/**
+ * True when `small`, with leading size-1 axes stripped, equals the trailing
+ * axes of `out` — the "bias" broadcast (`[16,128,1024] + [1024]`): `small`'s
+ * elements repeat as one block every `small.size` output elements.
+ */
+function isTrailingBlock(small: Shape, out: Shape): boolean {
+  let s = 0;
+  while (s < small.length && small[s] === 1) s++;
+  const rest = small.length - s;
+  if (rest > out.length) return false;
+  for (let i = 0; i < rest; i++) {
+    if (small[s + i] !== out[out.length - rest + i]) return false;
+  }
+  return true;
+}
+
+/**
+ * The "row" broadcast (`[16,128,1024] - [16,128,1]`): `small`, left-padded
+ * with 1s to `out.length`, matches `out` exactly on a leading run of axes
+ * and is all-1 on the rest. Returns the size of that all-1 tail in `out`
+ * (each `small` element repeats over that many consecutive output
+ * elements), or -1 if the pattern doesn't hold.
+ */
+function rowBroadcastInner(small: Shape, out: Shape): number {
+  const pad = out.length - small.length;
+  if (pad < 0) return -1;
+  const at = (k: number) => (k < pad ? 1 : (small[k - pad] as number));
+  let p = out.length;
+  while (p > 0 && at(p - 1) === 1) p--;
+  for (let k = 0; k < p; k++) if (at(k) !== out[k]) return -1;
+  let inner = 1;
+  for (let k = p; k < out.length; k++) inner *= out[k] as number;
+  return inner;
+}
+
 type BinaryOp = "add" | "sub" | "mul" | "div";
+
+const BINARY_CODE: Record<BinaryOp, number> = {
+  add: OP_ADD,
+  sub: OP_SUB,
+  mul: OP_MUL,
+  div: OP_DIV,
+};
 
 const NUMBER_OPS: Record<BinaryOp, (a: number, b: number) => number> = {
   add: (a, b) => a + b,
@@ -156,6 +285,80 @@ const BIGINT_OPS: Partial<Record<BinaryOp, (a: bigint, b: bigint) => bigint>> =
   };
 
 type CompareOp = "eq" | "ne" | "lt" | "lte" | "gt" | "gte";
+
+const CMP_CODE: Record<CompareOp, number> = {
+  eq: CMP_EQ,
+  ne: CMP_NE,
+  lt: CMP_LT,
+  lte: CMP_LTE,
+  gt: CMP_GT,
+  gte: CMP_GTE,
+};
+
+/**
+ * Contiguous fast path for a Number-dtype binary op into the fresh,
+ * contiguous `out` (issue #120). Handles: both operands full-shape and
+ * contiguous; one side a single element (scalar); and one side full-shape
+ * contiguous with the other contiguous and broadcast either as a trailing
+ * block (bias add) or per-row (`[..., 1]`, e.g. subtracting a row max).
+ * Returns false — caller runs the general strided loop — for anything else
+ * (transposed/sliced views, stride-0 broadcast views, mixed patterns).
+ */
+function binaryFastPath(op: number, a: Tensor, b: Tensor, out: Tensor): boolean {
+  const n = out.size;
+  if (n === 0) return true;
+  const outShape = out.shape;
+  const o = out.data as NumArray;
+  const ad = a.data as NumArray;
+  const bd = b.data as NumArray;
+  const aFull = sameShape(a.shape, outShape) && a.isContiguous;
+  const bFull = sameShape(b.shape, outShape) && b.isContiguous;
+  if (aFull && bFull) {
+    binaryFlat(op, ad, a.offset, bd, b.offset, o, 0, n);
+    return true;
+  }
+  if (aFull) {
+    if (b.size === 1) {
+      binaryScalarRight(op, ad, a.offset, bd[b.offset] as number, o, 0, n);
+      return true;
+    }
+    if (!b.isContiguous) return false;
+    if (isTrailingBlock(b.shape, outShape)) {
+      const inner = b.size;
+      for (let base = 0; base < n; base += inner) {
+        binaryFlat(op, ad, a.offset + base, bd, b.offset, o, base, inner);
+      }
+      return true;
+    }
+    const inner = rowBroadcastInner(b.shape, outShape);
+    if (inner <= 0) return false;
+    for (let r = 0, base = 0; base < n; r++, base += inner) {
+      binaryScalarRight(op, ad, a.offset + base, bd[b.offset + r] as number, o, base, inner);
+    }
+    return true;
+  }
+  if (bFull) {
+    if (a.size === 1) {
+      binaryScalarLeft(op, ad[a.offset] as number, bd, b.offset, o, 0, n);
+      return true;
+    }
+    if (!a.isContiguous) return false;
+    if (isTrailingBlock(a.shape, outShape)) {
+      const inner = a.size;
+      for (let base = 0; base < n; base += inner) {
+        binaryFlat(op, ad, a.offset, bd, b.offset + base, o, base, inner);
+      }
+      return true;
+    }
+    const inner = rowBroadcastInner(a.shape, outShape);
+    if (inner <= 0) return false;
+    for (let r = 0, base = 0; base < n; r++, base += inner) {
+      binaryScalarLeft(op, ad[a.offset + r] as number, bd, b.offset + base, o, base, inner);
+    }
+    return true;
+  }
+  return false;
+}
 
 const NUMBER_CMP: Record<CompareOp, (a: number, b: number) => boolean> = {
   eq: (a, b) => a === b,
@@ -239,6 +442,8 @@ export class Tensor {
     const data = allocate(dtype, shapeSize(shape));
     if (isBigIntDType(dtype)) {
       (data as BigInt64Array | BigUint64Array).fill(BigInt(value));
+    } else if (isHalfDType(dtype)) {
+      (data as Uint16Array).fill(encodeHalf(dtype, value));
     } else {
       (data as Float64Array).fill(value);
     }
@@ -262,6 +467,9 @@ export class Tensor {
     if (isBigIntDType(dtype)) {
       const big = data as BigInt64Array | BigUint64Array;
       for (let i = 0; i < length; i++) big[i] = BigInt(start + i * step);
+    } else if (isHalfDType(dtype)) {
+      const bits = data as Uint16Array;
+      for (let i = 0; i < length; i++) bits[i] = encodeHalf(dtype, start + i * step);
     } else {
       const num = data as Float64Array;
       for (let i = 0; i < length; i++) num[i] = start + i * step;
@@ -277,6 +485,9 @@ export class Tensor {
       for (let i = 0; i < values.length; i++) {
         big[i] = BigInt(values[i] as number);
       }
+    } else if (isHalfDType(dtype)) {
+      const bits = data as Uint16Array;
+      for (let i = 0; i < values.length; i++) bits[i] = encodeHalf(dtype, values[i] as number);
     } else {
       (data as Float64Array).set(values);
     }
@@ -450,6 +661,17 @@ export class Tensor {
     if (this.isContiguous && this.offset === 0 && this.size === this.data.length) {
       return this;
     }
+    if (this.isContiguous) {
+      // Already C-order, just offset or not spanning the whole buffer: one
+      // bulk copy instead of the per-element offset walk (issue #120).
+      return new Tensor(
+        this.data.slice(this.offset, this.offset + this.size) as AnyTypedArray,
+        this.shape,
+        contiguousStrides(this.shape),
+        this.dtype,
+        0,
+      );
+    }
     const data = allocate(this.dtype, this.size);
     const source = this.data;
     let i = 0;
@@ -618,6 +840,7 @@ export class Tensor {
 
   /** Elementwise bound: values below `min` become `min`, above `max` become `max`. Either bound may be omitted. Distinct from the REDUCTION `min()`/`max()`. Any dtype. */
   clip(min?: number, max?: number): Tensor {
+    assertNotHalf(this.dtype, "clip");
     let out: Tensor = this;
     if (min !== undefined) {
       out = Tensor.where(out.lt(min), Tensor.full(out.shape, min, { dtype: out.dtype }), out);
@@ -630,6 +853,7 @@ export class Tensor {
 
   /** Product over all elements (axis omitted) or along one axis — the full-reduction dual of {@link sum} (which `cumsum`/`cumprod` already have a cumulative pair for, but `sum` didn't have a `prod` counterpart). Built on the existing `cumprod`: the running product's LAST entry along the scan axis IS the full product. */
   prod(axis?: Axis): Tensor {
+    assertNotHalf(this.dtype, "prod");
     if (axis === undefined) return this.cumprod().select(0, -1);
     const ax = this.#normalizeAxis(axis);
     return this.cumprod(ax).select(ax, -1);
@@ -755,6 +979,7 @@ export class Tensor {
    * documented deviation, not an oversight).
    */
   nonzero(): Tensor {
+    assertNotHalf(this.dtype, "nonzero");
     const ndim = this.ndim;
     const shape = this.shape;
     const big = isBigIntDType(this.dtype);
@@ -927,7 +1152,7 @@ export class Tensor {
       }
       elementOffset += index * (this.strides[axis] as number);
     }
-    return this.data[elementOffset] as number | bigint;
+    return decodeElement(this.dtype, this.data[elementOffset] as number | bigint);
   }
 
   /** The single element of a size-1 tensor. */
@@ -935,7 +1160,7 @@ export class Tensor {
     if (this.size !== 1) {
       throw new RangeError(`item() requires size 1, got ${this.size}`);
     }
-    return this.data[this.offset] as number | bigint;
+    return decodeElement(this.dtype, this.data[this.offset] as number | bigint);
   }
 
   /** Nested plain-array copy (edge/API use only — never a kernel format). */
@@ -947,7 +1172,7 @@ export class Tensor {
       for (let i = 0; i < dim; i++) {
         out[i] =
           axis === this.ndim - 1
-            ? this.data[offset + i * stride]
+            ? decodeElement(this.dtype, this.data[offset + i * stride] as number | bigint)
             : build(axis + 1, offset + i * stride);
       }
       return out;
@@ -1005,6 +1230,7 @@ export class Tensor {
   // ---- elementwise (broadcasting) -----------------------------------------
 
   #binary(op: BinaryOp, other: Tensor | number): Tensor {
+    assertNotHalf(this.dtype, op);
     const rhs =
       typeof other === "number"
         ? Tensor.full([], other, { dtype: this.dtype })
@@ -1048,6 +1274,7 @@ export class Tensor {
         }
       }
     } else {
+      if (binaryFastPath(BINARY_CODE[op], this, rhs, out)) return out;
       const fn = NUMBER_OPS[op];
       const a = this.data as Float64Array;
       const b = rhs.data as Float64Array;
@@ -1083,38 +1310,29 @@ export class Tensor {
 
   /** Elementwise square root. Float dtypes only (cast() first). */
   sqrt(): Tensor {
-    if (isBigIntDType(this.dtype)) {
-      throw new TypeError(`sqrt requires a float dtype, got ${this.dtype}`);
-    }
-    const out = Tensor.zeros(this.shape, { dtype: this.dtype });
-    const outData = out.data as Float64Array;
-    let i = 0;
-    for (const off of this.elementOffsets()) {
-      outData[i++] = Math.sqrt(this.data[off] as number);
-    }
-    return out;
+    return this.#unaryFloat(Math.sqrt, "sqrt");
   }
 
   /** Elementwise natural log. Float dtypes only; domain is (0, +Inf) same as Math.log. */
   log(): Tensor {
-    if (isBigIntDType(this.dtype)) {
-      throw new TypeError(`log requires a float dtype, got ${this.dtype}`);
-    }
-    const out = Tensor.zeros(this.shape, { dtype: this.dtype });
-    const outData = out.data as Float64Array;
-    let i = 0;
-    for (const off of this.elementOffsets()) {
-      outData[i++] = Math.log(this.data[off] as number);
-    }
-    return out;
+    return this.#unaryFloat(Math.log, "log");
   }
 
-  #unaryFloat(fn: (v: number) => number): Tensor {
+  #unaryFloat(fn: (v: number) => number, name = "this elementwise op"): Tensor {
+    assertNotHalf(this.dtype, name);
     if (isBigIntDType(this.dtype)) {
-      throw new TypeError(`this op requires a float dtype, got ${this.dtype}`);
+      throw new TypeError(`${name} requires a float dtype, got ${this.dtype}`);
     }
     const out = Tensor.zeros(this.shape, { dtype: this.dtype });
-    const outData = out.data as Float64Array;
+    const outData = out.data as NumArray;
+    const size = this.size;
+    if (this.isContiguous) {
+      // Fast path (issue #120): flat loop, no offset generator.
+      const src = this.data as NumArray;
+      const off = this.offset;
+      for (let i = 0; i < size; i++) outData[i] = fn(src[off + i] as number);
+      return out;
+    }
     let i = 0;
     for (const off of this.elementOffsets()) {
       outData[i++] = fn(this.data[off] as number);
@@ -1132,10 +1350,33 @@ export class Tensor {
     return this.#unaryFloat((v) => 1 / (1 + Math.exp(-v)));
   }
 
-  /** Elementwise GELU (tanh approximation, matching common ML-library defaults). Float dtypes only. */
-  gelu(): Tensor {
-    const c = Math.sqrt(2 / Math.PI);
-    return this.#unaryFloat((v) => 0.5 * v * (1 + Math.tanh(c * (v + 0.044715 * v ** 3))));
+  /**
+   * Elementwise GELU, same modes and default as PyTorch's
+   * `torch.nn.functional.gelu(x, approximate=...)`:
+   *
+   * - `approximate: "none"` (**the default**): exact `x·Φ(x) = 0.5·x·(1 + erf(x/√2))`,
+   *   via the canonical double-precision `erf` (src/special.ts) — what BERT,
+   *   ModernBERT and `nn.GELU()` use.
+   * - `approximate: "tanh"`: `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` —
+   *   GPT-2-style; up to ~4.7e-4 absolute away from exact GELU (at |x| ≈ 2.7).
+   *
+   * BREAKING (issue #122): before this option existed `gelu()` always used
+   * the tanh approximation. Pass `{ approximate: "tanh" }` to keep the old
+   * numbers. Float dtypes only.
+   */
+  gelu(options: { approximate?: GeluApproximate } = {}): Tensor {
+    const approximate = checkGeluApproximate(options.approximate);
+    return this.#unaryFloat(approximate === "tanh" ? geluTanh : geluErf);
+  }
+
+  /** Elementwise error function, via the canonical double-precision `erf` (src/special.ts, ~1e-15 relative). Float dtypes only. */
+  erf(): Tensor {
+    return this.#unaryFloat(erfScalar);
+  }
+
+  /** Elementwise complementary error function `1 - erf(x)`, computed without cancellation in the right tail (src/special.ts). Float dtypes only. */
+  erfc(): Tensor {
+    return this.#unaryFloat(erfcScalar);
   }
 
   // ---- unary op-table parity with the compiled IR (issue #64) --------------
@@ -1160,6 +1401,7 @@ export class Tensor {
 
   /** Elementwise absolute value. Works on any numeric dtype (unlike the float-only ops above — `Math.abs` is exact on integers too), so this bypasses `#unaryFloat`'s float-dtype guard. */
   abs(): Tensor {
+    assertNotHalf(this.dtype, "abs");
     const out = Tensor.zeros(this.shape, { dtype: this.dtype });
     if (isBigIntDType(this.dtype)) {
       const outData = out.data as BigInt64Array | BigUint64Array;
@@ -1170,7 +1412,13 @@ export class Tensor {
       }
       return out;
     }
-    const outData = out.data as Float32Array | Float64Array;
+    const outData = out.data as NumArray;
+    if (this.isContiguous) {
+      const src = this.data as NumArray;
+      const off = this.offset;
+      for (let j = 0; j < this.size; j++) outData[j] = Math.abs(src[off + j] as number);
+      return out;
+    }
     let i = 0;
     for (const off of this.elementOffsets()) outData[i++] = Math.abs(this.data[off] as number);
     return out;
@@ -1276,10 +1524,31 @@ export class Tensor {
 
   /** Softmax along `axis` (default: last axis). Numerically stable (subtracts the per-row max first). */
   softmax(axis: Axis = -1): Tensor {
+    assertNotHalf(this.dtype, "softmax");
     if (isBigIntDType(this.dtype)) {
       throw new TypeError(`softmax requires a float dtype, got ${this.dtype}`);
     }
     const ax = this.#normalizeAxis(axis);
+    if (
+      (this.dtype === "f32" || this.dtype === "f64") &&
+      this.isContiguous &&
+      (this.shape[ax] as number) > 0
+    ) {
+      // Fused single-pass-per-lane kernel (issue #120); bit-identical to the
+      // composed path below, which stays as the strided/other-dtype fallback.
+      const out = Tensor.zeros(this.shape, { dtype: this.dtype });
+      const [outer, dim, inner] = splitAround(this.shape, ax);
+      softmaxAxis(
+        this.data as Float32Array | Float64Array,
+        this.offset,
+        outer,
+        dim,
+        inner,
+        out.data as Float32Array | Float64Array,
+        this.dtype === "f32",
+      );
+      return out;
+    }
     const shifted = this.sub(this.max(ax).unsqueeze(ax).broadcastTo(this.shape).contiguous());
     const expd = shifted.#unaryFloat(Math.exp);
     return expd.div(expd.sum(ax).unsqueeze(ax).broadcastTo(this.shape).contiguous());
@@ -1294,11 +1563,14 @@ export class Tensor {
    * that axis is squeezed back out of the result — so `(n,) @ (n,)` yields a
    * 0-d scalar, `(n,) @ (n,k)` yields `(k,)`, `(m,n) @ (n,)` yields `(m,)`.
    *
-   * Pure-JS reference (naive triple loop); operates directly on strided
-   * views — a transposed operand is never implicitly copied. A WASM GEMM
-   * kernel swaps in underneath this same signature later (issue #3).
+   * Pure JS. Number-valued dtypes run a register-blocked GEMM over packed
+   * f64 panels (issue #120; the packing reads any strided view, so a
+   * transposed operand is never materialized as a tensor, only as a
+   * scratch panel). i64/u64 keep the naive BigInt triple loop. A WASM GEMM
+   * kernel swaps in underneath this same signature via tensor-wasm (#3).
    */
   matmul(other: Tensor): Tensor {
+    assertNotHalf(this.dtype, "matmul");
     if (other.dtype !== this.dtype) {
       throw new TypeError(
         `dtype mismatch: ${this.dtype} vs ${other.dtype} (no implicit promotion; cast() first)`,
@@ -1353,7 +1625,53 @@ export class Tensor {
     let rhsBatchOffset = other.offset;
     const big = isBigIntDType(this.dtype);
 
-    for (let b = 0; b < batchSize; b++) {
+    // Blocked GEMM (issue #120) for every Number-valued dtype: each operand
+    // is packed from its (arbitrarily strided) view into a dense f64 panel
+    // — A as [m, k], B TRANSPOSED as [n, k] — so the kernel reads unit-stride
+    // and never touches the view's layout. A panel is re-packed only when
+    // the batch offset changes (a broadcast weight is packed once). Output
+    // is accumulated in f64 and rounded once on store, in the same p-order
+    // as the naive loop below: bit-identical results.
+    if (!big) {
+      const packA = new Float64Array(m * k);
+      const packB = new Float64Array(n * k);
+      const outIsF64 = out.dtype === "f64";
+      const acc = outIsF64 ? (out.data as Float64Array) : new Float64Array(m * n);
+      const lhsData = this.data as NumArray;
+      const rhsData = other.data as NumArray;
+      let packedA = -1;
+      let packedB = -1;
+      for (let b = 0; b < batchSize; b++) {
+        const outBase = b * m * n;
+        if (lhsBatchOffset !== packedA) {
+          packPanel(lhsData, lhsBatchOffset, lhsRowStride, lhsColStride, m, k, packA);
+          packedA = lhsBatchOffset;
+        }
+        if (rhsBatchOffset !== packedB) {
+          packPanel(rhsData, rhsBatchOffset, rhsColStride, rhsRowStride, n, k, packB);
+          packedB = rhsBatchOffset;
+        }
+        if (outIsF64) {
+          gemmNT(packA, packB, acc, outBase, n, m, n, k);
+        } else {
+          gemmNT(packA, packB, acc, 0, n, m, n, k);
+          (out.data as NumArray).set(acc, outBase);
+        }
+        for (let axis = batchShape.length - 1; axis >= 0; axis--) {
+          batchIndex[axis] = (batchIndex[axis] as number) + 1;
+          lhsBatchOffset += lhsBatchStrides[axis] as number;
+          rhsBatchOffset += rhsBatchStrides[axis] as number;
+          if ((batchIndex[axis] as number) < (batchShape[axis] as number)) break;
+          batchIndex[axis] = 0;
+          lhsBatchOffset -=
+            (batchShape[axis] as number) * (lhsBatchStrides[axis] as number);
+          rhsBatchOffset -=
+            (batchShape[axis] as number) * (rhsBatchStrides[axis] as number);
+        }
+      }
+    }
+
+    for (let b = 0; big && b < batchSize; b++) {
       const outBase = b * m * n;
       for (let i = 0; i < m; i++) {
         const lhsRowBase = lhsBatchOffset + i * lhsRowStride;
@@ -1417,6 +1735,8 @@ export class Tensor {
    * Explicit dtype conversion — the only way values cross dtypes (no
    * implicit promotion anywhere else, per non-goal). Truncates toward zero
    * when converting to an integer type (matches `Math.trunc`, not rounding);
+   * to/from `f16`/`bf16` converts VALUES (decode the source bits, round to
+   * nearest-even into the target bits), matching NumPy's `astype(float16)`;
    * `bool` maps any non-zero value to 1. Always a copy, even when `dtype`
    * equals `this.dtype`, so callers can rely on `cast()` never aliasing.
    */
@@ -1424,12 +1744,32 @@ export class Tensor {
     const out = Tensor.zeros(this.shape, { dtype });
     const outBig = isBigIntDType(dtype);
     const srcBig = isBigIntDType(this.dtype);
+    // Half dtypes store bit patterns that must be decoded/encoded (see below),
+    // so they never take the bulk-copy fast path.
+    if (!outBig && !srcBig && !isHalfDType(this.dtype) && !isHalfDType(dtype) && this.isContiguous) {
+      // Fast path (issue #120). For float targets the conversion below is
+      // the identity; for integer targets `Math.trunc` then a typed-array
+      // store equals the store's own ToIntN/ToUintN (which truncates first),
+      // so a bulk `set()` is exact. Only `bool` needs its own loop.
+      const src = (this.data as NumArray).subarray(this.offset, this.offset + this.size);
+      const o = out.data as NumArray;
+      if (dtype === "bool") {
+        for (let i = 0; i < src.length; i++) o[i] = (src[i] as number) !== 0 ? 1 : 0;
+      } else {
+        o.set(src);
+      }
+      return out;
+    }
     const targetOffsets = out.elementOffsets();
     const sourceOffsets = this.elementOffsets();
     let t = targetOffsets.next();
     let s = sourceOffsets.next();
+    const srcDtype = this.dtype;
+    const outHalf = isHalfDType(dtype) ? dtype : undefined;
     while (!t.done && !s.done) {
-      const raw = this.data[s.value];
+      // Decode f16/bf16 bit patterns to their value first (they were once
+      // read as raw integers here, silently turning 1.5 into 15872).
+      const raw = decodeElement(srcDtype, this.data[s.value] as number | bigint);
       let converted: number | bigint;
       if (outBig) {
         converted = srcBig ? (raw as bigint) : BigInt(Math.trunc(raw as number));
@@ -1440,7 +1780,9 @@ export class Tensor {
             ? (num !== 0 ? 1 : 0)
             : dtype === "f32" || dtype === "f64"
               ? num
-              : Math.trunc(num);
+              : outHalf
+                ? encodeHalf(outHalf, num) // round-to-nearest-even, not truncation
+                : Math.trunc(num);
       }
       out.data[t.value] = converted as never;
       t = targetOffsets.next();
@@ -1452,6 +1794,7 @@ export class Tensor {
   // ---- comparisons & logicals (issue #4) -------------------------------------
 
   #compare(op: CompareOp, other: Tensor | number): Tensor {
+    assertNotHalf(this.dtype, op);
     const rhs =
       typeof other === "number"
         ? Tensor.full([], other, { dtype: this.dtype })
@@ -1463,13 +1806,32 @@ export class Tensor {
     }
     const outShape = broadcastShapes(this.shape, rhs.shape);
     const out = Tensor.zeros(outShape, { dtype: "bool" });
+    const big = isBigIntDType(this.dtype);
+    if (
+      !big &&
+      sameShape(this.shape, outShape) &&
+      this.isContiguous &&
+      (rhs.size === 1 || (sameShape(rhs.shape, outShape) && rhs.isContiguous))
+    ) {
+      // Fast path (issue #120): same-shape or scalar right operand.
+      compareFlat(
+        CMP_CODE[op],
+        this.data as NumArray,
+        this.offset,
+        rhs.data as NumArray,
+        rhs.offset,
+        rhs.size === 1 ? 0 : 1,
+        out.data as Uint8Array,
+        out.size,
+      );
+      return out;
+    }
     const aStrides = broadcastStrides(this.shape, this.strides, outShape);
     const bStrides = broadcastStrides(rhs.shape, rhs.strides, outShape);
     const ndim = outShape.length;
     const index = new Array<number>(ndim).fill(0);
     let aOff = this.offset;
     let bOff = rhs.offset;
-    const big = isBigIntDType(this.dtype);
     const numFn = NUMBER_CMP[op];
     const bigFn = BIGINT_CMP[op];
     const outData = out.data as Uint8Array;
@@ -1604,6 +1966,7 @@ export class Tensor {
   }
 
   #boolReduce(axis: Axis | undefined, requireAll: boolean): Tensor {
+    assertNotHalf(this.dtype, "any/all");
     if (axis === undefined) {
       let result = requireAll;
       for (const off of this.elementOffsets()) {
@@ -1655,10 +2018,24 @@ export class Tensor {
   }
 
   #reduce(axis: Axis | undefined, mean: boolean): Tensor {
+    assertNotHalf(this.dtype, mean ? "mean" : "sum");
     const big = isBigIntDType(this.dtype);
     // NumPy: mean of any integer dtype yields f64; sum keeps the dtype.
     const isFloat = this.dtype === "f32" || this.dtype === "f64";
     const outDtype: DType = mean && !isFloat ? "f64" : this.dtype;
+
+    if (!big && this.isContiguous) {
+      // Fast path (issue #120): flat [outer, dim, inner] kernel, same
+      // per-output accumulation order as the strided loops below.
+      const ax = axis === undefined ? -1 : this.#normalizeAxis(axis);
+      const out = Tensor.zeros(ax === -1 ? [] : this.shape.filter((_, i) => i !== ax), {
+        dtype: outDtype,
+      });
+      const [outer, dim, inner] =
+        ax === -1 ? [1, this.size, 1] : splitAround(this.shape, ax);
+      sumAxis(this.data as NumArray, this.offset, outer, dim, inner, out.data as NumArray, mean);
+      return out;
+    }
 
     if (axis === undefined) {
       const count = this.size;
@@ -1734,6 +2111,7 @@ export class Tensor {
   }
 
   #extremum(axis: Axis | undefined, wantMax: boolean): Tensor {
+    assertNotHalf(this.dtype, wantMax ? "max" : "min");
     const label = wantMax ? "max" : "min";
     const big = isBigIntDType(this.dtype);
     const better = (v: number | bigint, best: number | bigint): boolean =>
@@ -1744,6 +2122,21 @@ export class Tensor {
         : wantMax
           ? (v as number) > (best as number)
           : (v as number) < (best as number);
+
+    if (!big && this.isContiguous) {
+      // Fast path (issue #120), same comparison semantics as below.
+      const ax = axis === undefined ? -1 : this.#normalizeAxis(axis);
+      const [outer, dim, inner] =
+        ax === -1 ? [1, this.size, 1] : splitAround(this.shape, ax);
+      if (dim === 0) {
+        throw new RangeError(ax === -1 ? `${label} of an empty tensor` : `${label} of an empty axis`);
+      }
+      const out = Tensor.zeros(ax === -1 ? [] : this.shape.filter((_, i) => i !== ax), {
+        dtype: this.dtype,
+      });
+      extremumAxis(this.data as NumArray, this.offset, outer, dim, inner, out.data as NumArray, wantMax);
+      return out;
+    }
 
     if (axis === undefined) {
       if (this.size === 0) throw new RangeError(`${label} of an empty tensor`);
@@ -1796,6 +2189,7 @@ export class Tensor {
   }
 
   #argExtremum(axis: Axis | undefined, wantMax: boolean): Tensor {
+    assertNotHalf(this.dtype, wantMax ? "argmax" : "argmin");
     const label = wantMax ? "argmax" : "argmin";
     const big = isBigIntDType(this.dtype);
     const better = (v: number | bigint, best: number | bigint): boolean =>
@@ -1867,9 +2261,34 @@ export class Tensor {
    * semantics) → `mean` → broadcast-subtract → square → `sum` → `div`.
    */
   variance(axis?: Axis, options: { ddof?: number } = {}): Tensor {
+    assertNotHalf(this.dtype, "variance");
     const ddof = options.ddof ?? 0;
     const isFloat = this.dtype === "f32" || this.dtype === "f64";
     const working = isFloat ? this : this.cast("f64");
+    if (working.isContiguous && working.size > 0) {
+      // Fused two-pass kernel (issue #120): no mean/centered/squared
+      // temporaries, bit-identical to the composed path below (which stays
+      // as the strided fallback and the error-reporting path).
+      const ax = axis === undefined ? -1 : this.#normalizeAxis(axis);
+      const [outer, dim, inner] =
+        ax === -1 ? [1, working.size, 1] : splitAround(working.shape, ax);
+      if (dim - ddof > 0) {
+        const out = Tensor.zeros(ax === -1 ? [] : working.shape.filter((_, i) => i !== ax), {
+          dtype: working.dtype,
+        });
+        varianceAxis(
+          working.data as Float32Array | Float64Array,
+          working.offset,
+          outer,
+          dim,
+          inner,
+          out.data as Float32Array | Float64Array,
+          dim - ddof,
+          working.dtype === "f32",
+        );
+        return out;
+      }
+    }
     const meanTensor = working.mean(axis);
 
     let meanBroadcastable: Tensor;
@@ -1910,6 +2329,7 @@ export class Tensor {
   }
 
   #cumulative(axis: Axis | undefined, op: "add" | "mul"): Tensor {
+    assertNotHalf(this.dtype, op === "add" ? "cumsum" : "cumprod");
     const source = axis === undefined ? this.#contiguousView().reshape([this.size]) : this;
     const ax = axis === undefined ? 0 : source.#normalizeAxis(axis);
     const big = isBigIntDType(source.dtype);
@@ -1968,6 +2388,7 @@ export class Tensor {
   }
 
   #sortAlong(axis: Axis): { values: Tensor; indices: Tensor } {
+    assertNotHalf(this.dtype, "sort/argsort/topK");
     const ax = this.#normalizeAxis(axis);
     const reduceDim = this.shape[ax] as number;
     const reduceStride = this.strides[ax] as number;

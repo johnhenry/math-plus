@@ -1,6 +1,6 @@
 /**
  * Small shared helpers for dispatching a WGSL compute shader over
- * `array<f32>` storage buffers and reading the result back. Used by
+ * storage buffers (f32, or f16 bits for GEMM) and reading the result back. Used by
  * fusion-wgsl's elementwise kernels, gemm.ts, and attention.ts — factored out
  * once instead of duplicated per kernel (buffer creation, staging-buffer
  * readback, and the map/unmap dance are identical across all of them).
@@ -8,9 +8,8 @@
  * These functions call real `GPUDevice` methods — they only *type*-check in
  * Node (via `@webgpu/types`, no runtime browser globals needed to import this
  * module), but actually RUNNING them requires a real `GPUDevice`, which only
- * exists behind `navigator.gpu` in a Chromium-family browser (or a Node WebGPU
- * polyfill — see README "Node support"). test/helpers.ts drives a real one
- * via headless Chrome + CDP.
+ * exists behind `navigator.gpu` in a browser, or Dawn in Node/Bun (dawn.ts —
+ * see README "Node and Bun"). test/helpers.ts drives a real one either way.
  *
  * Two perf fixes live here (issue #100):
  *
@@ -107,23 +106,49 @@ export function destroyBufferPool(device: GPUDevice): void {
   pools.get(device)?.destroyAll();
 }
 
-/** Upload `data` into a STORAGE buffer usable as a shader input, reusing a pooled buffer of the same size when available. */
-export function uploadStorageBuffer(device: GPUDevice, data: Float32Array): SizedBuffer {
+/** `byteLength` rounded up to WebGPU's 4-byte copy granularity (and at least 4 — a zero-size binding is invalid). f16 data (2 bytes/element) with an odd element count is the case that actually needs this. */
+export function paddedByteLength(byteLength: number): number {
+  return Math.max(4, (byteLength + 3) & ~3);
+}
+
+/**
+ * Upload `data` into a STORAGE buffer usable as a shader input, reusing a
+ * pooled buffer of the same size when available. Accepts f32 data or f16
+ * *bits* (`Uint16Array`, tensor-core's f16 storage representation); the
+ * buffer is padded to a multiple of 4 bytes, since `writeBuffer` (and
+ * `copyBufferToBuffer`) only move 4-byte multiples.
+ */
+export function uploadStorageBuffer(device: GPUDevice, data: Float32Array | Uint16Array): SizedBuffer {
   const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-  const sized = acquireBuffer(device, data.byteLength, usage);
-  // `data.buffer as ArrayBuffer`: @webgpu/types' `writeBuffer` wants a
-  // `BufferSource` typed over a plain `ArrayBuffer`, but TS 5.7's typed-array
-  // generics widen `Float32Array#buffer` to `ArrayBufferLike` (which includes
-  // `SharedArrayBuffer`) — a real cast, not a bug workaround, since every
-  // `Float32Array` this package constructs is backed by a plain `ArrayBuffer`.
-  device.queue.writeBuffer(sized.buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+  const byteLength = paddedByteLength(data.byteLength);
+  const sized = acquireBuffer(device, byteLength, usage);
+  writePadded(device, sized.buffer, data);
   return sized;
 }
 
-/** Allocate a STORAGE buffer for a shader to write into (also COPY_SRC so it can be staged out afterward), reusing a pooled buffer of the same size when available. */
-export function allocateOutputBuffer(device: GPUDevice, elementCount: number): SizedBuffer {
+/** `queue.writeBuffer` of `data` at offset 0, zero-padding a trailing partial word (only possible for 2-byte f16 data). */
+export function writePadded(device: GPUDevice, buffer: GPUBuffer, data: Float32Array | Uint16Array): void {
+  let bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  if (bytes.byteLength % 4 !== 0) {
+    const padded = new Uint8Array(paddedByteLength(bytes.byteLength));
+    padded.set(bytes);
+    bytes = padded;
+  }
+  if (bytes.byteLength === 0) return;
+  // `bytes.buffer as ArrayBuffer`: @webgpu/types' `writeBuffer` wants a
+  // `BufferSource` typed over a plain `ArrayBuffer`, but TS 5.7's typed-array
+  // generics widen `#buffer` to `ArrayBufferLike` (which includes
+  // `SharedArrayBuffer`) — a real cast, not a bug workaround, since every
+  // array this package uploads is backed by a plain `ArrayBuffer`. The
+  // explicit (buffer, byteOffset, byteLength) form also matters under Dawn:
+  // some bindings ignore a TypedArray view's own byteOffset.
+  device.queue.writeBuffer(buffer, 0, bytes.buffer as ArrayBuffer, bytes.byteOffset, bytes.byteLength);
+}
+
+/** Allocate a STORAGE buffer for a shader to write into (also COPY_SRC so it can be staged out afterward), reusing a pooled buffer of the same size when available. `bytesPerElement` is 4 for f32 (the default) and 2 for f16. */
+export function allocateOutputBuffer(device: GPUDevice, elementCount: number, bytesPerElement = 4): SizedBuffer {
   const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC;
-  return acquireBuffer(device, elementCount * 4, usage);
+  return acquireBuffer(device, paddedByteLength(elementCount * bytesPerElement), usage);
 }
 
 /**
@@ -135,9 +160,14 @@ export function allocateOutputBuffer(device: GPUDevice, elementCount: number): S
  * which a GPU-resident intermediate potentially needs if it's ever reused as
  * an upload target.
  */
-export function allocateGPUResidentBuffer(device: GPUDevice, elementCount: number): SizedBuffer {
+export function allocateGPUResidentBuffer(device: GPUDevice, elementCount: number, bytesPerElement = 4): SizedBuffer {
   const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-  return acquireBuffer(device, elementCount * 4, usage);
+  return acquireBuffer(device, paddedByteLength(elementCount * bytesPerElement), usage);
+}
+
+/** A read-only view of a caller-owned buffer (e.g. a `GPUTensor`'s) as a dispatch binding — never released/destroyed by the dispatching op; ownership stays with whoever holds it. */
+export function bindingOf(t: { readonly buffer: GPUBuffer }): SizedBuffer {
+  return { buffer: t.buffer, byteLength: t.buffer.size, usage: GPUBufferUsage.STORAGE };
 }
 
 /**
@@ -157,15 +187,25 @@ export async function readBackFloat32(
   device: GPUDevice,
   source: SizedBuffer,
 ): Promise<Float32Array> {
+  return new Float32Array(await readBackBytes(device, source.buffer, source.byteLength));
+}
+
+/**
+ * The dtype-agnostic core of {@link readBackFloat32} (also used by
+ * `GPUTensor.toFloat32Array`/`toUint16Array` and the f16 GEMM entry point):
+ * stage `byteLength` bytes (a multiple of 4) of `source` out through a fresh
+ * MAP_READ buffer and return a detached `ArrayBuffer` copy.
+ */
+export async function readBackBytes(device: GPUDevice, source: GPUBuffer, byteLength: number): Promise<ArrayBuffer> {
   const staging = device.createBuffer({
-    size: source.byteLength,
+    size: byteLength,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
   });
   const encoder = device.createCommandEncoder();
-  encoder.copyBufferToBuffer(source.buffer, 0, staging, 0, source.byteLength);
+  encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);
   device.queue.submit([encoder.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
-  const out = new Float32Array(staging.getMappedRange().slice(0));
+  const out = staging.getMappedRange().slice(0);
   staging.unmap();
   staging.destroy();
   return out;

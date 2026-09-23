@@ -5,6 +5,7 @@
   "exports": "./src/index.ts",
   "imports": {
     "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0",
-    "@johnhenry/math-plus-tensor-compile": "jsr:@johnhenry/math-plus-tensor-compile@^0.0.0"
+    "@johnhenry/math-plus-tensor-compile": "jsr:@johnhenry/math-plus-tensor-compile@^0.0.0",
+    "webgpu": "npm:webgpu@^0.6.1"
   }
 }

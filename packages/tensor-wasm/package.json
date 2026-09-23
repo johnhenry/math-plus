@@ -32,6 +32,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "npm run typecheck && node --test test/*.test.ts",
+    "test:bun": "bun test ./test/",
     "_comment:test:bench": "Deliberately NOT chained into `test`: these assert wall-clock speedups, and GitHub's runner fleet is mixed -- one runner measured 1.12x SIMD gain, another 1.01x (no gain, zero variance) on the same commit. A threshold low enough to pass the slowest runner would also pass a real regression to parity, so the assertion is only meaningful on known hardware. Run it locally, or on a self-hosted runner, before trusting a perf claim.",
     "test:bench": "node --test test/*.bench-test.ts",
     "test:deno": "deno run --allow-ffi --allow-read --allow-env scripts/deno-native-test.ts"
@@ -44,7 +45,7 @@
   "license": "MIT",
   "sideEffects": false,
   "engines": {
-    "node": ">=26.0.0"
+    "node": ">=24.0.0"
   },
   "publishConfig": {
     "access": "public",

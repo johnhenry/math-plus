@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "lib": [
+      "ES2023",
+      "ESNext.Float16"
+    ]
+  },
+  "include": [
+    "src"
+  ]
+}

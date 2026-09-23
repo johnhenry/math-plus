@@ -9,11 +9,12 @@ import assert from "node:assert/strict";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { createMlxDevice, hostFromTensor, MlxArray, tensorFromHost, type MlxDevice } from "../src/index.ts";
 import { f16Tensor, mlxSkip, testFns } from "./helpers.ts";
+import { makeTest } from "../../../test/harness.ts";
 
-// Each file imports bun:test itself (see testFns in helpers.ts).
-// @ts-ignore -- bun types are not installed
-const bunTest: unknown = (globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null;
-const { describe, it, itUnless } = testFns(bunTest);
+// Each file imports bun:test itself (see test/harness.ts).
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const harness = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
+const { describe, it, itUnless } = testFns(harness);
 
 describe("host views (no MLX needed)", () => {
   it("hostFromTensor views the tensor's storage without copying", () => {

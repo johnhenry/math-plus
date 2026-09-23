@@ -26,11 +26,12 @@ import {
   testFns,
   type OracleCase,
 } from "./helpers.ts";
+import { makeTest } from "../../../test/harness.ts";
 
-// Each file imports bun:test itself (see testFns in helpers.ts).
-// @ts-ignore -- bun types are not installed
-const bunTest: unknown = (globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null;
-const { beforeAll, describe, itUnless } = testFns(bunTest);
+// Each file imports bun:test itself (see test/harness.ts).
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const harness = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
+const { beforeAll, describe, itUnless } = testFns(harness);
 
 type Float = "f32" | "f16";
 

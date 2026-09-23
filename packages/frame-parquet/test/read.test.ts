@@ -10,7 +10,9 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { readParquet, UnsupportedParquetTypeError } from "../src/index.ts";
 import { FIXTURES_DIR } from "./helpers.ts";
 

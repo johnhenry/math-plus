@@ -21,7 +21,11 @@
  * `mulInto` use it automatically when the runtime supports WASM SIMD AND
  * every operand is contiguous (stride 1) — falling back to the always-
  * present scalar/strided kernels otherwise (non-contiguous views, or a
- * runtime without SIMD support). This is a SEPARATE .wasm artifact
+ * runtime without SIMD support). `matmulInto` (issue #121) uses the SIMD
+ * module's blocked f32x4 GEMM for EVERY call when it loaded (any strides —
+ * the kernel packs its operands), ~37 GFLOP/s at 1024^3 vs ~10 for the
+ * scalar blocked kernel and ~1.7 for the pre-#121 naive loop (Apple M2,
+ * Node 24; same doc). This is a SEPARATE .wasm artifact
  * (`tensor_wasm_kernels_simd128.wasm`, built by `npm run build:wasm:simd`),
  * never merged into the default build: a wasm32 module containing ANY v128
  * instruction fails WebAssembly validation in its ENTIRETY on a runtime
@@ -119,11 +123,12 @@ interface KernelExports {
   ): void;
 }
 
-/** The SIMD128 module's export surface — only the two contiguous-fast-path kernels (issue #13); everything else still goes through `KernelExports`' scalar/strided kernels, which stay resident in a separate always-loaded module. */
+/** The SIMD128 module's export surface used here — the two contiguous elementwise fast-path kernels (issue #13) and the blocked f32x4 GEMM (issue #121, same strided signature as `gemm_f32`); everything else still goes through `KernelExports`' scalar/strided kernels, which stay resident in a separate always-loaded module. */
 interface SimdKernelExports {
   memory: WebAssembly.Memory;
   add_f32_contiguous_simd128(aPtr: number, bPtr: number, outPtr: number, len: number): void;
   mul_f32_contiguous_simd128(aPtr: number, bPtr: number, outPtr: number, len: number): void;
+  gemm_f32_simd128: KernelExports["gemm_f32"];
 }
 
 
@@ -433,9 +438,33 @@ export class Kernels {
         // both modules genuinely share one linear memory / one ArrayBuffer,
         // so the SIMD kernels operate on the exact same resident WasmTensor
         // data, zero-copy.
+        //
+        // Instantiating the SIMD module also runs its data-segment
+        // initialization against that SHARED memory: it rewrites its own
+        // .rodata over the scalar module's at the same addresses and zeroes
+        // its .bss (where the scalar allocator's state lives). That is a
+        // no-op only while both builds' static data is byte-identical
+        // (crates/tensor-wasm-kernels/src/gemm.rs's module doc explains how
+        // the kernels keep it so). Verify instead of assuming: snapshot the
+        // memory, instantiate, compare -- on any difference, restore the
+        // snapshot and run scalar-only rather than on silently corrupted
+        // constants.
+        const snapshot = new Uint8Array(rawExports.memory.buffer).slice();
         const { instance: simdInstance } = await WebAssembly.instantiate(simdBytes as BufferSource, {
           env: { memory: rawExports.memory },
         });
+        const live = new Uint8Array(rawExports.memory.buffer);
+        let clobbered = false;
+        for (let i = 0; i < snapshot.length; i++) {
+          if (live[i] !== snapshot[i]) {
+            clobbered = true;
+            break;
+          }
+        }
+        if (clobbered) {
+          live.set(snapshot);
+          throw new Error("SIMD module's static data differs from the scalar module's; SIMD disabled");
+        }
         const rawSimd = simdInstance.exports as unknown as SimdKernelExports;
         // Same poison state as the scalar module: the two share one linear
         // memory, so a trap in either corrupts both (issue #46).
@@ -451,6 +480,7 @@ export class Kernels {
             "mul_f32_contiguous_simd128",
             rawSimd.mul_f32_contiguous_simd128.bind(rawSimd),
           ),
+          gemm_f32_simd128: guardExport(poison, "gemm_f32_simd128", rawSimd.gemm_f32_simd128.bind(rawSimd)),
         };
       }
     } catch {
@@ -573,6 +603,12 @@ export class Kernels {
   /**
    * out = a @ b (2-D only in v1), writing directly into `out`'s WASM buffer.
    * `a`/`b` may be `.transposed()` views — read via strides, never copied.
+   *
+   * Both paths run the same cache-blocked, register-tiled GEMM (issue
+   * #121); when the SIMD128 module loaded (`simdAvailable`), EVERY call —
+   * any strides, not just contiguous operands — uses its f32x4
+   * micro-kernel (packing absorbs the layout), otherwise the scalar one.
+   * The two are bit-for-bit identical. `out` must not alias `a` or `b`.
    */
   matmulInto(out: WasmTensor, a: WasmTensor, b: WasmTensor): WasmTensor {
     if (a.shape.length !== 2 || b.shape.length !== 2 || out.shape.length !== 2) {
@@ -583,7 +619,11 @@ export class Kernels {
     if (k !== k2) {
       throw new RangeError(`matmulInto: inner dims ${k} and ${k2} don't match`);
     }
-    this.exports.gemm_f32(
+    if (out.shape[0] !== m || out.shape[1] !== n) {
+      throw new RangeError(`matmulInto: out is ${out.shape[0]}x${out.shape[1]}, expected ${m}x${n}`);
+    }
+    const gemm = this.#simd ? this.#simd.gemm_f32_simd128 : this.exports.gemm_f32;
+    gemm(
       a.bufferPtr,
       a.elementOffset,
       a.strides[0] as number,

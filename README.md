@@ -30,6 +30,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | Native Apple Silicon GPU from Node/Bun (experimental) | [`tensor-mlx`](./packages/tensor-mlx) — MLX via `@johnhenry/backend-mlx`; darwin/arm64 only; prototype for [RFC 0001](./docs/rfcs/0001-device-backends.md) |
 | FFTs / filters / peaks | [`fft`](./packages/fft), [`signal`](./packages/signal) |
 | Resize/normalize images | [`image`](./packages/image) |
+| Load/save model weights (`.safetensors`) | [`safetensors`](./packages/safetensors) — lazy reads from files, Blobs and HTTP ranges |
 | Dataframes | [`frame-arrow`](./packages/frame-arrow) (+ [`frame-parquet`](./packages/frame-parquet) for Parquet I/O) |
 | Dataset pipelines for training | [`data`](./packages/data) |
 | Talk to it from an agent | [`mcp`](./packages/mcp) (`npx math-plus-mcp`) |
@@ -47,6 +48,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | [`@johnhenry/math-plus-tensor-wasm`](./packages/tensor-wasm) | Rust→WASM kernels (SIMD, arena allocator, zero-alloc `...Into` ops) + opt-in Deno-native FFI |
 | [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU GEMM, attention primitives, IR→WGSL fusion. Chromium-family browsers only. |
 | [`@johnhenry/math-plus-tensor-mlx`](./packages/tensor-mlx) | **Experimental.** MLX (Metal) arrays on Node/Bun with explicit `fromTensor`/`toTensor` transfers, over the `@johnhenry/tensor-backend` contract. darwin/arm64 only; not on JSR. |
+| [`@johnhenry/math-plus-safetensors`](./packages/safetensors) | safetensors reader/writer: validated headers, typed views (F16 as `Float16Array`), lazy reads from files/Blobs/HTTP ranges, optional tensor-core interop. Zero deps. |
 
 ### Signal & media
 
