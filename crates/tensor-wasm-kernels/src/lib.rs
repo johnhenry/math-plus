@@ -12,6 +12,8 @@
 
 use std::alloc::{alloc as std_alloc, dealloc as std_dealloc, Layout};
 
+mod gemm;
+
 /// Allocate `len` bytes aligned to `align` (must be a power of two; 4 or 8
 /// for f32/f64 buffers). Ownership passes to the caller; free with
 /// `dealloc(ptr, len, align)` using the SAME align used here.
@@ -164,10 +166,18 @@ pub unsafe extern "C" fn div_f32_strided(
 /// non-contiguous operand without copying it first — this is the exact ABI
 /// sketched in docs/PLAN.md §6.1 (`kernels.gemmF32({...})`).
 ///
+/// Implementation (issue #121): the cache-blocked, register-tiled driver in
+/// `gemm.rs` with the portable scalar 4x8 micro-kernel — the same driver the
+/// SIMD128 build's `gemm_f32_simd128` runs with an f32x4 micro-kernel. On
+/// the native cdylib, the opt-in `accelerate` cargo feature (macOS only)
+/// hands BLAS-compatible layouts to Apple's `cblas_sgemm` first. `beta == 0`
+/// never reads `out` (an uninitialized destination can't leak NaNs in).
+///
 /// # Safety
 /// The three (pointer, offset, row_stride, col_stride) groups must describe
 /// valid, in-bounds f32 storage for an (m x k), (k x n), and (m x n) matrix
-/// respectively (offsets/strides in elements, not bytes).
+/// respectively (offsets/strides in elements, not bytes), and `out` must not
+/// overlap `a`/`b`.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn gemm_f32(
@@ -189,18 +199,173 @@ pub unsafe extern "C" fn gemm_f32(
     alpha: f32,
     beta: f32,
 ) {
-    for i in 0..m as isize {
-        for j in 0..n as isize {
-            let mut acc = 0.0f32;
-            for p in 0..k as isize {
-                let av = *a_ptr.offset(a_offset + i * a_row_stride + p * a_col_stride);
-                let bv = *b_ptr.offset(b_offset + p * b_row_stride + j * b_col_stride);
-                acc += av * bv;
-            }
-            let out_idx = out_offset + i * out_row_stride + j * out_col_stride;
-            let prev = if beta != 0.0 { *out_ptr.offset(out_idx) } else { 0.0 };
-            *out_ptr.offset(out_idx) = alpha * acc + beta * prev;
+    let a = gemm::MatRef { ptr: a_ptr, offset: a_offset, row_stride: a_row_stride, col_stride: a_col_stride };
+    let b = gemm::MatRef { ptr: b_ptr, offset: b_offset, row_stride: b_row_stride, col_stride: b_col_stride };
+    let out = gemm::MatMut {
+        ptr: out_ptr,
+        offset: out_offset,
+        row_stride: out_row_stride,
+        col_stride: out_col_stride,
+    };
+    #[cfg(all(feature = "accelerate", target_os = "macos"))]
+    if accelerate::try_sgemm(a, b, out, m, n, k, alpha, beta) {
+        return;
+    }
+    gemm_portable(a, b, out, m, n, k, alpha, beta);
+}
+
+/// wasm32: packing scratch on the shadow stack (a stack-pointer bump, no
+/// allocator traffic — and the same placement the SIMD128 entry point is
+/// REQUIRED to use, see gemm.rs's module doc).
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn gemm_portable(
+    a: gemm::MatRef,
+    b: gemm::MatRef,
+    out: gemm::MatMut,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f32,
+    beta: f32,
+) {
+    let mut apack = core::mem::MaybeUninit::<[f32; gemm::APACK_LEN]>::uninit();
+    let mut bpack = core::mem::MaybeUninit::<[f32; gemm::BPACK_LEN]>::uninit();
+    gemm::gemm_blocked::<gemm::ScalarKernel>(
+        a,
+        b,
+        out,
+        m,
+        n,
+        k,
+        alpha,
+        beta,
+        apack.as_mut_ptr() as *mut f32,
+        bpack.as_mut_ptr() as *mut f32,
+    );
+}
+
+/// Native: packing scratch on the heap, sized to the problem — 320 KiB of
+/// stack is too much to assume on an arbitrary FFI caller's thread.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+unsafe fn gemm_portable(
+    a: gemm::MatRef,
+    b: gemm::MatRef,
+    out: gemm::MatMut,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f32,
+    beta: f32,
+) {
+    use gemm::MicroKernel;
+    let (mr, nr) = (gemm::ScalarKernel::MR, gemm::ScalarKernel::NR);
+    let kc = k.min(gemm::KC);
+    let apack_len = m.min(gemm::MC).div_ceil(mr) * mr * kc;
+    let bpack_len = n.min(gemm::NC).div_ceil(nr) * nr * kc;
+    let mut apack: Vec<f32> = Vec::with_capacity(apack_len);
+    let mut bpack: Vec<f32> = Vec::with_capacity(bpack_len);
+    gemm::gemm_blocked::<gemm::ScalarKernel>(
+        a,
+        b,
+        out,
+        m,
+        n,
+        k,
+        alpha,
+        beta,
+        apack.as_mut_ptr(),
+        bpack.as_mut_ptr(),
+    );
+}
+
+/// Opt-in Apple Accelerate path for the native cdylib (`--features
+/// accelerate`, macOS only; ignored on every other target so the feature
+/// can't break a cross-platform build). Only BLAS-expressible layouts are
+/// delegated — each operand must be row- or column-major with a unit stride
+/// on one axis, and `out` row-major; anything else (arbitrary strided
+/// views, negative strides, dims past i32) returns `false` and falls back
+/// to the portable blocked kernel. Results are NOT bit-identical to the
+/// portable kernel (Accelerate uses FMA and its own blocking) — same
+/// oracle tolerance, different last ulps.
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
+mod accelerate {
+    use crate::gemm::{MatMut, MatRef};
+
+    const CBLAS_ROW_MAJOR: i32 = 101;
+    const CBLAS_NO_TRANS: i32 = 111;
+    const CBLAS_TRANS: i32 = 112;
+
+    #[link(name = "Accelerate", kind = "framework")]
+    extern "C" {
+        fn cblas_sgemm(
+            order: i32,
+            trans_a: i32,
+            trans_b: i32,
+            m: i32,
+            n: i32,
+            k: i32,
+            alpha: f32,
+            a: *const f32,
+            lda: i32,
+            b: *const f32,
+            ldb: i32,
+            beta: f32,
+            c: *mut f32,
+            ldc: i32,
+        );
+    }
+
+    /// (transpose flag, leading dimension) for a rows x cols operand, or
+    /// None if it isn't BLAS-expressible.
+    fn layout(row_stride: isize, col_stride: isize, rows: usize, cols: usize) -> Option<(i32, i32)> {
+        if col_stride == 1 && row_stride >= cols.max(1) as isize {
+            Some((CBLAS_NO_TRANS, i32::try_from(row_stride).ok()?))
+        } else if row_stride == 1 && col_stride >= rows.max(1) as isize {
+            Some((CBLAS_TRANS, i32::try_from(col_stride).ok()?))
+        } else {
+            None
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn try_sgemm(
+        a: MatRef,
+        b: MatRef,
+        out: MatMut,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: f32,
+        beta: f32,
+    ) -> bool {
+        let (Ok(mi), Ok(ni), Ok(ki)) = (i32::try_from(m), i32::try_from(n), i32::try_from(k)) else {
+            return false;
+        };
+        let Some((ta, lda)) = layout(a.row_stride, a.col_stride, m, k) else { return false };
+        let Some((tb, ldb)) = layout(b.row_stride, b.col_stride, k, n) else { return false };
+        if out.col_stride != 1 || out.row_stride < n.max(1) as isize {
+            return false;
+        }
+        let Ok(ldc) = i32::try_from(out.row_stride) else { return false };
+        cblas_sgemm(
+            CBLAS_ROW_MAJOR,
+            ta,
+            tb,
+            mi,
+            ni,
+            ki,
+            alpha,
+            a.ptr.offset(a.offset),
+            lda,
+            b.ptr.offset(b.offset),
+            ldb,
+            beta,
+            out.ptr.offset(out.offset),
+            ldc,
+        );
+        true
     }
 }
 
@@ -316,12 +481,14 @@ pub unsafe extern "C" fn solve_f32(
     }
 }
 
-/// SIMD128 kernels (issue #13) — measured, then shipped: `docs/spikes/
+/// SIMD128 kernels (issues #13, #121) — measured, then shipped: `docs/spikes/
 /// wasm-simd.md` records a stable ~2.6-3x SIMD-only speedup over an
-/// apples-to-apples contiguous-scalar baseline (~3.2-4.4x total vs. the
-/// strided kernel these replace for the contiguous case), well above any
-/// reasonable bar for "a real speedup," so this ships as a SEPARATE build
-/// (Cargo `simd` feature) rather than staying scalar-only.
+/// apples-to-apples contiguous-scalar baseline for elementwise add/mul
+/// (~3.2-4.4x total vs. the strided kernel these replace for the contiguous
+/// case), and ~3.6x for GEMM over the scalar blocked kernel (~20x over the
+/// pre-#121 naive triple loop), well above any reasonable bar for "a real
+/// speedup," so this ships as a SEPARATE build (Cargo `simd` feature)
+/// rather than staying scalar-only.
 ///
 /// Built as a second .wasm artifact, never merged into the default build:
 /// a wasm32 module containing ANY v128 instruction fails WebAssembly
@@ -347,7 +514,8 @@ pub unsafe extern "C" fn solve_f32(
 /// genuinely share one linear memory / one `ArrayBuffer`.
 #[cfg(feature = "simd")]
 mod simd {
-    use std::arch::wasm32::{f32x4_add, f32x4_mul, v128, v128_load, v128_store};
+    use crate::gemm::{self, MicroKernel};
+    use std::arch::wasm32::{f32x4_add, f32x4_mul, f32x4_splat, v128, v128_load, v128_store};
 
     /// Contiguous-only f32 elementwise add via WASM SIMD128 (4 lanes/store).
     /// Deliberately has NO offset/stride params (unlike `add_f32_strided`):
@@ -403,6 +571,121 @@ mod simd {
         for i in (chunks * 4)..len {
             *out_ptr.add(i) = *a_ptr.add(i) * *b_ptr.add(i);
         }
+    }
+
+    /// SIMD128 GEMM (issue #121): the shared blocked driver (`gemm.rs`) with
+    /// an f32x4 4x8 register-tiled micro-kernel. SAME strided ABI as the
+    /// scalar `gemm_f32` — packing absorbs any operand layout, so unlike the
+    /// elementwise kernels above there is no contiguity requirement and
+    /// `matmulInto` routes every call here when this module loaded.
+    ///
+    /// Packing scratch lives on the wasm shadow stack, NEVER the heap: this
+    /// module shares the scalar module's linear memory but carries its own
+    /// copy of the allocator, which knows nothing about the scalar
+    /// allocator's live blocks (see gemm.rs's module doc).
+    ///
+    /// Bit-for-bit identical to the scalar `gemm_f32` on wasm (same packing,
+    /// same per-element multiply-then-add order, no FMA) — asserted by the
+    /// package's tests.
+    ///
+    /// # Safety
+    /// Same requirements as `gemm_f32`.
+    #[no_mangle]
+    #[target_feature(enable = "simd128")]
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe extern "C" fn gemm_f32_simd128(
+        a_ptr: *const f32,
+        a_offset: isize,
+        a_row_stride: isize,
+        a_col_stride: isize,
+        b_ptr: *const f32,
+        b_offset: isize,
+        b_row_stride: isize,
+        b_col_stride: isize,
+        out_ptr: *mut f32,
+        out_offset: isize,
+        out_row_stride: isize,
+        out_col_stride: isize,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: f32,
+        beta: f32,
+    ) {
+        let a = gemm::MatRef { ptr: a_ptr, offset: a_offset, row_stride: a_row_stride, col_stride: a_col_stride };
+        let b = gemm::MatRef { ptr: b_ptr, offset: b_offset, row_stride: b_row_stride, col_stride: b_col_stride };
+        let out = gemm::MatMut {
+            ptr: out_ptr,
+            offset: out_offset,
+            row_stride: out_row_stride,
+            col_stride: out_col_stride,
+        };
+        let mut apack = core::mem::MaybeUninit::<[f32; gemm::APACK_LEN]>::uninit();
+        let mut bpack = core::mem::MaybeUninit::<[f32; gemm::BPACK_LEN]>::uninit();
+        gemm::gemm_blocked::<Simd128Kernel>(
+            a,
+            b,
+            out,
+            m,
+            n,
+            k,
+            alpha,
+            beta,
+            apack.as_mut_ptr() as *mut f32,
+            bpack.as_mut_ptr() as *mut f32,
+        );
+    }
+
+    /// 4 rows x 8 columns (two f32x4 per row) = 8 v128 accumulators + 2 B
+    /// vectors + 1 broadcast A: 11 live vectors, inside x86-64's 16 XMM
+    /// registers (V8 on arm64 has 32) so nothing spills in the hot loop.
+    struct Simd128Kernel;
+
+    impl MicroKernel for Simd128Kernel {
+        const MR: usize = 4;
+        const NR: usize = 8;
+
+        #[inline(always)]
+        unsafe fn run(kc: usize, a: *const f32, b: *const f32, tile: *mut f32) {
+            microkernel_4x8(kc, a, b, tile)
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "simd128")]
+    unsafe fn microkernel_4x8(kc: usize, a: *const f32, b: *const f32, tile: *mut f32) {
+        let z = f32x4_splat(0.0);
+        let (mut c00, mut c01, mut c10, mut c11) = (z, z, z, z);
+        let (mut c20, mut c21, mut c30, mut c31) = (z, z, z, z);
+        let mut ap = a;
+        let mut bp = b;
+        for _ in 0..kc {
+            let b0 = v128_load(bp as *const v128);
+            let b1 = v128_load(bp.add(4) as *const v128);
+            let a0 = f32x4_splat(*ap);
+            c00 = f32x4_add(c00, f32x4_mul(a0, b0));
+            c01 = f32x4_add(c01, f32x4_mul(a0, b1));
+            let a1 = f32x4_splat(*ap.add(1));
+            c10 = f32x4_add(c10, f32x4_mul(a1, b0));
+            c11 = f32x4_add(c11, f32x4_mul(a1, b1));
+            let a2 = f32x4_splat(*ap.add(2));
+            c20 = f32x4_add(c20, f32x4_mul(a2, b0));
+            c21 = f32x4_add(c21, f32x4_mul(a2, b1));
+            let a3 = f32x4_splat(*ap.add(3));
+            c30 = f32x4_add(c30, f32x4_mul(a3, b0));
+            c31 = f32x4_add(c31, f32x4_mul(a3, b1));
+            ap = ap.add(4);
+            bp = bp.add(8);
+        }
+        let t = tile as *mut v128;
+        v128_store(t, c00);
+        v128_store(t.add(1), c01);
+        v128_store(t.add(2), c10);
+        v128_store(t.add(3), c11);
+        v128_store(t.add(4), c20);
+        v128_store(t.add(5), c21);
+        v128_store(t.add(6), c30);
+        v128_store(t.add(7), c31);
     }
 }
 
@@ -538,6 +821,138 @@ mod tests {
             )
         };
         assert_eq!(out, [58.0, 64.0, 139.0, 154.0]);
+    }
+
+    /// Deterministic pseudo-random f32 in [-1, 1) (xorshift32) -- no dev-deps.
+    fn rand_vec(len: usize, seed: u32) -> Vec<f32> {
+        let mut x = seed.max(1);
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// Test oracle only (never shipped): the textbook triple loop in f64.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_gemm(
+        a: &[f32], a_rs: usize, a_cs: usize,
+        b: &[f32], b_rs: usize, b_cs: usize,
+        c0: &[f32], m: usize, n: usize, k: usize, alpha: f32, beta: f32,
+    ) -> Vec<f64> {
+        let mut out = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0f64;
+                for p in 0..k {
+                    acc += a[i * a_rs + p * a_cs] as f64 * b[p * b_rs + j * b_cs] as f64;
+                }
+                let prev = if beta != 0.0 { beta as f64 * c0[i * n + j] as f64 } else { 0.0 };
+                out[i * n + j] = alpha as f64 * acc + prev;
+            }
+        }
+        out
+    }
+
+    /// Blocked kernel vs the f64 reference across shapes that straddle every
+    /// block/tile edge (MR=4, NR=8, MC=64, KC=256, NC=256), both operand
+    /// orientations, and alpha/beta combinations.
+    #[test]
+    fn gemm_f32_blocked_matches_reference_across_block_edges() {
+        let shapes = [
+            (1, 1, 1),
+            (3, 5, 7),
+            (4, 8, 256),
+            (5, 9, 257),
+            (65, 257, 300),
+            (129, 33, 513),
+            (64, 256, 256),
+        ];
+        for (si, &(m, n, k)) in shapes.iter().enumerate() {
+            let a = rand_vec(m * k, 11 + si as u32);
+            let b = rand_vec(k * n, 97 + si as u32);
+            let c0 = rand_vec(m * n, 1234 + si as u32);
+            for &(transpose_a, transpose_b) in &[(false, false), (true, false), (false, true), (true, true)] {
+                // Physically store A^T / B^T when "transposed" and read them back
+                // through swapped strides, like WasmTensor.transposed() does.
+                let (a_buf, a_rs, a_cs) = if transpose_a {
+                    let mut t = vec![0.0f32; m * k];
+                    for i in 0..m { for p in 0..k { t[p * m + i] = a[i * k + p]; } }
+                    (t, 1, m)
+                } else {
+                    (a.clone(), k, 1)
+                };
+                let (b_buf, b_rs, b_cs) = if transpose_b {
+                    let mut t = vec![0.0f32; k * n];
+                    for p in 0..k { for j in 0..n { t[j * k + p] = b[p * n + j]; } }
+                    (t, 1, k)
+                } else {
+                    (b.clone(), n, 1)
+                };
+                for &(alpha, beta) in &[(1.0f32, 0.0f32), (0.5, 2.0), (-1.5, 1.0)] {
+                    let mut out = c0.clone();
+                    unsafe {
+                        gemm_f32(
+                            a_buf.as_ptr(), 0, a_rs as isize, a_cs as isize,
+                            b_buf.as_ptr(), 0, b_rs as isize, b_cs as isize,
+                            out.as_mut_ptr(), 0, n as isize, 1,
+                            m, n, k, alpha, beta,
+                        )
+                    };
+                    let want = reference_gemm(&a, k, 1, &b, n, 1, &c0, m, n, k, alpha, beta);
+                    for (idx, (&got, &w)) in out.iter().zip(want.iter()).enumerate() {
+                        let tol = 1e-5 * (k as f64).sqrt() * (1.0 + w.abs()) + 1e-5;
+                        assert!(
+                            (got as f64 - w).abs() <= tol,
+                            "shape {m}x{n}x{k} tA={transpose_a} tB={transpose_b} alpha={alpha} beta={beta} [{idx}]: {got} vs {w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gemm_f32_beta_zero_never_reads_out() {
+        // A NaN-filled destination must not leak into the result when beta == 0.
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [5.0f32, 6.0, 7.0, 8.0];
+        let mut out = [f32::NAN; 4];
+        unsafe {
+            gemm_f32(a.as_ptr(), 0, 2, 1, b.as_ptr(), 0, 2, 1, out.as_mut_ptr(), 0, 2, 1, 2, 2, 2, 1.0, 0.0)
+        };
+        assert_eq!(out, [19.0, 22.0, 43.0, 50.0]);
+    }
+
+    #[test]
+    fn gemm_f32_empty_inner_dim_scales_out_by_beta() {
+        let mut out = [1.0f32, 2.0, 3.0, 4.0];
+        let empty: [f32; 0] = [];
+        unsafe {
+            gemm_f32(empty.as_ptr(), 0, 0, 1, empty.as_ptr(), 0, 2, 1, out.as_mut_ptr(), 0, 2, 1, 2, 2, 0, 1.0, 3.0)
+        };
+        assert_eq!(out, [3.0, 6.0, 9.0, 12.0]);
+        let mut nan_out = [f32::NAN; 4];
+        unsafe {
+            gemm_f32(empty.as_ptr(), 0, 0, 1, empty.as_ptr(), 0, 2, 1, nan_out.as_mut_ptr(), 0, 2, 1, 2, 2, 0, 1.0, 0.0)
+        };
+        assert_eq!(nan_out, [0.0; 4]);
+    }
+
+    #[test]
+    fn gemm_f32_strided_out_and_offsets() {
+        // out written column-major (row_stride=1, col_stride=m) at an offset,
+        // leaving the untouched slots alone.
+        let a = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2x3
+        let b = [7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0]; // 3x2
+        let mut out = [-1.0f32; 6];
+        unsafe {
+            gemm_f32(a.as_ptr(), 0, 3, 1, b.as_ptr(), 0, 2, 1, out.as_mut_ptr(), 2, 1, 2, 2, 2, 3, 1.0, 0.0)
+        };
+        assert_eq!(out, [-1.0, -1.0, 58.0, 139.0, 64.0, 154.0]);
     }
 
     #[test]
