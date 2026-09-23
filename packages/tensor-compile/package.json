@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-tensor-compile",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Elementwise expression IR + fusion for math-plus (issue #11) — trace once, execute fused; the shared IR target for the future WebGPU kernel DSL and the Symbolic bridge",
   "type": "module",
   "exports": {
@@ -20,8 +20,8 @@
     "test:bench": "node --test test/*.bench-test.ts"
   },
   "dependencies": {
-    "@johnhenry/math-plus-tensor-core": "^0.0.0",
-    "@johnhenry/math-plus-tensor-autograd": "^0.0.0"
+    "@johnhenry/math-plus-tensor-core": "^0.1.0",
+    "@johnhenry/math-plus-tensor-autograd": "^0.1.0"
   },
   "devDependencies": {
     "@johnhenry/math": "^0.0.1"
