@@ -2,9 +2,13 @@
   "name": "@johnhenry/math-plus-tensor-autograd",
   "version": "0.0.0",
   "license": "MIT",
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./safetensors": "./src/safetensors.ts"
+  },
   "imports": {
     "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0",
-    "@johnhenry/math-plus-telemetry": "jsr:@johnhenry/math-plus-telemetry@^0.0.0"
+    "@johnhenry/math-plus-telemetry": "jsr:@johnhenry/math-plus-telemetry@^0.0.0",
+    "@johnhenry/math-plus-safetensors": "jsr:@johnhenry/math-plus-safetensors@^0.0.0"
   }
 }

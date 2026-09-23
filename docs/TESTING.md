@@ -158,6 +158,27 @@ independent of both `tensor-autograd`'s reverse-mode tape and finite differences
 (`adapters/adapter-math/test/test-utils.test.ts`) validate it against finite differences AND
 against `tensor-autograd`'s `Variable`/`grad.of` on real scalar/multivariate functions.
 
+## PyTorch oracle (tensor-autograd)
+
+`packages/tensor-autograd/test/transformer.test.ts` and `test/safetensors.test.ts` check every
+`Variable` view op and transformer layer (`scaledDotProductAttention`, `MultiheadAttention`,
+`RotaryEmbedding`, `LayerNorm(bias=False)`, `TransformerEncoderLayer`, `GeGLU`) against PyTorch —
+forward output AND the gradient of every input and parameter, for a seeded random upstream
+gradient — via one batched subprocess per test file (`packages/tensor-autograd/scripts/torch_oracle.py`).
+Layers ship their JS `stateDict()`, which the oracle loads with `load_state_dict(strict=True)`, so
+parameter *names* are checked against PyTorch's too. The safetensors tests additionally need
+Python's `safetensors` and cover both directions (JS-written file into torch; torch-written f16
+file into JS f16/f32 modules).
+
+Python resolution: `$MATH_PLUS_TORCH_ORACLE_PYTHON`, else `$MATH_PLUS_ORACLE_PYTHON`, else `python3`
+on PATH; same skip-don't-fail contract (no `import torch` → skip). Tolerances: f64 `rtol 1e-9`,
+f32 `rtol 2e-4` (`TOL` in `test/torch-oracle.ts`). On NixOS:
+
+```bash
+TORCH_PY=$(nix-shell -p "python3.withPackages(ps: with ps; [torch safetensors numpy])" --run "which python3")
+MATH_PLUS_TORCH_ORACLE_PYTHON=$TORCH_PY npm test -w @johnhenry/math-plus-tensor-autograd
+```
+
 ## Python-side interop tests (`packages/interop-python`)
 
 `johnhenry-math-plus-interop` is a PyPI package outside the npm/Cargo workspaces (see docs/RELEASING.md) — its

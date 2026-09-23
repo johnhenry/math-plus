@@ -11,7 +11,7 @@ import { assertGradientMatches, randomTensor } from "./gradcheck.ts";
 
 test("Linear: forward shape and parameter collection", () => {
   const rng = random.seed(1);
-  const linear = new nn.Linear(3, 4, { rng });
+  const linear = new nn.Linear(3, 4, { dtype: "f64", rng });
   const x = variable(random.uniform([2, 3], { rng, dtype: "f64" })); // Linear's params are f64
   const y = linear.forward(x);
   assert.deepEqual([...y.shape], [2, 4]);
@@ -19,15 +19,15 @@ test("Linear: forward shape and parameter collection", () => {
 });
 
 test("Linear: bias: false omits the bias parameter", () => {
-  const linear = new nn.Linear(3, 4, { bias: false, rng: random.seed(1) });
+  const linear = new nn.Linear(3, 4, { dtype: "f64", bias: false, rng: random.seed(1) });
   assert.equal(linear.bias, null);
   assert.equal(linear.parameters().length, 1);
 });
 
 test("Module.parameters() recurses through nested modules", () => {
   class Net extends nn.Module {
-    readonly a = new nn.Linear(2, 3, { rng: random.seed(1) });
-    readonly b = new nn.Linear(3, 1, { rng: random.seed(2) });
+    readonly a = new nn.Linear(2, 3, { dtype: "f64", rng: random.seed(1) });
+    readonly b = new nn.Linear(3, 1, { dtype: "f64", rng: random.seed(2) });
     forward(x: Variable): Variable {
       return this.b.forward(this.a.forward(x).relu());
     }
@@ -37,7 +37,7 @@ test("Module.parameters() recurses through nested modules", () => {
 });
 
 test("Module.zeroGrad() clears every parameter's gradient", () => {
-  const linear = new nn.Linear(2, 2, { rng: random.seed(1) });
+  const linear = new nn.Linear(2, 2, { dtype: "f64", rng: random.seed(1) });
   const x = variable(random.uniform([1, 2], { rng: random.seed(2), dtype: "f64" })); // Linear's params are f64
   linear.forward(x).sum().backward();
   assert.notEqual(linear.weight.grad, null);
@@ -47,7 +47,7 @@ test("Module.zeroGrad() clears every parameter's gradient", () => {
 });
 
 test("Embedding: gather forward, scatter-add backward accumulates duplicate indices", () => {
-  const emb = new nn.Embedding(5, 3, { rng: random.seed(1) });
+  const emb = new nn.Embedding(5, 3, { dtype: "f64", rng: random.seed(1) });
   const indices = Tensor.from([0, 2, 0], { dtype: "i32" }); // index 0 repeated
   const out = emb.forward(indices);
   assert.deepEqual([...out.shape], [3, 3]);
@@ -84,7 +84,7 @@ test("Embedding: sparse backward matches the dense reference implementation exac
 
   const numEmbeddings = 40;
   const embeddingDim = 6;
-  const emb = new nn.Embedding(numEmbeddings, embeddingDim, { rng: random.seed(7) });
+  const emb = new nn.Embedding(numEmbeddings, embeddingDim, { dtype: "f64", rng: random.seed(7) });
   // Duplicates AND untouched rows, to exercise accumulation and zero-fill alike.
   const rawIndices = [3, 17, 3, 0, 39, 17, 17, 22];
   const indices = Tensor.from(rawIndices, { dtype: "i32" });
@@ -112,7 +112,7 @@ test("Embedding: backward on a large table stays fast regardless of table size (
   // same scale.
   const numEmbeddings = 50_000;
   const embeddingDim = 256;
-  const emb = new nn.Embedding(numEmbeddings, embeddingDim, { rng: random.seed(3) });
+  const emb = new nn.Embedding(numEmbeddings, embeddingDim, { dtype: "f64", rng: random.seed(3) });
   const indices = Tensor.from([10, 42, 1000], { dtype: "i32" });
   const out = emb.forward(indices);
 
@@ -127,7 +127,7 @@ test("Embedding: backward on a large table stays fast regardless of table size (
 });
 
 test("LayerNorm: normalizes the last axis to ~zero mean, ~unit variance", () => {
-  const ln = new nn.LayerNorm(4);
+  const ln = new nn.LayerNorm(4, { dtype: "f64" });
   const x = variable(Tensor.from([1, 2, 3, 100, -5, 0, 5, 10], { dtype: "f64" }).reshape([2, 4]));
   const y = ln.forward(x);
   const rowMean = y.value.mean(1).toArray() as number[];
@@ -151,8 +151,8 @@ test("mseLoss and crossEntropy compute finite, non-negative losses", () => {
 
 test("Sequential: forward chains layers in order, matching a hand-composed equivalent", () => {
   const rng = random.seed(11);
-  const a = new nn.Linear(3, 5, { rng });
-  const b = new nn.Linear(5, 2, { rng });
+  const a = new nn.Linear(3, 5, { dtype: "f64", rng });
+  const b = new nn.Linear(5, 2, { dtype: "f64", rng });
   const seq = new nn.Sequential([a, b]);
   const x = variable(random.uniform([4, 3], { rng, dtype: "f64" }));
   const viaSequential = seq.forward(x).value.toArray();
@@ -162,7 +162,7 @@ test("Sequential: forward chains layers in order, matching a hand-composed equiv
 
 test("Sequential: .parameters()/.namedParameters() discover every sub-module's parameters (reflection-walk regression test)", () => {
   const rng = random.seed(12);
-  const seq = new nn.Sequential([new nn.Linear(2, 3, { rng }), new nn.Linear(3, 4, { rng }), new nn.Linear(4, 1, { rng })]);
+  const seq = new nn.Sequential([new nn.Linear(2, 3, { dtype: "f64", rng }), new nn.Linear(3, 4, { dtype: "f64", rng }), new nn.Linear(4, 1, { dtype: "f64", rng })]);
   assert.equal(seq.parameters().length, 6); // 3 layers x (weight + bias)
   assert.deepEqual(
     Object.keys(seq.namedParameters()).sort(),
@@ -297,8 +297,8 @@ test("toy training loop: XOR-MLP converges with AdamW", () => {
   const rng = random.seed(7);
 
   class XorNet extends nn.Module {
-    readonly fc1 = new nn.Linear(2, 8, { rng });
-    readonly fc2 = new nn.Linear(8, 1, { rng });
+    readonly fc1 = new nn.Linear(2, 8, { dtype: "f64", rng });
+    readonly fc2 = new nn.Linear(8, 1, { dtype: "f64", rng });
     forward(x: Variable): Variable {
       return this.fc2.forward(this.fc1.forward(x).relu()).sigmoid();
     }
@@ -337,7 +337,7 @@ test("toy training loop: XOR-MLP converges with AdamW", () => {
 test("toy training loop: linear regression converges with plain SGD", () => {
   // y = 3x + 2, fit with a single Linear(1,1) and plain SGD.
   const rng = random.seed(3);
-  const model = new nn.Linear(1, 1, { rng });
+  const model = new nn.Linear(1, 1, { dtype: "f64", rng });
   const opt = new optim.SGD(model.parameters(), { lr: 0.01 });
 
   const xs = [1, 2, 3, 4, 5];
@@ -420,10 +420,10 @@ test("toy training loop: linear regression converges faster with momentum than w
     return lastLoss;
   }
 
-  const plainModel = new nn.Linear(1, 1, { rng: random.seed(7) });
+  const plainModel = new nn.Linear(1, 1, { dtype: "f64", rng: random.seed(7) });
   const plainLoss = finalLoss(new optim.SGD(plainModel.parameters(), { lr: 0.01 }), plainModel, 200);
 
-  const momentumModel = new nn.Linear(1, 1, { rng: random.seed(7) }); // same seed -- identical starting weights
+  const momentumModel = new nn.Linear(1, 1, { dtype: "f64", rng: random.seed(7) }); // same seed -- identical starting weights
   const momentumLoss = finalLoss(new optim.SGD(momentumModel.parameters(), { lr: 0.01, momentum: 0.9 }), momentumModel, 200);
 
   assert.ok(momentumLoss < plainLoss, `momentum (${momentumLoss}) should converge faster than plain SGD (${plainLoss}) over the same 200 epochs`);
@@ -433,7 +433,7 @@ test("toy training loop: linear regression converges faster with momentum than w
 
 test("toy training loop: linear regression converges with plain Adam (weightDecay=0)", () => {
   const rng = random.seed(4);
-  const model = new nn.Linear(1, 1, { rng });
+  const model = new nn.Linear(1, 1, { dtype: "f64", rng });
   const opt = new optim.Adam(model.parameters(), { lr: 0.05 });
   assert.equal((opt as unknown as { weightDecay: number }).weightDecay, 0);
 
@@ -455,8 +455,8 @@ test("toy training loop: linear regression converges with plain Adam (weightDeca
 test("toy training loop: XOR-MLP converges with RMSprop", () => {
   const rng = random.seed(5);
   class XorNet extends nn.Module {
-    readonly l1 = new nn.Linear(2, 8, { rng });
-    readonly l2 = new nn.Linear(8, 1, { rng });
+    readonly l1 = new nn.Linear(2, 8, { dtype: "f64", rng });
+    readonly l2 = new nn.Linear(8, 1, { dtype: "f64", rng });
     forward(x: Variable): Variable {
       return this.l2.forward(this.l1.forward(x).relu());
     }
@@ -503,7 +503,7 @@ test("StepLR: rejects a non-positive stepSize", () => {
 
 test("StepLR composes with any optimizer that has a mutable lr (structural typing, not a class union)", () => {
   const rng = random.seed(6);
-  const model = new nn.Linear(1, 1, { rng });
+  const model = new nn.Linear(1, 1, { dtype: "f64", rng });
   for (const opt of [
     new optim.SGD(model.parameters(), { lr: 1 }),
     new optim.AdamW(model.parameters(), { lr: 1 }),
@@ -546,7 +546,7 @@ test("optim.step() emits an optim/gradNorm metric when a sink is installed", asy
   const events: unknown[] = [];
   setSink((e) => events.push(e));
   try {
-    const linear = new nn.Linear(2, 1, { rng: random.seed(1) });
+    const linear = new nn.Linear(2, 1, { dtype: "f64", rng: random.seed(1) });
     const opt = new optim.SGD(linear.parameters(), { lr: 0.1 });
     const x = variable(random.uniform([1, 2], { rng: random.seed(2), dtype: "f64" }));
     linear.forward(x).sum().backward(); // also emits a "backward" trace span, since the sink is already active

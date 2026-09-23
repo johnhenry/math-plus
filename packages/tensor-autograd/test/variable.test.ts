@@ -4,7 +4,7 @@ import { makeTest } from "../../../test/harness.ts";
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { DualNumber } from "@johnhenry/math";
 import { erf, Tensor } from "@johnhenry/math-plus-tensor-core";
-import { Variable, constant, enableGrad, grad, noGrad, variable } from "../src/index.ts";
+import { Variable, constant, enableGrad, grad, noGrad, sumToShape, variable } from "../src/index.ts";
 import { assertGradientMatches, randomTensor } from "./gradcheck.ts";
 
 // ---- basic tape mechanics ---------------------------------------------------
@@ -208,4 +208,45 @@ test("unsqueeze backward reduces via sum when the axis was broadcast wider than 
   const y = x.unsqueeze(0).mul(wide).sum();
   y.backward();
   assert.deepEqual(x.grad?.toArray(), [4, 4, 4]); // summed over the 4 broadcast rows
+});
+
+// ---- issue #123: view ops, exp/tanh, batched matmul (PyTorch parity lives in transformer.test.ts;
+// these are the oracle-free finite-difference cross-checks and argument validation) ----
+
+test("gradcheck (finite differences): exp, tanh, exact gelu, reshape/permute/slice/concat chain, batched matmul", () => {
+  const x = randomTensor([2, 3, 4]);
+  assertGradientMatches((v) => v.exp().sum(), randomTensor([3, 2], "f64", 1));
+  assertGradientMatches((v) => v.tanh().mul(v).sum(), randomTensor([3, 2]));
+  assertGradientMatches((v) => v.gelu({ approximate: "none" }).sum(), randomTensor([3, 4], "f64", 4));
+  assertGradientMatches(
+    (v) => {
+      const p = v.permute([2, 0, 1]).reshape([4, 6]).slice({ start: 3, end: 0, step: -2 });
+      return Variable.concat([p, p.mul(p)], 1).sum();
+    },
+    x,
+  );
+  const b = randomTensor([3, 4, 2]);
+  assertGradientMatches((v) => v.matmul(constant(b)).mul(v.matmul(constant(b))).sum(), randomTensor([2, 1, 3, 4]));
+});
+
+test("Variable.transpose: two dims or none; one alone throws", () => {
+  const v = variable(randomTensor([2, 3, 4]));
+  assert.deepEqual([...v.transpose().shape], [4, 3, 2]);
+  assert.deepEqual([...v.transpose(0, -1).shape], [4, 3, 2]);
+  assert.deepEqual([...v.transpose(-2, -1).shape], [2, 4, 3]);
+  assert.throws(() => v.transpose(1), /both dim0 and dim1/);
+});
+
+test("Variable.matmul rejects 1-D operands with a clear message", () => {
+  assert.throws(() => variable(randomTensor([3])).matmul(variable(randomTensor([3, 2]))), /ndim >= 2/);
+});
+
+test("Variable.cast to the same dtype is the identity (no extra tape node)", () => {
+  const v = variable(randomTensor([2]));
+  assert.equal(v.cast("f64"), v);
+});
+
+test("sumToShape accepts a non-contiguous (permuted) gradient (regression: reshape used to throw)", () => {
+  const g = Tensor.from([1, 2, 3, 4, 5, 6], { dtype: "f64" }).reshape([2, 3]).transpose();
+  assert.deepEqual(sumToShape(g, [3, 2]).toArray(), [[1, 4], [2, 5], [3, 6]]);
 });
