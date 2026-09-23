@@ -8,13 +8,22 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Not enabled in the shipped build (issue #13) -- see lib.rs's simd module
-# doc comment for why. Any wasm32 v128 instruction anywhere in a compiled
-# module makes the WHOLE module fail WebAssembly validation on a runtime
-# without SIMD support (module loading is all-or-nothing, unlike native
-# code's per-call feature detection), so this can only ever ship as a
-# SEPARATE .wasm artifact with its own runtime feature-detection dispatch
-# on the JS side -- real, ongoing complexity (risk #7 in docs/PLAN.md).
-# `--features simd` is for measurement builds only until/unless a real
-# speedup justifies paying that cost.
+# Builds the SECOND, SIMD128 .wasm artifact (`npm run build:wasm:simd`),
+# never the default one -- see lib.rs's simd module doc comment for why.
+# Any wasm32 v128 instruction anywhere in a compiled module makes the WHOLE
+# module fail WebAssembly validation on a runtime without SIMD support
+# (module loading is all-or-nothing, unlike native code's per-call feature
+# detection), so it ships as a separate artifact with runtime
+# feature-detection dispatch on the JS side (risk #7 in docs/PLAN.md) --
+# paid for by measured wins: ~2.6-3x on contiguous add/mul (issue #13,
+# docs/spikes/wasm-simd.md) and ~3.6x over the scalar blocked GEMM
+# (issue #121, same doc). Meaningless for the native cdylib.
 simd = []
+
+# Native cdylib only, macOS only (issue #121): route BLAS-expressible
+# `gemm_f32` layouts to Apple Accelerate's `cblas_sgemm`, falling back to
+# the portable blocked kernel for anything else. A no-op on every other
+# target (the code is `cfg(target_os = "macos")`-gated), and never enabled
+# for the wasm builds. Off by default: the shipped native artifacts stay
+# dependency-free and bit-reproducible across platforms.
+accelerate = []

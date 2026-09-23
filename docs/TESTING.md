@@ -7,7 +7,60 @@ npm test            # all workspaces
 npm test -w @johnhenry/math-plus-tensor-core
 ```
 
-Tests are TypeScript run directly by `node --test` (native type stripping, Node ≥22.12).
+Tests are TypeScript run directly by `node --test` (native type stripping). The floor is
+`engines.node >=24.0.0` everywhere (root and every package; `test/manifest-drift.test.ts` enforces
+that they agree) and CI tests exactly that floor. Nothing needs Node 26: there is no Node-26-only API
+in the repo, and `Float16Array`, `Math.f16round` and `node --test` on `.ts` all work on 24.9, where
+the full suite passes.
+
+## Running under Bun
+
+```bash
+npm run build          # same prerequisite as npm test
+npm run test:bun       # every suite + a summary table (scripts/test-bun.mjs)
+npm run test:bun -- tensor-core   # only suites whose directory contains "tensor-core"
+npm run test:bun -w @johnhenry/math-plus-fft   # one package, raw bun output
+```
+
+**Bun 1.2's `node:test` shim registers tests from the first file of a multi-file run only.** The
+other files' tests are dropped silently and the run still passes (before this harness, `bun test` in
+`packages/fft` ran 8 of 27 tests). A shared module that imports `bun:test` for the files has the same
+problem. So every test file imports `bun:test` itself and passes it to the shared
+[`test/harness.ts`](../test/harness.ts):
+
+```ts
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
+```
+
+Destructure `before`/`after`/`afterEach` from the same call when needed. Under Node, `makeTest(null)`
+returns `node:test`'s own functions unchanged. Under Bun it returns a shim for the subset of the API
+the suites use: options `skip`/`todo`/`timeout`, and `t.name`/`t.skip`/`t.after`/`t.test`.
+`TestContext` is typed as that subset, so `tsc` rejects anything else. For call-counting spies use
+the harness's `spyMethod`, not `node:test`'s `mock.method`, which the Bun shim does not count. A
+manifest-drift test fails any `*.test.ts` that imports from `node:test` directly or lacks its own
+`bun:test` import.
+
+Differences under Bun:
+- A runtime `t.skip(reason)` cannot mark a running `bun:test` test as skipped. The test is reported as
+  **passed** and a `[skip] <name>: <reason>` line is printed; `scripts/test-bun.mjs` counts these per
+  suite. Apply the "0 skipped" rule from the oracle sections below to that count as well.
+- Subtests (`t.test`) run in order inside the parent and are not reported on their own, so
+  Bun's test totals are lower than Node's for suites that use them (e.g. tensor-core's differential
+  suite).
+- There is no per-test default timeout, as under `node --test`. Bun's own 5 s default would kill the
+  oracle tests.
+- `scripts/test-bun.mjs` also fails a suite when Bun ran fewer files than `test/*.test.ts` holds.
+  That is the signature of the multi-file bug.
+- `*.bench-test.ts` files are not collected by `bun test`, matching `npm test`.
+
+Bun is pinned to 1.2.17 in CI. Recheck whether the harness is still needed when upgrading.
+
+## Benchmarks
+
+GPU and WASM performance numbers follow [`docs/BENCHMARKING.md`](BENCHMARKING.md): a cooldown before
+each cell, timing windows of 1 s or less, and backends alternated inside one process.
 
 ## Differential tests (NumPy oracle)
 
@@ -74,6 +127,29 @@ BEHAVIOR (apply `sosFilter` to `butter`'s output, compare against `scipy.signal.
 `scipy.signal.butter`'s own output, on the same input) — invariant to section grouping, and the
 property that actually matters.
 
+## SciPy / PyTorch oracle for erf and GELU (tensor-core, issue #122)
+
+`packages/tensor-core/test/special-oracle.test.ts` checks the canonical `erf`/`erfc`
+(`packages/tensor-core/src/special.ts`) against `scipy.special.erf`/`erfc` over [-6, 6] plus both
+tails, exact GELU against `x·scipy.special.ndtr(x)`, and `Tensor.gelu()` against
+`torch.nn.functional.gelu` in both `approximate` modes (f64 and f32), via
+`packages/tensor-core/scripts/special_oracle.py`. Same skip-don't-fail convention. SciPy resolves
+via `$MATH_PLUS_SCIPY_ORACLE_PYTHON`, else `$MATH_PLUS_ORACLE_PYTHON`, else `python3`. PyTorch
+resolves via `$MATH_PLUS_TORCH_ORACLE_PYTHON`, else `$MATH_PLUS_ORACLE_PYTHON`, else `python3`. The
+two can be different interpreters. Without a system SciPy, a throwaway venv works:
+
+```bash
+uv venv /tmp/scipy-venv && uv pip install --python /tmp/scipy-venv/bin/python scipy numpy
+MATH_PLUS_SCIPY_ORACLE_PYTHON=/tmp/scipy-venv/bin/python \
+MATH_PLUS_TORCH_ORACLE_PYTHON=$(python3 -c 'import sys; print(sys.executable)') \
+  npm test -w @johnhenry/math-plus-tensor-core
+```
+
+(On macOS 27, the SciPy 1.15 wheel for Python 3.10 fails to `dlopen`; use Python 3.12 with a current
+SciPy.) In the far-left GELU tail SciPy's `ndtr` is the less accurate side (it rounds `x/√2` before
+`erfc`, costing ~x²·2^-53 relative), so that test's tolerance grows with x² accordingly. The numpy
+oracle's exact-GELU mode uses the C library's `math.erf` and needs only numpy.
+
 ## Gradient oracles (autograd)
 
 `adapter-math`'s `@johnhenry/math-plus-adapter-math/test-utils` subpath (`dualGrad`/`dualGradN`) wraps
@@ -100,6 +176,10 @@ nix-shell -p "python3.withPackages(ps: [ps.pyarrow ps.pandas ps.numpy ps.pytest]
 ```
 
 ## Headless WebGPU oracle (`@johnhenry/math-plus-tensor-webgpu`)
+
+> A **Dawn/Node test path** is being added by the tensor-webgpu tiled-GEMM PR (issue #127, item 4).
+> It runs these tests against WebGPU from Node directly, with no Chrome or Xvfb. That PR owns the
+> path and its documentation. The Chrome harness below is the current path until it lands.
 
 Same "oracle unavailable -> skip, never fail" convention as the NumPy/pyarrow oracles above, but
 the oracle is a live `GPUAdapter` reached over the Chrome DevTools Protocol instead of a Python

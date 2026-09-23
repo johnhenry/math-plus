@@ -35,7 +35,7 @@ export function pick<T>(rng: Rng, items: readonly T[]): T {
 export const SMOOTH_UNARY: readonly UnaryOp[] = [
   "neg", "sigmoid", "gelu", "exp", "log", "sqrt", "sin", "cos", "tan",
   "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "atanh",
-  "log10", "log2", "cbrt", "expm1", "log1p", "erf",
+  "log10", "log2", "cbrt", "expm1", "log1p", "erf", "gelu_tanh",
 ];
 export const SMOOTH_BINARY: readonly BinaryOp[] = ["add", "sub", "mul", "div", "pow", "atan2", "hypot"];
 

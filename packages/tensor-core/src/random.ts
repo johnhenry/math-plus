@@ -9,7 +9,7 @@
  * tests running in any order never interfere with each other. `random.seed(n)`
  * returns a fresh `Rng`; omit `{ rng }` and you get a non-deterministic one.
  */
-import { allocate, isBigIntDType, type AnyTypedArray, type DType } from "./dtype.ts";
+import { allocate, encodeHalf, isBigIntDType, isHalfDType, type AnyTypedArray, type DType } from "./dtype.ts";
 
 const MULT = 6364136223846793005n;
 const MASK64 = (1n << 64n) - 1n;
@@ -94,9 +94,10 @@ export function fillFrom(
   const active = rng ?? defaultRng();
   const data = allocate(dtype, totalSize(shape));
   const big = isBigIntDType(dtype);
+  const half = isHalfDType(dtype) ? dtype : undefined;
   for (let i = 0; i < data.length; i++) {
     const v = sample(active);
-    data[i] = (big ? BigInt(Math.trunc(v)) : v) as never;
+    data[i] = (big ? BigInt(Math.trunc(v)) : half ? encodeHalf(half, v) : v) as never;
   }
   return data;
 }

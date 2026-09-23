@@ -38,7 +38,8 @@ status: "in progress — v1 shipped in full, v2 underway. This document is the d
 **Runtime targets** *(the source names Node/Deno/browser but no support matrix — tiering below is own judgment)*:
 - **v1 tier 1:** Node (current LTS), Chromium-family browsers, Deno via npm compatibility.
 - **v1 tier 2 (should-work, verified later):** Firefox/Safari WASM paths; Deno-native WebGPU (a better native story than Node's third-party Dawn bindings — see §6.3).
-- **Untested/unclaimed:** Bun, Cloudflare Workers — the source mentions them only regarding `@std/math` portability; WASM-heavy packages need explicit verification before claiming support.
+- **Bun (tested, issue #127):** every workspace test suite runs under `bun test` (Bun 1.2.17) in CI via `npm run test:bun`, including the WASM-kernel and NumPy/pyarrow/scipy-oracle suites. Headless-WebGPU tests skip under Bun locally and are not yet confirmed there. See `docs/TESTING.md` "Running under Bun" for the per-file harness that Bun 1.2's `node:test` multi-file bug requires.
+- **Untested/unclaimed:** Cloudflare Workers — the source mentions it only regarding `@std/math` portability; WASM-heavy packages need explicit verification before claiming support.
 - **Distribution open question:** npm is the baseline; dual npm+JSR publishing for first-class Deno reach needs a decision before the first release (own addition, see §9).
 
 ---

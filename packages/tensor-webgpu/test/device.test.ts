@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import test, { after } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { toWebGPU, GPUTensor } from "../src/device.ts";
 import { chooseGemmBackend, GEMM_ELEMENT_THRESHOLD } from "../src/threshold.ts";
