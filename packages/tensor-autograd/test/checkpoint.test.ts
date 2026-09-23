@@ -96,3 +96,17 @@ test("loadCheckpoint throws on an unsupported version byte", () => {
   corrupted[4] = 99; // version byte
   assert.throws(() => io.loadCheckpoint(corrupted), /unsupported checkpoint version/);
 });
+
+test("writeCheckpoint/loadCheckpoint round-trip f16 and bf16 tensors bit-for-bit (bf16 is stored as the ml_dtypes '<V2' .npy)", () => {
+  const state = {
+    "half.weight": Tensor.from([1.5, -0.1, 65504, 2 ** -24], { dtype: "f16" }).reshape([2, 2]),
+    "bf16.weight": Tensor.from([1.5, -0.1, 3e38, 1e-40], { dtype: "bf16" }).reshape([2, 2]),
+  };
+  const loaded = io.loadCheckpoint(io.writeCheckpoint(state));
+  for (const [name, t] of Object.entries(state)) {
+    const back = loaded[name]!;
+    assert.equal(back.dtype, t.dtype, name);
+    assert.deepEqual(back.shape, t.shape, name);
+    assert.deepEqual([...(back.data as Uint16Array)], [...(t.data as Uint16Array)], name);
+  }
+});
