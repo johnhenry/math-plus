@@ -51,7 +51,9 @@ function unaryExpr(op: UnaryOp, x: string): string {
       return `(math_plus_gelu(${x}))`;
     case "gelu_tanh":
       // Same tanh approximation as Tensor.gelu({ approximate: "tanh" }) / tensor-core's geluTanh.
-      return `(0.5 * (${x}) * (1.0 + tanh(0.7978845608028654 * ((${x}) + 0.044715 * (${x}) * (${x}) * (${x})))))`;
+      // tanh's argument is clamped to ±15 (tanh(15) == 1.0 in f32): Metal via Dawn
+      // computes tanh through exp and returns NaN once that overflows.
+      return `(0.5 * (${x}) * (1.0 + tanh(clamp(0.7978845608028654 * ((${x}) + 0.044715 * (${x}) * (${x}) * (${x})), -15.0, 15.0))))`;
     case "exp":
       return `(exp(${x}))`;
     case "log":
@@ -76,7 +78,8 @@ function unaryExpr(op: UnaryOp, x: string): string {
     case "cosh":
       return `((exp(${x}) + exp(-(${x}))) * 0.5)`;
     case "tanh":
-      return `(tanh(${x}))`;
+      // Clamped for the same reason as gelu_tanh (Metal/Dawn overflow → NaN).
+      return `(tanh(clamp(${x}, -15.0, 15.0)))`;
     case "cot":
       return `(1.0 / tan(${x}))`;
     case "sec":
