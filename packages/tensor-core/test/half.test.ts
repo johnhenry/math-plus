@@ -131,11 +131,24 @@ test("numeric kernels reject f16/bf16 with a cast() hint instead of computing on
   assert.deepEqual(t.cast("f32").add(t.cast("f32")).cast("f16").toArray(), [2, 4]);
 });
 
-test("toNpy/fromNpy round-trip f16 (<f2); bf16 has no .npy dtype", () => {
+test("toNpy/fromNpy round-trip f16 (<f2); bf16 uses the ml_dtypes '<V2' convention and needs voidAs to read", () => {
   const t = Tensor.from([1.5, -0.25, 65504], { dtype: "f16" });
   const back = Tensor.fromNpy(t.toNpy());
   assert.equal(back.dtype, "f16");
   assert.deepEqual(back.toArray(), [1.5, -0.25, 65504]);
   assert.match(new TextDecoder().decode(t.toNpy().subarray(0, 64)), /'descr': '<f2'/);
-  assert.throws(() => Tensor.from([1], { dtype: "bf16" }).toNpy(), /no \.npy representation/);
+  const b = Tensor.from([1.5, -0.25, 3e38], { dtype: "bf16" });
+  const bytes = b.toNpy();
+  assert.match(new TextDecoder().decode(bytes.subarray(0, 64)), /'descr': '<V2'/);
+  assert.throws(() => Tensor.fromNpy(bytes), /untyped 2-byte void.*voidAs: "bf16"/);
+  const bBack = Tensor.fromNpy(bytes, { voidAs: "bf16" });
+  assert.equal(bBack.dtype, "bf16");
+  assert.deepEqual([...(bBack.data as Uint16Array)], [...(b.data as Uint16Array)]);
+  // voidAs only affects a 2-byte void descr; an f16 file still reads as f16.
+  assert.equal(Tensor.fromNpy(t.toNpy(), { voidAs: "bf16" }).dtype, "f16");
+  // '|V2' (NumPy's usual spelling for a void dtype) is accepted too.
+  const pipe = new Uint8Array(bytes);
+  const at = new TextDecoder().decode(bytes).indexOf("<V2");
+  pipe[at] = "|".charCodeAt(0);
+  assert.equal(Tensor.fromNpy(pipe, { voidAs: "bf16" }).dtype, "bf16");
 });

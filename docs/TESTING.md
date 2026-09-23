@@ -33,6 +33,14 @@ The same `$MATH_PLUS_ORACLE_PYTHON` (or a bare `python3` on PATH) is what `@john
 `@johnhenry/math-plus-frame-parquet`'s pyarrow-round-trip tests look for too (see below) — one env var covers
 every Python oracle in the repo.
 
+### bfloat16 oracle (`ml_dtypes`)
+
+NumPy has no bfloat16. `packages/tensor-core/test/half-compute.test.ts` checks bf16 `.npy` I/O and
+`withCompute` on bf16 against `ml_dtypes` (through `packages/tensor-core/scripts/half_oracle.py`). It
+uses the first of `$MATH_PLUS_ORACLE_PYTHON` and `python3` that can import `ml_dtypes`. Failing that,
+it uses `uv run --no-project --with numpy --with ml_dtypes python` when `uv` is on PATH, and failing
+that the bf16 tests skip. CI installs `ml_dtypes` next to NumPy.
+
 ### Tolerances
 
 Per-op tolerance registry in `differential.test.ts` (`TOLERANCES`): f64 default `rtol 1e-12`,

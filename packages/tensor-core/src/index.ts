@@ -17,7 +17,7 @@ import {
   type AnyTypedArray,
   type DType,
 } from "./dtype.ts";
-import { parseNpy, serializeNpy } from "./npy.ts";
+import { parseNpy, serializeNpy, type ParseNpyOptions } from "./npy.ts";
 import {
   fillFrom,
   normalSample,
@@ -40,6 +40,7 @@ export {
   type TypedArrayFor,
 } from "./dtype.ts";
 export { Rng, type RandomOptions } from "./random.ts";
+export type { ParseNpyOptions } from "./npy.ts";
 
 export type Shape = readonly number[];
 export type Axis = number;
@@ -80,7 +81,8 @@ function decodeElement(dtype: DType, raw: number | bigint): number | bigint {
 function assertNotHalf(dtype: DType, op: string): void {
   if (isHalfDType(dtype)) {
     throw new TypeError(
-      `${op} is not supported on ${dtype} (a storage dtype: Uint16Array bit patterns) -- cast("f32") first, then cast back if needed`,
+      `${op} is not supported on ${dtype} (a storage dtype: Uint16Array bit patterns) -- cast("f32") first, then cast back if needed, ` +
+        `or run the computation inside withCompute("f32", [inputs], fn)`,
     );
   }
 }
@@ -2121,10 +2123,74 @@ export class Tensor {
     });
   }
 
-  static fromNpy(bytes: Uint8Array): Tensor {
-    const { data, shape, dtype } = parseNpy(bytes);
+  /**
+   * Parse NPY v1/v2/v3 bytes. A bfloat16 file written by NumPy + `ml_dtypes`
+   * has the untyped descr `'<V2'`; pass `{ voidAs: "bf16" }` to read it (the
+   * equivalent of Python's `.view(ml_dtypes.bfloat16)`). Without it, such a
+   * file throws rather than being guessed at.
+   */
+  static fromNpy(bytes: Uint8Array, options: ParseNpyOptions = {}): Tensor {
+    const { data, shape, dtype } = parseNpy(bytes, options);
     return Tensor.fromTypedArray(data, shape, { dtype });
   }
+}
+
+/** Dtypes {@link withCompute} can compute half-precision data in. */
+export type ComputeDType = "f32" | "f64";
+
+/**
+ * Explicit, opt-in half-precision arithmetic: decode, compute, re-encode.
+ *
+ * f16/bf16 are storage dtypes, and numeric kernels throw on them rather
+ * than promote implicitly. `withCompute` is the one sanctioned place where
+ * that promotion happens, and the call site names it:
+ *
+ *     const y = withCompute("f32", [x, w], (x, w) => x.matmul(w).relu()); // y is f16
+ *
+ * 1. Every f16/bf16 input is converted with `cast(compute)`. Any other input
+ *    (an index tensor, a bool mask, an f32 bias) is passed through unchanged,
+ *    so the no-implicit-promotion rule still applies to it inside `fn`.
+ * 2. `fn` runs on ordinary `compute`-dtype tensors.
+ * 3. Every returned tensor whose dtype is `compute` is converted back to the
+ *    inputs' half dtype with `cast()` (round to nearest, ties to even). Other
+ *    results (a bool from `gt`, i64 from `argmax`) are returned as they are.
+ *    `fn` may return a tensor or an array of tensors.
+ *
+ * Rounding happens ONCE, at the exit of the region, not after every op. For a
+ * single op that equals NumPy's own f16 arithmetic, which computes each ufunc
+ * in float32 and rounds the result. For a chain it equals NumPy's
+ * `f(a.astype(float32), ...).astype(float16)`, not a chain of per-op f16 ops;
+ * the per-op chain rounds more often and is less accurate. To round after each
+ * op, use one `withCompute` per op.
+ *
+ * Throws `TypeError` when no input is f16/bf16 (there is nothing to promote),
+ * and when inputs mix f16 and bf16 (the output dtype would be ambiguous; cast
+ * one explicitly).
+ */
+export function withCompute<R extends Tensor | readonly Tensor[]>(
+  compute: ComputeDType,
+  inputs: readonly Tensor[],
+  fn: (...decoded: Tensor[]) => R,
+): R {
+  if (compute !== "f32" && compute !== "f64") {
+    throw new TypeError(`withCompute: compute dtype must be "f32" or "f64", got ${String(compute)}`);
+  }
+  const halves = [...new Set(inputs.map((t) => t.dtype).filter(isHalfDType))];
+  if (halves.length === 0) {
+    throw new TypeError(
+      `withCompute: no f16/bf16 input (got ${inputs.map((t) => t.dtype).join(", ") || "none"}); there is nothing to promote, so call fn directly`,
+    );
+  }
+  if (halves.length > 1) {
+    throw new TypeError(`withCompute: inputs mix f16 and bf16; cast one to the other explicitly first`);
+  }
+  const half = halves[0] as "f16" | "bf16";
+  const out = fn(...inputs.map((t) => (isHalfDType(t.dtype) ? t.cast(compute) : t)));
+  const encode = (t: Tensor): Tensor => {
+    if (!(t instanceof Tensor)) throw new TypeError("withCompute: fn must return a Tensor or an array of Tensors");
+    return t.dtype === compute ? t.cast(half) : t;
+  };
+  return (Array.isArray(out) ? out.map(encode) : encode(out as Tensor)) as unknown as R;
 }
 
 /**

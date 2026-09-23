@@ -4,7 +4,17 @@
  * Little-endian only, C-order only (fortran_order: True throws — M1 scope).
  * Dtype coverage matches tensor-core's fixed-width table, including f16
  * (`<f2`, IEEE binary16 — stored as the same Uint16Array bit patterns, so
- * no conversion is needed). bf16 has no NumPy dtype and throws.
+ * no conversion is needed).
+ *
+ * bf16 follows the `ml_dtypes` convention (the bfloat16 dtype JAX, TF and
+ * PyTorch-interop code use with NumPy): `np.save` of an `ml_dtypes.bfloat16`
+ * array writes descr `'<V2'`, an UNTYPED 2-byte void, followed by the raw
+ * bfloat16 bits. The file itself does not say "bfloat16"; Python reads it
+ * back with `np.load(f).view(ml_dtypes.bfloat16)`. So:
+ * - writing bf16 emits `'<V2'`, byte-identical to `np.save` + ml_dtypes;
+ * - reading `'<V2'`/`'|V2'` needs an explicit `{ voidAs: "bf16" }` (the
+ *   JS twin of that `.view()`), and throws without it, rather than
+ *   silently guessing that arbitrary 2-byte void data is bfloat16.
  */
 import {
   allocate,
@@ -35,6 +45,9 @@ const DESCR_TO_DTYPE: Record<string, DType> = Object.fromEntries(
     dtype as DType,
   ]),
 );
+// Written only (see the module comment): '<V2' is not reverse-mapped, because
+// reading it as bf16 needs the caller's explicit `voidAs`.
+DTYPE_TO_DESCR.bf16 = "<V2";
 // NumPy sometimes writes |i1 as <i1 etc.; endian-prefix variants of 1-byte types.
 DESCR_TO_DTYPE["<i1"] = "i8";
 DESCR_TO_DTYPE["<u1"] = "u8";
@@ -76,7 +89,18 @@ export function serializeNpy(payload: NpyPayload): Uint8Array {
   return out;
 }
 
-export function parseNpy(bytes: Uint8Array): NpyPayload {
+export interface ParseNpyOptions {
+  /**
+   * How to type a 2-byte void descr (`'<V2'`/`'|V2'`), which is how NumPy
+   * saves an `ml_dtypes.bfloat16` array. Only `"bf16"` is supported, and the
+   * option has no effect on any other descr.
+   */
+  voidAs?: "bf16";
+}
+
+const VOID2 = /^[<>|=]V2$/;
+
+export function parseNpy(bytes: Uint8Array, options: ParseNpyOptions = {}): NpyPayload {
   for (let i = 0; i < MAGIC.length; i++) {
     if (bytes[i] !== MAGIC.charCodeAt(i)) {
       throw new TypeError("not an NPY file (bad magic)");
@@ -112,7 +136,14 @@ export function parseNpy(bytes: Uint8Array): NpyPayload {
   if (fortranMatch[1] === "True") {
     throw new TypeError("fortran_order NPY files are not supported");
   }
-  const dtype = DESCR_TO_DTYPE[descrMatch[1] as string];
+  const descr = descrMatch[1] as string;
+  if (VOID2.test(descr) && options.voidAs !== "bf16") {
+    throw new TypeError(
+      `NPY descr '${descr}' is an untyped 2-byte void, which is how NumPy saves ml_dtypes.bfloat16 arrays. ` +
+        `If this file holds bfloat16, read it with fromNpy(bytes, { voidAs: "bf16" }).`,
+    );
+  }
+  const dtype: DType | undefined = VOID2.test(descr) ? "bf16" : DESCR_TO_DTYPE[descr];
   if (!dtype) {
     throw new TypeError(`unsupported NPY descr ${descrMatch[1]}`);
   }
