@@ -8,7 +8,8 @@
  * A forgotten root-script entry means `npm run build`/`npm test` silently
  * stops covering that package while its own package-level scripts still
  * work -- invisible until something depends on a stale dist. A forgotten
- * PACKAGE_DIRS entry means the package ships to npm but never to JSR.
+ * PACKAGE_DIRS entry means the package ships to npm but never to JSR --
+ * unless the package is listed, with a reason, in JSR_EXCLUDED_DIRS.
  */
 import assert from "node:assert/strict";
 import { makeTest } from "./harness.ts";
@@ -87,23 +88,33 @@ test('root build/test scripts contain no stale "-w" entries for packages that no
   }
 });
 
-test("every npm workspace package's directory appears in scripts/sync-jsr-configs.mjs's PACKAGE_DIRS", () => {
+function stringArray(source: string, name: string): Set<string> {
+  const match = source.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`));
+  assert.ok(match, `could not locate a ${name} array in sync-jsr-configs.mjs -- has its shape changed?`);
+  // Strip // comments so quoted words inside a justification don't count as entries.
+  const body = (match as RegExpMatchArray)[1].replace(/\/\/.*$/gm, "");
+  return new Set([...body.matchAll(/"([^"]+)"/g)].map((m) => m[1] as string));
+}
+
+test("every npm workspace package's directory is in exactly one of PACKAGE_DIRS / JSR_EXCLUDED_DIRS", () => {
   const syncScript = readFileSync(join(ROOT, "scripts/sync-jsr-configs.mjs"), "utf8");
-  const match = syncScript.match(/const PACKAGE_DIRS = \[([\s\S]*?)\];/);
-  assert.ok(match, "could not locate a PACKAGE_DIRS array in sync-jsr-configs.mjs -- has its shape changed?");
-  const dirs = new Set([...(match as RegExpMatchArray)[1].matchAll(/"([^"]+)"/g)].map((m) => m[1] as string));
+  const dirs = stringArray(syncScript, "PACKAGE_DIRS");
+  const excluded = stringArray(syncScript, "JSR_EXCLUDED_DIRS");
 
   const packages = discoverWorkspacePackages();
-  const missing = packages.filter((p) => !dirs.has(p.dir)).map((p) => p.dir);
+  const missing = packages.filter((p) => !dirs.has(p.dir) && !excluded.has(p.dir)).map((p) => p.dir);
   assert.deepEqual(
     missing,
     [],
-    `package dir(s) missing from PACKAGE_DIRS: ${missing.join(", ")} -- these ship to npm but never to JSR`,
+    `package dir(s) missing from PACKAGE_DIRS: ${missing.join(", ")} -- these ship to npm but never to JSR (add to JSR_EXCLUDED_DIRS with a reason if that is deliberate)`,
   );
 
+  const both = [...excluded].filter((d) => dirs.has(d));
+  assert.deepEqual(both, [], `dir(s) in both PACKAGE_DIRS and JSR_EXCLUDED_DIRS: ${both.join(", ")}`);
+
   const knownDirs = new Set(packages.map((p) => p.dir));
-  const stale = [...dirs].filter((d) => !knownDirs.has(d));
-  assert.deepEqual(stale, [], `stale entries in PACKAGE_DIRS (dir no longer exists): ${stale.join(", ")}`);
+  const stale = [...dirs, ...excluded].filter((d) => !knownDirs.has(d));
+  assert.deepEqual(stale, [], `stale entries in PACKAGE_DIRS/JSR_EXCLUDED_DIRS (dir no longer exists): ${stale.join(", ")}`);
 });
 
 test('every npm workspace package has a "test:bun" script (scripts/test-bun.mjs discovers suites by it)', () => {
