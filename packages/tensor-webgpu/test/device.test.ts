@@ -12,18 +12,20 @@ after(closeHarness);
 test("chooseGemmBackend: small matmuls stay on wasm", () => {
   assert.equal(chooseGemmBackend(8, 8), "wasm");
   assert.equal(chooseGemmBackend(100, 100), "wasm");
+  assert.equal(chooseGemmBackend(127, 127), "wasm");
 });
 
-test("chooseGemmBackend: never crosses to webgpu on this machine's measured (non-)crossover", () => {
-  // docs/spikes/webgpu-baseline.md: no crossover was found up to 768x768 on
-  // this machine's software/ANGLE-GL WebGPU + naive kernel, so
-  // GEMM_ELEMENT_THRESHOLD is Infinity and chooseGemmBackend always picks
-  // wasm — this test pins that honest (if unglamorous) v1 default so a
-  // future recalibration is a deliberate, visible change to this test, not
-  // a silent drift.
-  assert.equal(GEMM_ELEMENT_THRESHOLD, Number.POSITIVE_INFINITY);
-  assert.equal(chooseGemmBackend(4096, 4096), "wasm");
-  assert.equal(chooseGemmBackend(100_000, 100_000), "wasm");
+test("chooseGemmBackend: crosses to webgpu at the measured 128x128 crossover (docs/spikes/webgpu-tiled-gemm.md)", () => {
+  // Pins the measured value so recalibrating is a deliberate, visible change
+  // to this test, not a silent drift. v1's naive kernel measured no
+  // crossover at all (Infinity, docs/spikes/webgpu-baseline.md); the tiled /
+  // skinny / subgroup-matrix kernels cross at n = 96 (Dawn) / n = 128
+  // (headless Chrome) end to end on an Apple M2 — the constant takes the
+  // more conservative of the two.
+  assert.equal(GEMM_ELEMENT_THRESHOLD, 128 * 128);
+  assert.equal(chooseGemmBackend(128, 128), "webgpu");
+  assert.equal(chooseGemmBackend(64, 256), "webgpu", "m*n-based: a 64x256 output has 128*128 elements");
+  assert.equal(chooseGemmBackend(4096, 4096), "webgpu");
 });
 
 test("toWebGPU: rejects dtypes other than f32/f16 without needing a real device", async () => {
