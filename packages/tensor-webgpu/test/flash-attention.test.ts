@@ -14,7 +14,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import test, { after } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { planAttention } from "../src/attention.ts";
 import { fastAttentionBytes, genericAttentionBytes, genericAttentionConfig } from "../src/attention-kernels.ts";
 import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
