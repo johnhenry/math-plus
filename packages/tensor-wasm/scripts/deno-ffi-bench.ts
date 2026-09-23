@@ -5,7 +5,8 @@
  * exports) is worth building. Run with:
  *
  *   cargo build --release -p tensor-wasm-kernels   # produces the cdylib
- *   deno run --allow-ffi --allow-read packages/tensor-wasm/scripts/deno-ffi-bench.ts
+ *   npm run build:wasm -w @johnhenry/math-plus-tensor-wasm
+ *   deno run --allow-ffi --allow-read --allow-env packages/tensor-wasm/scripts/deno-ffi-bench.ts
  *
  * Fairness notes:
  * - Both sides call the IDENTICAL Rust functions (the crate's crate-type
@@ -20,8 +21,16 @@
 // deno-lint-ignore-file no-explicit-any
 
 const ROOT = new URL("../../..", import.meta.url).pathname;
-const SO_PATH = `${ROOT}target/release/libtensor_wasm_kernels.so`;
+const LIB_FILE = Deno.build.os === "darwin"
+  ? "libtensor_wasm_kernels.dylib"
+  : Deno.build.os === "windows"
+  ? "tensor_wasm_kernels.dll"
+  : "libtensor_wasm_kernels.so";
+// $MATH_PLUS_NATIVE_KERNELS_PATH (same variable native.ts honors) lets a
+// differently-featured build be benchmarked, e.g. `--features accelerate`.
+const SO_PATH = Deno.env.get("MATH_PLUS_NATIVE_KERNELS_PATH") ?? `${ROOT}target/release/${LIB_FILE}`;
 const WASM_PATH = `${ROOT}packages/tensor-wasm/wasm/tensor_wasm_kernels.wasm`;
+const SIMD_WASM_PATH = `${ROOT}packages/tensor-wasm/wasm/tensor_wasm_kernels_simd128.wasm`;
 
 // ---- native (FFI) side -------------------------------------------------------
 
@@ -51,6 +60,13 @@ const wasmBytes = Deno.readFileSync(WASM_PATH);
 const { instance } = await WebAssembly.instantiate(wasmBytes, {});
 const w = instance.exports as any;
 const wasmMem = (): ArrayBuffer => (w.memory as WebAssembly.Memory).buffer;
+// The SIMD128 module shares the scalar module's memory (see index.ts's
+// Kernels.load) -- its gemm_f32_simd128 (issue #121) is what matmulInto
+// actually runs on any SIMD-capable runtime, so gemm is compared against both.
+const { instance: simdInstance } = await WebAssembly.instantiate(Deno.readFileSync(SIMD_WASM_PATH), {
+  env: { memory: w.memory },
+});
+const ws = simdInstance.exports as any;
 
 function wasmAllocF32(n: number): number {
   return w.alloc(n * 4, 4) as number;
@@ -88,11 +104,12 @@ function bench(fn: () => void, minIters: number, minMs: number): number {
   return (performance.now() - start) / iters;
 }
 
-function assertClose(a: Float32Array, b: Float32Array, label: string): void {
+/** `atol` defaults to 1e-5; gemm passes one scaled by sqrt(k), since kernels with different summation orders (and Accelerate's FMA) legitimately differ by ~sqrt(k) ulps on cancellation-heavy outputs. */
+function assertClose(a: Float32Array, b: Float32Array, label: string, atol = 1e-5): void {
   for (let i = 0; i < a.length; i++) {
     const x = a[i] as number;
     const y = b[i] as number;
-    if (Math.abs(x - y) > 1e-5 + 1e-4 * Math.max(Math.abs(x), Math.abs(y))) {
+    if (Math.abs(x - y) > atol + 1e-4 * Math.max(Math.abs(x), Math.abs(y))) {
       throw new Error(`${label}: native/wasm divergence at [${i}]: native=${x} wasm=${y}`);
     }
   }
@@ -132,7 +149,7 @@ for (const N of [10_000, 1_000_000, 4_000_000]) {
 
 // ---- gemm --------------------------------------------------------------------
 
-for (const S of [64, 256, 1024]) {
+for (const S of [64, 256, 512, 1024]) {
   const a = fill(rng, S * S);
   const b = fill(rng, S * S);
   const out = new Float32Array(S * S);
@@ -146,12 +163,16 @@ for (const S of [64, 256, 1024]) {
   const Sb = BigInt(S);
   lib.symbols.gemm_f32(a, 0n, Sb, 1n, b, 0n, Sb, 1n, out, 0n, Sb, 1n, Sb, Sb, Sb, 1, 0);
   w.gemm_f32(aPtr, 0, S, 1, bPtr, 0, S, 1, outPtr, 0, S, 1, S, S, S, 1, 0);
-  assertClose(out, wasmView(outPtr, S * S), `gemm ${S}x${S}`);
+  assertClose(out, wasmView(outPtr, S * S), `gemm ${S}x${S}`, 1e-5 * Math.sqrt(S));
 
   const iters = S >= 1024 ? 3 : 10;
   const nativeMs = bench(() => lib.symbols.gemm_f32(a, 0n, Sb, 1n, b, 0n, Sb, 1n, out, 0n, Sb, 1n, Sb, Sb, Sb, 1, 0), iters, 300);
   const wasmMs = bench(() => w.gemm_f32(aPtr, 0, S, 1, bPtr, 0, S, 1, outPtr, 0, S, 1, S, S, S, 1, 0), iters, 300);
   rows.push({ op: "gemm", size: `${S}x${S}`, nativeMs, wasmMs, speedup: wasmMs / nativeMs });
+  ws.gemm_f32_simd128(aPtr, 0, S, 1, bPtr, 0, S, 1, outPtr, 0, S, 1, S, S, S, 1, 0);
+  assertClose(out, wasmView(outPtr, S * S), `gemm simd128 ${S}x${S}`, 1e-5 * Math.sqrt(S));
+  const simdMs = bench(() => ws.gemm_f32_simd128(aPtr, 0, S, 1, bPtr, 0, S, 1, outPtr, 0, S, 1, S, S, S, 1, 0), iters, 300);
+  rows.push({ op: "gemm (wasm = simd128)", size: `${S}x${S}`, nativeMs, wasmMs: simdMs, speedup: simdMs / nativeMs });
 }
 
 // ---- solve -------------------------------------------------------------------

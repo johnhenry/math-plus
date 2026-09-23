@@ -17,7 +17,8 @@ For the package(s) you touched:
    (below); they must show **0 skipped**, not just 0 failed, or you're not
    actually testing anything.
 3. `cargo test --workspace` if any crate changed.
-4. Full workspace: `npm run build && npm test` from the repo root.
+4. Full workspace: `npm run build && npm test` from the repo root, plus
+   `npm run test:bun` (every suite under Bun; CI runs both).
 5. A genuinely fresh clone: `git clone . /tmp/mallory-verifyN && cd $_ && npm ci && npm run build && npm test`.
    This is the only way to catch "works on my checked-out tree" bugs
    (missing files in `package.json`'s `files`, undeclared deps, etc.).
@@ -74,6 +75,11 @@ following, not just `npm init`:
   script strings.
 - The package directory added to `scripts/sync-jsr-configs.mjs`'s
   `PACKAGE_DIRS`.
+- A `"test:bun": "bun test ./test/"` script, and every test file registering
+  through `test/harness.ts` with its own `bun:test` import (never
+  `import { test } from "node:test"`; see docs/TESTING.md "Running under
+  Bun" for why). `test/manifest-drift.test.ts` enforces both.
+- `engines.node` identical to the root's (currently `>=24.0.0`).
 - Once [#47](https://github.com/johnhenry/math-plus/issues/47) lands: run its manifest-drift check — it verifies the two
   points above for you and fails loudly if either is missed.
 
@@ -89,6 +95,15 @@ concluding it's a real regression; see
 [`docs/spikes/woxi-study.md`](docs/spikes/woxi-study.md#test-methodology-the-best-material-in-the-repo)
 for why this class of flake is expected and how Woxi's harness handles
 the analogous case.
+
+## Benchmarks
+
+Performance numbers follow [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md):
+5 s cooldown before each cell, timing windows of 1 s or less, backends
+alternated in one process, and the machine and thermal state recorded
+(`scripts/bench/thermal.ts` does all four). A fanless laptop drops to about
+35 % of its cold GPU speed after about 10 s of load, so a long loop measures
+the throttled machine.
 
 ## Non-goals
 

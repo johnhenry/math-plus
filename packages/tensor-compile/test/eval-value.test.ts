@@ -11,7 +11,9 @@
  * forward-vs-backward-vs-forward-again value mismatch elsewhere.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { evalValue, evalWithGrad, type BinaryOp, type CmpOp, type IRNode, type UnaryOp } from "../src/index.ts";
 
 function agree(node: IRNode, inputs: readonly number[], numInputs: number, label: string): void {
@@ -35,7 +37,7 @@ test("evalValue agrees with evalWithGrad's .value: every UnaryOp", () => {
     "asin", "acos", "atan", "sinh", "cosh", "tanh", "cot", "sec", "csc",
     "asinh", "acosh", "atanh", "coth", "sech", "csch", "acot", "asec", "acsc",
     "acoth", "asech", "acsch", "abs", "log10", "log2", "cbrt", "floor",
-    "ceil", "round", "sign", "trunc", "expm1", "log1p", "erf",
+    "ceil", "round", "sign", "trunc", "expm1", "log1p", "erf", "gelu_tanh",
   ];
   // A domain-safe-ish positive value works for every op above (acosh/asech
   // need x >= 1 / 0 < x <= 1 respectively; the two probes below cover both).

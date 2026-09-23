@@ -16,7 +16,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Tensor, withCompute } from "../src/index.ts";
 
 const ORACLE_SCRIPT = new URL("../scripts/half_oracle.py", import.meta.url).pathname;
@@ -48,7 +50,7 @@ const skipBf16 = ML_DTYPES
   : "no python with numpy + ml_dtypes found (set MATH_PLUS_ORACLE_PYTHON, or install uv)";
 
 const dir = mkdtempSync(join(tmpdir(), "tensor-core-half-"));
-test.after(() => rmSync(dir, { recursive: true, force: true }));
+after(() => rmSync(dir, { recursive: true, force: true }));
 let jobCounter = 0;
 
 function oracle(cmd: string[], job: Record<string, unknown>): Uint8Array {

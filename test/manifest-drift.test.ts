@@ -11,7 +11,9 @@
  * PACKAGE_DIRS entry means the package ships to npm but never to JSR.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "./harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -102,4 +104,46 @@ test("every npm workspace package's directory appears in scripts/sync-jsr-config
   const knownDirs = new Set(packages.map((p) => p.dir));
   const stale = [...dirs].filter((d) => !knownDirs.has(d));
   assert.deepEqual(stale, [], `stale entries in PACKAGE_DIRS (dir no longer exists): ${stale.join(", ")}`);
+});
+
+test('every npm workspace package has a "test:bun" script (scripts/test-bun.mjs discovers suites by it)', () => {
+  const missing = discoverWorkspacePackages()
+    .filter((p) => {
+      const pkg = JSON.parse(readFileSync(join(ROOT, p.dir, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+      return !pkg.scripts?.["test:bun"];
+    })
+    .map((p) => p.name);
+  assert.deepEqual(missing, [], `package(s) without a "test:bun" script: ${missing.join(", ")} -- add "test:bun": "bun test ./test/"`);
+});
+
+test("every test file registers through test/harness.ts with its OWN bun:test import (Bun 1.2 multi-file bug)", () => {
+  // Under Bun 1.2, tests declared via node:test -- or via a shared module that
+  // imports bun:test -- register only for the first file of a run; the rest are
+  // silently dropped. See test/harness.ts. A file that regresses to
+  // `import { test } from "node:test"` still passes `npm test`, so only this
+  // check (or the Bun CI job's file count) would notice.
+  const dirs = ["test", ...discoverWorkspacePackages().map((p) => `${p.dir}/test`)];
+  const offenders: string[] = [];
+  for (const dir of dirs) {
+    if (!existsSync(join(ROOT, dir))) continue;
+    for (const f of readdirSync(join(ROOT, dir))) {
+      if (!/\.(bench-)?test\.ts$/.test(f)) continue;
+      const src = readFileSync(join(ROOT, dir, f), "utf8");
+      const ok =
+        /harness\.ts["']/.test(src) &&
+        src.includes('await import("bun:test")') &&
+        !/^import[^;]*from ["']node:test["']/m.test(src);
+      if (!ok) offenders.push(`${dir}/${f}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `test file(s) not using the per-file makeTest(bun:test) pattern: ${offenders.join(", ")}`);
+});
+
+test("engines.node is identical in root package.json and every workspace package", () => {
+  const rootEngine = (JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { engines: { node: string } }).engines.node;
+  const mismatched = discoverWorkspacePackages()
+    .map((p) => ({ p, pkg: JSON.parse(readFileSync(join(ROOT, p.dir, "package.json"), "utf8")) as { engines?: { node?: string } } }))
+    .filter(({ pkg }) => pkg.engines?.node !== rootEngine)
+    .map(({ p, pkg }) => `${p.name} (${pkg.engines?.node ?? "none"})`);
+  assert.deepEqual(mismatched, [], `engines.node differs from root's "${rootEngine}": ${mismatched.join(", ")}`);
 });

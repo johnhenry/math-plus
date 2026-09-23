@@ -6,7 +6,9 @@
  * Deno via scripts/deno-native-test.ts -- see package.json's test:deno.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { matrix, NativeKernels } from "../src/native.ts";
 
 test("NativeKernels.load() returns undefined (never throws) outside Deno", () => {

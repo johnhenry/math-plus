@@ -18,10 +18,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # engines.node >=26.0.0 -- test the floor version directly rather
-        # than a matrix of now-unsupported older majors.
-        node-version: [26]
-    name: node ${{ matrix.node-version }}
+        # engines.node >=24.0.0 -- test the floor version directly rather
+        # than a matrix of older majors. Nothing in the repo needs 26
+        # (checked: no Node-26-only API; Float16Array, Math.f16round and
+        # type stripping for `node --test` on .ts all work on 24.9).
+        node-version: [24]
+        # `bun` runs every suite under `bun test` via scripts/test-bun.mjs
+        # (test/harness.ts explains the Bun 1.2 node:test multi-file bug the
+        # per-file harness import works around). Node is still needed there
+        # for npm ci / tsc / the WASM build.
+        runtime: [node, bun]
+    name: ${{ matrix.runtime }} (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v4
 
@@ -88,29 +95,52 @@ jobs:
       - name: Install Xvfb
         run: sudo apt-get install -y xvfb
 
+      - name: Set up Bun
+        if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned to the version the harness was verified against (1.2.17
+          # has the multi-file node:test bug the harness works around).
+          bun-version: 1.2.17
+
       - run: npm ci
 
       - name: Build (WASM kernels + TypeScript)
         run: npm run build
 
       - name: Rust unit tests
+        if: matrix.runtime == 'node'
         run: cargo test --workspace
 
       - name: Unit + differential tests
+        if: matrix.runtime == 'node'
         run: npm test
+
+      # Fails on any failing test AND on any suite where Bun ran fewer files
+      # than exist (the multi-file bug's signature). Runtime `t.skip()`s are
+      # reported as `[skip]` lines + counted in the summary, since bun:test
+      # 1.2 cannot mark a running test skipped.
+      - name: Unit + differential tests (Bun)
+        if: matrix.runtime == 'bun'
+        run: |
+          npm run typecheck --workspaces --if-present
+          npm run test:bun
 
       # Runs the env-independent examples (01-09) against the built
       # packages via their real exports maps. 10-wasm-kernels.mjs is
       # deliberately excluded from the loop (env-dependent: needs the
       # gitignored .wasm artifact) — see examples/README.md.
       - name: Run examples (smoke)
+        if: matrix.runtime == 'node'
         run: npm run examples
 
       # packages/interop-python is a PyPI package outside the npm/Cargo
       # workspaces (docs/RELEASING.md) — its own pytest suite needs
       # installing separately.
       - name: Install johnhenry-math-plus-interop + test deps
+        if: matrix.runtime == 'node'
         run: pip install pytest -e packages/interop-python
 
       - name: interop-python conformance tests
+        if: matrix.runtime == 'node'
         run: python3 -m pytest packages/interop-python/tests/ -v

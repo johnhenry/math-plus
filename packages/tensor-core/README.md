@@ -60,16 +60,25 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
 - **Copies:** `contiguous`, `take`, `gather`, `mask`, `cast`, `pad`,
   `split`, `repeat`, `flip`, `roll`, `nonzero`, `clip`, `flatten`.
 - **Math:** `add/sub/mul/div` (tensor or scalar), full unary set (`sqrt`,
-  `exp`, `log*`, trig, hyperbolic, `relu`/`sigmoid`/`gelu`/`softmax`),
+  `exp`, `log*`, trig, hyperbolic, `erf`/`erfc`, `relu`/`sigmoid`/`gelu`/`softmax`),
   `matmul`, `dot`, comparisons/logic, reductions (`sum mean min max
   argmin argmax variance std prod cumsum cumprod sort argsort topK`).
 - **I/O:** `toNpy()` / `Tensor.fromNpy(bytes)` — NPY v1.0.
+- **Special functions (scalar):** `erf`, `erfc`, `gelu(x, approximate)`,
+  `geluErf`, `geluTanh`, `geluDerivative` — the monorepo's ONE canonical
+  double-precision erf (`src/special.ts`, ~1e-15 relative, SciPy-verified).
+  tensor-compile's IR and tensor-webgpu's WGSL `erf` derive from it; don't
+  add another.
 - **Random:** `random.seed`, `random.uniform`, `random.normal`,
   `random.randint`; plus `broadcastShapes`, `allocate`, `BYTES_PER_ELEMENT`,
   `isBigIntDType`.
 
 ## Traps
 
+- **`gelu()` defaults to EXACT erf-GELU** (`approximate: "none"`, like
+  PyTorch's `nn.GELU()`), since issue #122. Earlier versions always used the
+  tanh approximation; pass `gelu({ approximate: "tanh" })` for those numbers
+  (they differ by up to ~4.7e-4).
 - **Default dtype is `f32`** for `zeros`/`ones`/`full`/`arange`/`from`
   (`random.randint` defaults to `i32`). Most numerical work here wants an
   explicit `{ dtype: "f64" }`.
@@ -119,6 +128,29 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
   — the one f16/bf16 implementation in Math Plus.
 - `shape` is frozen; an `Rng`'s state advances between calls (not reset).
 
+## Performance: fast paths and their limits
+
+Contiguous inputs (C-order, any storage offset) take flat typed-array
+kernels; everything else falls back to the general strided path. Both
+produce **bit-identical** results (`test/fast-paths.test.ts` asserts it),
+so which path ran is never observable except in time. Numbers:
+[`docs/spikes/tensor-core-fast-paths.md`](../../docs/spikes/tensor-core-fast-paths.md).
+
+- **Fast:** `add/sub/mul/div` when both sides are full-shape, one side is
+  a single element, or one side is broadcast as a trailing block
+  (`[B,T,C] + [C]`) or per row (`[B,T,C] - [B,T,1]`); unary math ops;
+  `cast`; `contiguous`; comparisons (same shape or scalar); `sum`/`mean`/
+  `min`/`max` (full or any axis); fused `softmax` and `variance`/`std`
+  (f32/f64). `matmul` always packs operands into f64 panels and runs a
+  4×4 register-blocked GEMM (strided operands included).
+- **Not fast-pathed:** strided views (transposes, stepped/negative slices,
+  stride-0 `broadcastTo` views, other broadcast patterns such as
+  `[B,T,C] + [1,T,1]`), `i64`/`u64` (BigInt), `argmin`/`argmax`,
+  cumulative scans, sorting, `where`, logical ops. These are correct, just
+  slower.
+- Single-threaded, no SIMD. `matmul` allocates up to `(m+n)·k + m·n` f64
+  scratch per call. For more, see tensor-wasm above.
+
 ## Tests
 
 `npm test`. Differential tests against a NumPy oracle skip unless a Python
@@ -133,5 +165,5 @@ skip otherwise.
 
 Built across issues #1 (indexing/slicing), #2 (matmul), #4 (concat/stack/
 where), #5 (random), #64/#65 (op-table parity with the compiled IR), #84
-(unfold). Part of the [math-plus](https://github.com/johnhenry/math-plus)
+(unfold), #120 (contiguous fast paths, blocked GEMM). Part of the [math-plus](https://github.com/johnhenry/math-plus)
 monorepo; family docs at <https://opensource.johnhenry.me/math/>.

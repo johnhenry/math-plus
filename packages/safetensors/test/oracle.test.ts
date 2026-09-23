@@ -11,7 +11,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { openSafetensors, readSafetensors, writeSafetensors, type SafeDType, type TensorInput } from "../src/index.ts";
 import { fromB64, oracleSkip, runOracle, sameF32, toB64 } from "./helpers.ts";
 

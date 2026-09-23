@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { MAX_HEADER, SafetensorsError, headerLength, parseHeader, readSafetensors, toFloat32, viewAs } from "../src/index.ts";
 import { craft } from "./helpers.ts";
 

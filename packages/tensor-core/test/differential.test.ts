@@ -14,7 +14,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Tensor, isBigIntDType, type DType } from "../src/index.ts";
 
 const ORACLE_SCRIPT = new URL("../scripts/numpy_oracle.py", import.meta.url)
@@ -55,6 +57,7 @@ interface OracleJob {
   largest?: boolean;
   condition?: string;
   fn?: string; // "unary" op dispatch (issue #64)
+  approximate?: "none" | "tanh"; // gelu (issue #122)
   min?: number; // clip
   max?: number; // clip
   padding?: Array<[number, number]>; // pad
@@ -712,6 +715,18 @@ test("differential vs NumPy", { skip }, async (t) => {
     const aPath = saveTensor(dir, "act-a", a);
     for (const op of ["relu", "sigmoid", "gelu"] as const) {
       assertClose(a[op](), runOracle(dir, { op, inputs: [aPath] }), op);
+    }
+  });
+
+  await t.test("gelu: default is exact erf-GELU (libm math.erf reference), approximate: 'tanh' keeps the tanh formula (#122)", () => {
+    for (const dtype of ["f64", "f32"] as const) {
+      const a = randomTensor([32], dtype).mul(0.6); // ~[-6, 6)
+      const aPath = saveTensor(dir, `gelu-${dtype}-a`, a);
+      const exact = runOracle(dir, { op: "gelu", inputs: [aPath], approximate: "none" });
+      const tanh = runOracle(dir, { op: "gelu", inputs: [aPath], approximate: "tanh" });
+      assertClose(a.gelu(), exact, "gelu");
+      assertClose(a.gelu({ approximate: "none" }), exact, "gelu");
+      assertClose(a.gelu({ approximate: "tanh" }), tanh, "gelu");
     }
   });
 

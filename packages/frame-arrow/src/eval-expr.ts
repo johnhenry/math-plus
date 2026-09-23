@@ -38,12 +38,17 @@ import {
 } from "./expr.ts";
 
 /**
- * `erf` via Abramowitz & Stegun 7.1.26 (|error| <= 1.5e-7) — the exact same
- * approximation `tensor-compile`'s IR evaluator uses (packages/tensor-compile/src/ir.ts),
- * copied rather than imported so `frame-arrow` stays dependency-free of
- * `tensor-compile`. Keeping the formula identical means `fn.erf()` agrees
- * numerically with the `tensor-compile`-IR path a `Symbolic` expression would
- * otherwise take, for anyone cross-checking the two compile targets (#38).
+ * `erf` via Abramowitz & Stegun 7.1.26 (|error| <= 1.5e-7).
+ *
+ * KNOWN DIVERGENCE (issue #122): this is NOT the monorepo's canonical erf.
+ * The canonical double-precision erf lives in `@johnhenry/math-plus-tensor-core`
+ * (src/special.ts, ~1e-15 relative), and `tensor-compile`'s IR evaluator now
+ * uses it — so `fn.erf()` here and the `tensor-compile`-IR path a `Symbolic`
+ * expression would take (#38) now differ by up to ~1.5e-7. It stays a local
+ * copy only because frame-arrow deliberately has no static dependency edge to
+ * the tensor track (tensor-core is an optional peer, imported lazily — see
+ * series.ts / test/tensor.test.ts); resolving that is a design decision
+ * left open as a follow-up to #122, not something to paper over here.
  */
 function erf(x: number): number {
   const sign = x < 0 ? -1 : 1;
