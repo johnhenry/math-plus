@@ -21,6 +21,12 @@
  *     `@johnhenry` scope, so they map to `jsr:@johnhenry/math@<version>` /
  *     `jsr:@johnhenry/iteration@<version>` rather than `npm:`.
  *   - anything else maps to `npm:<name>@<version>`.
+ * Deno/JSR accept ONE comparator per `jsr:`/`npm:` specifier (`^1.2.3`,
+ * `~1.2`, `1.2.3`, `1.x`, `*`). npm unions such as the peer range
+ * `^0.0.0 || ^0.1.0` are rejected ("Invalid package specifier ...
+ * Unexpected character" -- release run 35967422091), as are `>=a <b`
+ * ranges, so `jsrRange` keeps the highest alternative of a `||` union and
+ * refuses anything else it cannot express.
  *
  * Run manually after adding/bumping a dependency, or wire into a
  * pre-publish CI step (see .github/workflows/release.yml's jsr job).
@@ -80,17 +86,47 @@ const INTERNAL_SCOPE_PREFIX = "@johnhenry/math-plus-";
 // than npm: ones).
 const EXTERNAL_JSR_PACKAGES = new Set(["@johnhenry/math", "@johnhenry/iteration"]);
 
-function buildImports(pkg) {
+/** A version requirement Deno/JSR accept inside a `jsr:`/`npm:` specifier: one ^/~/exact/partial comparator, or `*`. */
+export const SPECIFIER_RANGE = /^(?:\*|[\^~]?\d+(?:\.(?:\d+|x|\*)){0,2}(?:-[0-9A-Za-z.-]+)?)$/;
+
+function rangeBase(r) {
+  return r
+    .replace(/^[\^~]/, "")
+    .split("-")[0]
+    .split(".")
+    .map((p) => (p === "x" || p === "*" ? Number.POSITIVE_INFINITY : Number(p)));
+}
+
+/**
+ * The package.json range as a Deno/JSR specifier range. A `||` union keeps
+ * its highest alternative (`^0.0.0 || ^0.1.0` -> `^0.1.0`): the lower
+ * alternatives only exist for npm dedupe across pre-1.0 minors, and JSR
+ * resolves the newest match anyway.
+ */
+export function jsrRange(range) {
+  const alts = String(range).split("||").map((r) => r.trim());
+  for (const a of alts) {
+    if (!SPECIFIER_RANGE.test(a)) throw new Error(`range "${range}": "${a}" is not a single ^/~/exact comparator, which a jsr:/npm: specifier requires`);
+  }
+  return alts.reduce((best, a) => {
+    const x = rangeBase(a);
+    const y = rangeBase(best);
+    for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0) ? a : best;
+    return best;
+  });
+}
+
+export function buildImports(pkg) {
   const deps = { ...pkg.dependencies, ...pkg.peerDependencies };
   const imports = {};
   for (const [name, version] of Object.entries(deps)) {
-    const range = version.replace(/^[\^~]/, "");
+    const range = jsrRange(version);
     if (name.startsWith(INTERNAL_SCOPE_PREFIX) || EXTERNAL_JSR_PACKAGES.has(name)) {
       // Workspace sibling or sibling-family package, also published to JSR
-      // under the same @johnhenry scope.
-      imports[name] = `jsr:${name}@^${range}`;
+      // under the same @johnhenry scope (always a caret range there).
+      imports[name] = `jsr:${name}@^${range.replace(/^[\^~]/, "")}`;
     } else {
-      imports[name] = `npm:${name}@${version}`;
+      imports[name] = `npm:${name}@${range}`;
     }
   }
   return imports;
@@ -117,7 +153,10 @@ function buildExports(pkg) {
   return out;
 }
 
-for (const dir of PACKAGE_DIRS) {
+export { PACKAGE_DIRS };
+
+// Importable (test/manifest-drift.test.ts uses jsrRange); writes only when run directly.
+if (import.meta.url === `file://${process.argv[1]}`) for (const dir of PACKAGE_DIRS) {
   const pkgPath = join(ROOT, dir, "package.json");
   const pkg = readJson(pkgPath);
   const imports = buildImports(pkg);
