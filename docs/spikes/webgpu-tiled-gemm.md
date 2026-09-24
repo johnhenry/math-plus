@@ -273,7 +273,7 @@ measured crossovers (Chrome's), since a browser page is this package's primary t
 - **Tile configs are M2-tuned** (from laya-js's sweeps); they're correct everywhere but may be
   suboptimal on other GPUs.
 - **Subgroup matrices are experimental.** Dawn-only (`chromium-experimental-subgroup-matrix`),
-  needs `allow_unsafe_apis` in Node (`requestDawnGPU({ unsafe: true })`) or
+  needs `allow_unsafe_apis` in Node (backend-webgpu's `getGpu({ unsafe: true })`, which `createWebGpuDevice()` uses) or
   `--enable-unsafe-webgpu` in Chrome; its WGSL builtin syntax has changed across versions (the
   package tries the current template syntax, then the older bool-argument one, then falls back to
   `tiled`). Default-flag Chromium doesn't expose it at all — the Chromium-152 column is that case.

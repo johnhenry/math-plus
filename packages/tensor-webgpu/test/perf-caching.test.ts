@@ -1,15 +1,14 @@
 /**
  * Regression tests for issue #100's WebGPU perf fixes (findings 2-4):
- * shader/pipeline caching, buffer pooling, and GPU-resident attention
- * chaining — still holding since issue #146 moved every op onto
- * @johnhenry/backend-webgpu's runtime (whose pool also recycles the
- * MAP_READ staging buffers). These don't re-check numeric correctness (gemm.test.ts and
- * attention.test.ts already cross-check every kernel against a CPU
- * reference for the NEW GPUTensor-based signatures) — they check that the
+ * shader/pipeline caching, buffer pooling, and GPU-resident chaining —
+ * still holding through the device facade on @johnhenry/backend-webgpu's
+ * runtime (whose pool also recycles the MAP_READ staging buffers). These
+ * don't re-check numeric correctness (gemm.test.ts and
+ * flash-attention.test.ts cross-check against NumPy) — they check that the
  * PERFORMANCE behavior the issue asked for is actually happening, by
  * monkey-patching `GPUDevice` creation methods inside the page and counting
- * calls, the same headless-Chrome-over-CDP harness every other test in this
- * package uses (test/helpers.ts).
+ * calls, on the same harness every other test in this package uses
+ * (test/helpers.ts).
  */
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -30,7 +29,24 @@ function randomMatrix(size: number, seed: number): Float32Array {
   return out;
 }
 
-test("runGemmWGSL: a second call with a different shape in the same kernel variant reuses the cached shader module + compute pipeline", async (t) => {
+const bundle = (): string => bundleForBrowser([path.join(SRC, "facade.ts")]);
+
+/** Page-side: a facade on a fresh device, and a host-array GEMM through it (upload, `matmul`, readback, dispose). */
+const PAGE_SETUP = `
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+  const gpu = await createWebGpuDevice({ device });
+  const hostGemm = async (a, b, m, k, n) => {
+    const A = await gpu.fromHost({ dtype: "f32", shape: [m, k], data: a });
+    const B = await gpu.fromHost({ dtype: "f32", shape: [k, n], data: b });
+    const C = gpu.backend.matmul(A, B);
+    const out = (await gpu.toHost(C)).data;
+    for (const x of [A, B, C]) gpu.dispose(x);
+    return out;
+  };
+`;
+
+test("matmul: a second call with a different shape in the same kernel variant reuses the cached shader module + compute pipeline", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) {
     t.skip(`headless WebGPU not available: ${harness.reason}`);
@@ -40,16 +56,12 @@ test("runGemmWGSL: a second call with a different shape in the same kernel varia
   const b1 = randomMatrix(3 * 5, 2);
   const a2 = randomMatrix(6 * 7, 3);
   const b2 = randomMatrix(7 * 9, 4);
-  const bundle = bundleForBrowser([path.join(SRC, "gemm.ts")]);
   const result = await harness.run<{
     shaderModuleCalls: number;
     pipelineCalls: number;
     cacheSizeAfter: number;
   }>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-
+    `${PAGE_SETUP}
     let shaderModuleCalls = 0;
     let pipelineCalls = 0;
     const origCreateShaderModule = device.createShaderModule.bind(device);
@@ -57,27 +69,22 @@ test("runGemmWGSL: a second call with a different shape in the same kernel varia
     const origCreateComputePipeline = device.createComputePipeline.bind(device);
     device.createComputePipeline = (desc) => { pipelineCalls++; return origCreateComputePipeline(desc); };
 
-    const a1 = new Float32Array(${JSON.stringify(Array.from(a1))});
-    const b1 = new Float32Array(${JSON.stringify(Array.from(b1))});
-    await runGemmWGSL(device, a1, b1, 4, 3, 5);
-
+    await hostGemm(new Float32Array(${JSON.stringify(Array.from(a1))}), new Float32Array(${JSON.stringify(Array.from(b1))}), 4, 3, 5);
     // A DIFFERENT shape in the same variant (backend-webgpu's tiled kernel,
     // K and N both not multiples of 4 -> scalar loads) -- m/n/k travel via
     // uniforms, not baked into the WGSL text, so the pipeline cache hits.
-    const a2 = new Float32Array(${JSON.stringify(Array.from(a2))});
-    const b2 = new Float32Array(${JSON.stringify(Array.from(b2))});
-    await runGemmWGSL(device, a2, b2, 6, 7, 9);
+    await hostGemm(new Float32Array(${JSON.stringify(Array.from(a2))}), new Float32Array(${JSON.stringify(Array.from(b2))}), 6, 7, 9);
 
-    return { shaderModuleCalls, pipelineCalls, cacheSizeAfter: backendFor(device).rt.stats.pipelines };
+    return { shaderModuleCalls, pipelineCalls, cacheSizeAfter: gpu.backend.rt.stats.pipelines };
     `,
-    bundle,
+    bundle(),
   );
   assert.equal(result.shaderModuleCalls, 1, "createShaderModule should only run once across two calls");
   assert.equal(result.pipelineCalls, 1, "createComputePipeline should only run once across two calls");
   assert.equal(result.cacheSizeAfter, 1, "pipeline cache should hold exactly one entry for the one tiled variant both shapes use");
 });
 
-test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers (staging included) instead of allocating new ones", async (t) => {
+test("matmul: a second call with the SAME shape reuses pooled buffers (staging included) instead of allocating new ones", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) {
     t.skip(`headless WebGPU not available: ${harness.reason}`);
@@ -87,37 +94,25 @@ test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers (stag
   const b1 = randomMatrix(3 * 5, 6);
   const a2 = randomMatrix(4 * 3, 7);
   const b2 = randomMatrix(3 * 5, 8);
-  const bundle = bundleForBrowser([path.join(SRC, "gemm.ts")]);
   const result = await harness.run<{ createBufferCallsAfterFirst: number; createBufferCallsAfterSecond: number }>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-
+    `${PAGE_SETUP}
     let createBufferCalls = 0;
     const origCreateBuffer = device.createBuffer.bind(device);
     device.createBuffer = (desc) => { createBufferCalls++; return origCreateBuffer(desc); };
 
-    const a1 = new Float32Array(${JSON.stringify(Array.from(a1))});
-    const b1 = new Float32Array(${JSON.stringify(Array.from(b1))});
-    await runGemmWGSL(device, a1, b1, 4, 3, 5);
+    await hostGemm(new Float32Array(${JSON.stringify(Array.from(a1))}), new Float32Array(${JSON.stringify(Array.from(b1))}), 4, 3, 5);
     const createBufferCallsAfterFirst = createBufferCalls;
-
-    // SAME shape as the first call -- every buffer runGemmWGSL needs (A, B,
-    // out, the uniform arena, the MAP_READ staging buffer) went back to
-    // backend-webgpu's pools at the end of the first call, so this second
-    // call should not call createBuffer at all.
-    const a2 = new Float32Array(${JSON.stringify(Array.from(a2))});
-    const b2 = new Float32Array(${JSON.stringify(Array.from(b2))});
-    await runGemmWGSL(device, a2, b2, 4, 3, 5);
+    // SAME shape as the first call -- every buffer it needs (A, B, out, the
+    // uniform arena, the MAP_READ staging buffer) went back to
+    // backend-webgpu's pools when the first call disposed its tensors.
+    await hostGemm(new Float32Array(${JSON.stringify(Array.from(a2))}), new Float32Array(${JSON.stringify(Array.from(b2))}), 4, 3, 5);
     const createBufferCallsAfterSecond = createBufferCalls;
 
     return { createBufferCallsAfterFirst, createBufferCallsAfterSecond };
     `,
-    bundle,
+    bundle(),
   );
   assert.ok(result.createBufferCallsAfterFirst > 0, "the first call should allocate real buffers");
-  // Before #146 the MAP_READ staging buffer was deliberately unpooled (one
-  // new buffer per call); backend-webgpu pools staging buffers by size class.
   assert.equal(
     result.createBufferCallsAfterSecond - result.createBufferCallsAfterFirst,
     0,
@@ -125,141 +120,51 @@ test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers (stag
   );
 });
 
-test("attention chain (QK^T -> softmax -> weighted-sum) stays GPU-resident: no MAP_READ staging buffer is created until the caller explicitly reads a result back", async (t) => {
+test("attention chain (QKᵀ -> softmax -> ·V) and a GEMM chain stay GPU-resident: no MAP_READ staging buffer until the caller explicitly reads a result back", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) {
     t.skip(`headless WebGPU not available: ${harness.reason}`);
     return;
   }
-  const batch = 1;
-  const seqQ = 4;
-  const seqK = 4;
-  const dim = 4;
-  const q = randomMatrix(batch * seqQ * dim, 66);
-  const k = randomMatrix(batch * seqK * dim, 77);
-  const v = randomMatrix(batch * seqK * dim, 88);
-  const bundle = bundleForBrowser([path.join(SRC, "attention.ts")]);
-  const result = await harness.run<{ mapReadBuffersDuringChain: number; mapReadBuffersAfterReadback: number }>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
+  const q = randomMatrix(4 * 4, 66);
+  const k = randomMatrix(4 * 4, 77);
+  const v = randomMatrix(4 * 4, 88);
+  const c = randomMatrix(4 * 3, 99);
+  const result = await harness.run<{ duringChain: number; afterReadback: number }[]>(
+    `${PAGE_SETUP}
+    const b = gpu.backend;
+    const up = (data, shape) => gpu.fromHost({ dtype: "f32", shape, data: new Float32Array(data) });
+    const q = await up(${JSON.stringify(Array.from(q))}, [1, 4, 4]);
+    const k = await up(${JSON.stringify(Array.from(k))}, [1, 4, 4]);
+    const v = await up(${JSON.stringify(Array.from(v))}, [1, 4, 4]);
+    const c = await up(${JSON.stringify(Array.from(c))}, [4, 3]);
+    await b.sync();
 
     let mapReadBuffers = 0;
     const origCreateBuffer = device.createBuffer.bind(device);
     device.createBuffer = (desc) => {
-      // GPUBufferUsage.MAP_READ === 0x0001
       if ((desc.usage & GPUBufferUsage.MAP_READ) !== 0) mapReadBuffers++;
       return origCreateBuffer(desc);
     };
-
-    const q = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(q))}), [${batch}, ${seqQ}, ${dim}]);
-    const k = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(k))}), [${batch}, ${seqK}, ${dim}]);
-    const v = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(v))}), [${batch}, ${seqK}, ${dim}]);
-
-    const scores = await runQKT(device, q, k, ${batch}, ${seqQ}, ${seqK}, ${dim});
-    const weights = await runSoftmax(device, scores, ${batch * seqQ}, ${seqK});
-    const outT = await runWeightedSum(device, weights, v, ${batch}, ${seqQ}, ${seqK}, ${dim});
-    const mapReadBuffersDuringChain = mapReadBuffers;
-
-    // Only NOW read the final result back to the CPU.
-    await outT.toFloat32Array();
-    const mapReadBuffersAfterReadback = mapReadBuffers;
-
-    q.free(); k.free(); v.free(); scores.free(); weights.free(); outT.free();
-    return { mapReadBuffersDuringChain, mapReadBuffersAfterReadback };
+    const out = [];
+    for (const chain of [
+      () => b.matmul(b.softmax(b.matmul(q, b.transpose(k, [0, 2, 1])), -1), v),
+      () => b.matmul(b.matmul(b.reshape(q, [4, 4]), b.reshape(k, [4, 4])), c),
+    ]) {
+      const before = mapReadBuffers;
+      const r = b.scope(chain);
+      const duringChain = mapReadBuffers - before;
+      await gpu.toHost(r); // only NOW read the final result back
+      out.push({ duringChain, afterReadback: mapReadBuffers - before });
+      gpu.dispose(r);
+    }
+    return out;
     `,
-    bundle,
+    bundle(),
   );
-  assert.equal(
-    result.mapReadBuffersDuringChain,
-    0,
-    "no CPU staging/readback buffer should be created while chaining GPU-resident attention ops",
-  );
-  assert.equal(
-    result.mapReadBuffersAfterReadback,
-    1,
-    "exactly one staging buffer should appear once the caller explicitly reads the final result back",
-  );
-});
-
-test("runQKT/runSoftmax/runWeightedSum never call GPUTensor.fromFloat32Array internally (inputs/intermediates are never re-uploaded from a host copy)", async (t) => {
-  const harness = await getHarness();
-  if ("unavailable" in harness) {
-    t.skip(`headless WebGPU not available: ${harness.reason}`);
-    return;
+  for (const [i, r] of result.entries()) {
+    assert.equal(r.duringChain, 0, `chain ${i}: no CPU staging/readback buffer while chaining GPU-resident ops`);
+    assert.ok(r.afterReadback <= 1, `chain ${i}: at most one staging buffer once the caller reads the final result (the pool may already hold one)`);
   }
-  const batch = 1;
-  const seqQ = 3;
-  const seqK = 3;
-  const dim = 2;
-  const q = randomMatrix(batch * seqQ * dim, 1);
-  const k = randomMatrix(batch * seqK * dim, 2);
-  const v = randomMatrix(batch * seqK * dim, 3);
-  const bundle = bundleForBrowser([path.join(SRC, "attention.ts")]);
-  const result = await harness.run<number>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-
-    let fromFloat32ArrayCalls = 0;
-    const orig = GPUTensor.fromFloat32Array;
-    GPUTensor.fromFloat32Array = (...args) => { fromFloat32ArrayCalls++; return orig(...args); };
-
-    const q = orig(device, new Float32Array(${JSON.stringify(Array.from(q))}), [${batch}, ${seqQ}, ${dim}]);
-    const k = orig(device, new Float32Array(${JSON.stringify(Array.from(k))}), [${batch}, ${seqK}, ${dim}]);
-    const v = orig(device, new Float32Array(${JSON.stringify(Array.from(v))}), [${batch}, ${seqK}, ${dim}]);
-    fromFloat32ArrayCalls = 0; // only count calls made DURING the chain below
-
-    const scores = await runQKT(device, q, k, ${batch}, ${seqQ}, ${seqK}, ${dim});
-    const weights = await runSoftmax(device, scores, ${batch * seqQ}, ${seqK});
-    const outT = await runWeightedSum(device, weights, v, ${batch}, ${seqQ}, ${seqK}, ${dim});
-
-    q.free(); k.free(); v.free(); scores.free(); weights.free(); outT.free();
-    return fromFloat32ArrayCalls;
-    `,
-    bundle,
-  );
-  assert.equal(result, 0, "the attention primitives should never re-upload a GPU-resident intermediate from a host array");
-});
-
-test("runGemm stays GPU-resident: chaining two GEMMs creates no MAP_READ staging buffer and no host re-upload until the caller reads back", async (t) => {
-  const harness = await getHarness();
-  if ("unavailable" in harness) {
-    t.skip(`headless WebGPU not available: ${harness.reason}`);
-    return;
-  }
-  const a = randomMatrix(8 * 12, 21);
-  const b = randomMatrix(12 * 16, 22);
-  const c = randomMatrix(16 * 4, 23);
-  const bundle = bundleForBrowser([path.join(SRC, "gemm.ts")]);
-  const result = await harness.run<{ mapReadDuringChain: number; uploadsDuringChain: number; mapReadAfterReadback: number }>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-    const A = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(a))}), [8, 12]);
-    const B = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(b))}), [12, 16]);
-    const C = GPUTensor.fromFloat32Array(device, new Float32Array(${JSON.stringify(Array.from(c))}), [16, 4]);
-
-    let mapRead = 0;
-    let uploads = 0;
-    const origCreateBuffer = device.createBuffer.bind(device);
-    device.createBuffer = (desc) => { if ((desc.usage & GPUBufferUsage.MAP_READ) !== 0) mapRead++; return origCreateBuffer(desc); };
-    const origFrom = GPUTensor.fromFloat32Array;
-    GPUTensor.fromFloat32Array = (...args) => { uploads++; return origFrom(...args); };
-
-    const AB = await runGemm(device, A, B);
-    const ABC = await runGemm(device, AB, C);
-    const mapReadDuringChain = mapRead;
-    const uploadsDuringChain = uploads;
-    await ABC.toFloat32Array();
-    const mapReadAfterReadback = mapRead;
-    GPUTensor.fromFloat32Array = origFrom;
-    for (const x of [A, B, C, AB, ABC]) x.free();
-    return { mapReadDuringChain, uploadsDuringChain, mapReadAfterReadback };
-    `,
-    bundle,
-  );
-  assert.equal(result.mapReadDuringChain, 0, "no staging/readback buffer while chaining GPU-resident GEMMs");
-  assert.equal(result.uploadsDuringChain, 0, "the intermediate must not round-trip through the host");
-  assert.equal(result.mapReadAfterReadback, 1, "exactly one staging buffer once the caller reads the final result");
+  assert.equal(result[0]!.afterReadback, 1, "the first readback creates exactly one staging buffer");
 });

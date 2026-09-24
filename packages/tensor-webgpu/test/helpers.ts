@@ -47,7 +47,7 @@
  * executes the same flat bundle + test body either
  *
  *  - **in this Node process against Dawn** (the `webgpu` npm package, via
- *    `src/dawn.ts`'s `requestDawnGPU({ unsafe: true })`): the body runs as
+ *    `@johnhenry/backend-webgpu`'s `getGpu({ unsafe: true })`): the body runs as
  *    an `AsyncFunction` whose `navigator` parameter is `{ gpu: <Dawn> }`, so
  *    test bodies written against `navigator.gpu` run unmodified. No browser,
  *    no display server — this is what makes the kernels testable in plain
@@ -126,7 +126,7 @@ const IS_MAC = process.platform === "darwin";
 // modules can't collide on top-level names (the flat concatenation this
 // replaces could, once backend-webgpu joined the closure). The entries'
 // exports are then declared as top-level `const`s, so test bodies call
-// `runGemm(...)`, `GPUTensor.fromFloat32Array(...)` etc. directly.
+// `createWebGpuDevice(...)`, `detectWebGPU(...)` etc. directly.
 //
 // Resolution (not a general bundler; enough for this closure): relative
 // specifiers as written (`./x.ts`); package `imports` (`#dawn`) and
@@ -258,6 +258,30 @@ return Object.assign({}, ${own.map((e) => `__req(${e})`).join(", ")});
 }
 
 export const SRC = path.resolve(HERE, "../src");
+
+/**
+ * Page-side helper (prepend to a `harness.run` body; needs a bundle of
+ * `src/facade.ts`) for host-array fusion checks: `await fuseHost(node,
+ * arrays)` runs an IR expression over f32 arrays through the facade —
+ * upload with `gpu.fromHost`, ONE `gpu.fuse` dispatch, `gpu.toHost`
+ * readback — and returns a `Float32Array`. One `createWebGpuDevice({ device
+ * })` per page run, on a device from the page's `navigator.gpu` (which the
+ * Dawn harness tracks and destroys).
+ */
+export const FUSE_HOST = `
+let __fuseGpu;
+const fuseHost = async (node, arrays) => {
+  if (!__fuseGpu) __fuseGpu = await createWebGpuDevice({ device: await (await navigator.gpu.requestAdapter()).requestDevice() });
+  const gpu = __fuseGpu;
+  const ins = await Promise.all(arrays.map((d) => gpu.fromHost({ dtype: "f32", shape: [d.length], data: d })));
+  try {
+    const out = gpu.fuse(node, ins);
+    try { return (await gpu.toHost(out)).data; } finally { gpu.dispose(out); }
+  } finally {
+    for (const x of ins) gpu.dispose(x);
+  }
+};
+`;
 
 // ---- Xvfb + Chrome + CDP harness -------------------------------------------
 
@@ -448,8 +472,8 @@ const AsyncFunction = (async () => {}).constructor as new (...args: string[]) =>
  * loop) alive.
  */
 async function buildDawnHarness(): Promise<HarnessResult> {
-  const { requestDawnGPU } = await import("../src/dawn.ts");
-  const gpu = await requestDawnGPU({ unsafe: true });
+  const { getGpu } = await import("@johnhenry/backend-webgpu");
+  const gpu = await getGpu({ unsafe: true });
   if (!gpu) return { unavailable: true, reason: "Dawn: the `webgpu` npm package is not installed or its native addon failed to load" };
   const probe = await gpu.requestAdapter().catch(() => null);
   if (!probe) return { unavailable: true, reason: "Dawn: requestAdapter() resolved null (no GPU adapter)" };

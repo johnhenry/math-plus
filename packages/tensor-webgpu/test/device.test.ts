@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
-import { Tensor } from "@johnhenry/math-plus-tensor-core";
-import { toWebGPU, GPUTensor } from "../src/device.ts";
 import { chooseGemmBackend, GEMM_ELEMENT_THRESHOLD, GEMM_WORK_THRESHOLD } from "../src/threshold.ts";
 import { closeHarness, getHarness } from "./helpers.ts";
 
@@ -38,29 +36,6 @@ test("chooseGemmBackend: pins the measured m·n >= 192² AND m·n·k >= 2^22 rul
   // k omitted: the m·n test alone (the pre-k signature's behavior, at the new threshold).
   assert.equal(chooseGemmBackend(192, 192), "webgpu");
   assert.equal(chooseGemmBackend(96, 384), "webgpu", "m·n-based: a 96x384 output has 192*192 elements");
-});
-
-test("toWebGPU: rejects dtypes other than f32/f16 without needing a real device", async () => {
-  const t = Tensor.zeros([4], { dtype: "f64" });
-  await assert.rejects(
-    () => toWebGPU(t, undefined as unknown as GPUDevice),
-    /f32 and f16 only/,
-  );
-});
-
-test("toWebGPU: rejects a non-contiguous view without needing a real device", async () => {
-  const t = Tensor.zeros([4, 4], { dtype: "f32" }).transpose();
-  await assert.rejects(
-    () => toWebGPU(t, undefined as unknown as GPUDevice),
-    /contiguous/,
-  );
-});
-
-test("GPUTensor.fromFloat32Array: rejects a shape/data length mismatch without needing a real device", () => {
-  assert.throws(
-    () => GPUTensor.fromFloat32Array(undefined as unknown as GPUDevice, new Float32Array(3), [2, 2]),
-    /does not match data length/,
-  );
 });
 
 // ---- real headless WebGPU (skips if unavailable) ---------------------------

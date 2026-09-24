@@ -36,31 +36,39 @@ test("src/ makes no queue.writeBuffer call of its own (uploads go through backen
   assert.deepEqual(hits, []);
 });
 
-test("uploads of views with a non-zero byteOffset (f32 subarray, f16 subarray at a 2-byte offset, odd-length f16, a tensor-core view through the facade) round-trip exactly", async (t) => {
+test("facade uploads of views with a non-zero byteOffset (f32 subarray; f16 subarray at a 6-byte offset and an odd-length one, where the device has shader-f16) round-trip exactly (tensor-core views: facade.test.ts)", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
-  const r = await harness.run<{ f32: number[]; f16: number[]; f16odd: number[]; facade: number[] }>(
+  const r = await harness.run<{ f32: number[]; f16: number[] | null; f16odd: number[] | null }>(
     `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
+    const cap = await detectWebGPU({ gpu: navigator.gpu }); // requests shader-f16 where offered
+    if (!cap.available) throw new Error(cap.reason);
+    const gpu = await createWebGpuDevice({ device: cap.device });
     const backing = new Float32Array(16).map((_, i) => i);
-    const a = GPUTensor.fromFloat32Array(device, backing.subarray(4, 8), [4]);
-    const bits = new Uint16Array(12).map((_, i) => 0x3c00 + i);
-    const b = GPUTensor.fromFloat16Bits(device, bits.subarray(3, 7), [4]);
-    const c = GPUTensor.fromFloat16Bits(device, bits.subarray(5, 8), [3]);
-    const gpu = await createWebGpuDevice({ device });
-    const d = await gpu.fromHost({ dtype: "f32", shape: [4], data: backing.subarray(8, 12) });
-    const facade = Array.from((await gpu.toHost(d)).data);
-    const out = { f32: Array.from(await a.toFloat32Array()), f16: Array.from(await b.toUint16Array()), f16odd: Array.from(await c.toUint16Array()), facade };
-    a.free(); b.free(); c.free(); gpu.dispose(d);
+    const a = await gpu.fromHost({ dtype: "f32", shape: [4], data: backing.subarray(4, 8) });
+    const out = { f32: Array.from((await gpu.toHost(a)).data), f16: [], f16odd: [] };
+    gpu.dispose(a);
+    if (gpu.supports("f16")) {
+      const halves = new Float16Array(12).map((_, i) => 1 + i / 1024); // bits 0x3c00 + i
+      const bits = (h) => Array.from(new Uint16Array(h.buffer, h.byteOffset, h.length));
+      const b = await gpu.fromHost({ dtype: "f16", shape: [4], data: halves.subarray(3, 7) }); // byteOffset 6: not 4-aligned
+      const c = await gpu.fromHost({ dtype: "f16", shape: [3], data: halves.subarray(5, 8) }); // odd length
+      out.f16 = bits((await gpu.toHost(b)).data);
+      out.f16odd = bits((await gpu.toHost(c)).data);
+      gpu.dispose(b); gpu.dispose(c);
+    } else {
+      out.f16 = out.f16odd = null; // backend-webgpu stores f16 as f32 without shader-f16: not a byte-offset path
+    }
     return out;
     `,
     bundleForBrowser([path.join(SRC, "index.ts")]),
   );
   assert.deepEqual(r.f32, [4, 5, 6, 7]);
-  assert.deepEqual(r.f16, [0x3c03, 0x3c04, 0x3c05, 0x3c06]);
-  assert.deepEqual(r.f16odd, [0x3c05, 0x3c06, 0x3c07]);
-  assert.deepEqual(r.facade, [8, 9, 10, 11]);
+  if (r.f16 === null) t.diagnostic("device has no shader-f16: f16 views not checked");
+  else {
+    assert.deepEqual(r.f16, [0x3c03, 0x3c04, 0x3c05, 0x3c06]);
+    assert.deepEqual(r.f16odd, [0x3c05, 0x3c06, 0x3c07]);
+  }
 });
 
 function findBun(): string | undefined {

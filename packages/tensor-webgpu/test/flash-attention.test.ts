@@ -1,12 +1,18 @@
 /**
- * Fused (flash) attention, `runAttention` (issue #126) — since issue #146
- * backend-webgpu's `sdpa` behind the deprecated shim: unmasked and masked
- * (sliding window, key padding, causal, arbitrary per-element, a fully
- * masked row), both kernels (`fast` for head dim 32/64, `generic` for other
- * head dims, observed from the dispatched pipeline), with masked-key-tile
- * skipping — on a real adapter (test/helpers.ts),
- * checked against a NumPy float64 oracle (scripts/attention_oracle.py),
- * skip-don't-fail when either is unavailable (docs/TESTING.md).
+ * Fused (flash) attention (issue #126) through the device facade:
+ * `gpu.backend.sdpa` on `[B, 1, L, D]` tensors with a bool mask — unmasked
+ * and masked (sliding window, key padding, causal, arbitrary per-element,
+ * with a fully masked row), both kernels (`fast` for head dim 32/64,
+ * `generic` for other head dims or a device too small for the fast one,
+ * observed from the dispatched pipeline), with masked-key-tile skipping —
+ * on a real adapter (test/helpers.ts), checked against a NumPy float64
+ * oracle (scripts/attention_oracle.py), skip-don't-fail when either is
+ * unavailable (docs/TESTING.md).
+ *
+ * Fully masked query rows are undefined behaviour in the tensor-backend
+ * contract (backend-webgpu's `sdpa` leaves them unspecified; the removed
+ * `runAttention` shim zeroed them), so those rows are excluded from the
+ * comparison; every other row of the same case is checked.
  *
  * Error bound: outputs are convex combinations of V rows in [-1, 1]; f32
  * online softmax + f32 accumulation over <= 128 keys is good to ~1e-6. The
@@ -63,10 +69,8 @@ interface Case {
   v: Float32Array;
   mask?: Float32Array;
   maskShape?: number[];
-  kernel: "fast" | "generic" | "auto";
   /** Use the adapter's max workgroup memory (fast D=64 needs it) instead of the 16 KiB default. */
   raisedLimits: boolean;
-  skipMaskedTiles?: boolean;
   /** Expected kernel (backend-webgpu 0.3.1: fast for head dim 32/64 when its workgroup memory fits the device limit, generic otherwise). */
   expectKernel: "fast" | "generic";
 }
@@ -90,7 +94,6 @@ function makeCase(
     q: lcg(batch * seqQ * dim, seed),
     k: lcg(batch * seqK * dim, seed + 1),
     v: lcg(batch * seqK * dim, seed + 2),
-    kernel: "auto",
     raisedLimits: true,
     ...extra,
   };
@@ -155,7 +158,7 @@ async function runOnGPU(
   harness: Exclude<Awaited<ReturnType<typeof getHarness>>, { unavailable: true }>,
   cases: readonly Case[],
 ): Promise<{ out: Float32Array; kernel: string; limit: number }[]> {
-  const bundle = bundleForBrowser([path.join(SRC, "attention.ts")]);
+  const bundle = bundleForBrowser([path.join(SRC, "facade.ts")]);
   const payload = cases.map((c) => ({
     batch: c.batch,
     seqQ: c.seqQ,
@@ -167,16 +170,14 @@ async function runOnGPU(
     v: b64(c.v),
     mask: c.mask ? b64(c.mask) : null,
     maskShape: c.maskShape ?? null,
-    kernel: c.kernel,
     raisedLimits: c.raisedLimits,
-    skipMaskedTiles: c.skipMaskedTiles ?? true,
   }));
   const results = await harness.run<{ out: string; kernel: string; limit: number }[]>(
     `
     const cases = ${JSON.stringify(payload)};
     // Record which attention pipeline each call dispatches (backend-webgpu keys: "sdpafast:…" / "sdpa:…").
-    const watch = (device) => {
-      const rt = backendFor(device).rt;
+    const watch = (gpu) => {
+      const rt = gpu.backend.rt;
       if (!rt.__keys) { rt.__keys = []; const orig = rt.dispatch.bind(rt); rt.dispatch = (k, ...rest) => { rt.__keys.push(k.key); return orig(k, ...rest); }; }
       return rt.__keys;
     };
@@ -185,24 +186,29 @@ async function runOnGPU(
     const adapter = await navigator.gpu.requestAdapter();
     const raised = await adapter.requestDevice({ requiredLimits: { maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize } });
     const plain = await (await navigator.gpu.requestAdapter()).requestDevice(); // an adapter creates one device
+    const gpus = { raised: await createWebGpuDevice({ device: raised }), plain: await createWebGpuDevice({ device: plain }) };
     const out = [];
     for (const c of cases) {
-      const device = c.raisedLimits ? raised : plain;
-      const q = GPUTensor.fromFloat32Array(device, dec(c.q), [c.batch, c.seqQ, c.dim]);
-      const k = GPUTensor.fromFloat32Array(device, dec(c.k), [c.batch, c.seqK, c.dim]);
-      const v = GPUTensor.fromFloat32Array(device, dec(c.v), [c.batch, c.seqK, c.dim]);
-      const mask = c.mask ? GPUTensor.fromFloat32Array(device, dec(c.mask), c.maskShape) : undefined;
-      const opts = { scale: c.scale, mask, kernel: c.kernel, skipMaskedTiles: c.skipMaskedTiles };
-      const keys = watch(device);
+      const gpu = c.raisedLimits ? gpus.raised : gpus.plain;
+      const b = gpu.backend;
+      const device = gpu.device;
+      const up = (s, shape) => gpu.fromHost({ dtype: "f32", shape, data: dec(s) });
+      const q = await up(c.q, [c.batch, 1, c.seqQ, c.dim]);
+      const k = await up(c.k, [c.batch, 1, c.seqK, c.dim]);
+      const v = await up(c.v, [c.batch, 1, c.seqK, c.dim]);
+      // The f32 0/1 mask, right-aligned to [B, 1, Lq, Lk] (heads = 1) and cast to bool (nonzero = attend).
+      const mf = c.mask ? await up(c.mask, c.maskShape) : null;
+      const m3 = c.mask ? [...Array(3 - c.maskShape.length).fill(1), ...c.maskShape] : null;
+      const keys = watch(gpu);
       keys.length = 0;
       device.pushErrorScope("validation");
-      const o = await runAttention(device, q, k, v, opts);
-      const data = await o.toFloat32Array();
+      const o = b.scope(() => b.sdpa(q, k, v, mf ? b.cast(b.reshape(mf, [m3[0], 1, m3[1], m3[2]]), "bool") : null, c.scale));
+      const data = (await gpu.toHost(o)).data;
       const err = await device.popErrorScope();
       if (err) throw new Error("validation error: " + err.message);
       const kernel = keys.some((k) => k.startsWith("sdpafast:")) ? "fast" : keys.some((k) => k.startsWith("sdpa:")) ? "generic" : "none";
       out.push({ out: enc(data), kernel, limit: device.limits.maxComputeWorkgroupStorageSize });
-      for (const t of [q, k, v, o, mask]) t?.free();
+      for (const t of [q, k, v, o, mf]) if (t) gpu.dispose(t);
     }
     return out;
     `,
@@ -215,11 +221,30 @@ async function runOnGPU(
   }));
 }
 
-function assertClose(actual: Float32Array, expected: Float64Array, label: string): void {
+/** Query rows (flat `b * seqQ + i`) with no visible key: undefined behaviour in the contract, excluded from the comparison. */
+function fullyMaskedRows(c: Case): Set<number> {
+  const rows = new Set<number>();
+  if (!c.mask || !c.maskShape) return rows;
+  const shape = [...Array<number>(3 - c.maskShape.length).fill(1), ...c.maskShape] as [number, number, number];
+  for (let b = 0; b < c.batch; b++) {
+    for (let i = 0; i < c.seqQ; i++) {
+      const base = ((shape[0] === 1 ? 0 : b) * shape[1] + (shape[1] === 1 ? 0 : i)) * shape[2];
+      let any = false;
+      for (let j = 0; j < c.seqK && !any; j++) any = (c.mask[base + (shape[2] === 1 ? 0 : j)] as number) !== 0;
+      if (!any) rows.add(b * c.seqQ + i);
+    }
+  }
+  return rows;
+}
+
+function assertClose(actual: Float32Array, expected: Float64Array, c: Case): void {
+  const label = c.name;
   assert.equal(actual.length, expected.length, `${label}: length`);
+  const skip = fullyMaskedRows(c);
   let worst = 0;
   let at = -1;
   for (let i = 0; i < expected.length; i++) {
+    if (skip.has(Math.floor(i / c.dim))) continue;
     const d = Math.abs((actual[i] as number) - (expected[i] as number));
     if (!(d <= worst)) {
       worst = d;
@@ -229,7 +254,7 @@ function assertClose(actual: Float32Array, expected: Float64Array, label: string
   assert.ok(worst <= 1e-4, `${label}: max |err| ${worst} at ${at} (got ${actual[at]}, expected ${expected[at]})`);
 }
 
-test("runAttention: unmasked and masked (sliding window, padding, causal, per-element, fully masked row), both kernels, match NumPy", async (t) => {
+test("sdpa through the facade: unmasked and masked (sliding window, padding, causal, per-element with a fully masked row), both kernels, match NumPy", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
   if (!PYTHON) return t.skip(NO_ORACLE);
@@ -244,17 +269,13 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
       maskShape: [40, 70],
     }, 7),
   );
-  for (const skip of [true, false]) {
-    // skipMaskedTiles is deprecated and ignored (backend-webgpu always skips): both values must still work.
-    cases.push(
-      makeCase(`generic D=48 per-element mask with a fully masked row skipMaskedTiles=${skip}`, 2, 20, 50, 48, {
-        expectKernel: "generic",
-        mask: randomMask(2, 20, 50, 99),
-        maskShape: [2, 20, 50],
-        skipMaskedTiles: skip,
-      }, 10),
-    );
-  }
+  cases.push(
+    makeCase("generic D=48 per-element mask with a fully masked row", 2, 20, 50, 48, {
+      expectKernel: "generic",
+      mask: randomMask(2, 20, 50, 99),
+      maskShape: [2, 20, 50],
+    }, 10),
+  );
   cases.push(
     makeCase("fast D=64 key padding [B,1,Lk]", 3, 33, 90, 64, {
       expectKernel: "fast",
@@ -264,8 +285,7 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   );
   cases.push(
     // backend-webgpu 0.3.1 sizes sdpa to maxComputeWorkgroupStorageSize: on the WebGPU default (16 KiB)
-    // the ~20 KiB fast D=64 kernel doesn't fit and the generic kernel's tiles shrink to fit (0.3.0 overflowed
-    // the limit, and this package composed attention from matmul/softmax on such devices instead).
+    // the ~20 KiB fast D=64 kernel doesn't fit and the generic kernel's tiles shrink to fit.
     makeCase("fused on the default 16 KiB limit: D=64 key padding (generic, tiles shrunk)", 3, 33, 90, 64, {
       expectKernel: "generic",
       raisedLimits: false,
@@ -299,9 +319,8 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   );
   cases.push(makeCase("generic D=5 unmasked", 2, 9, 11, 5, { expectKernel: "generic", scale: 0.7 }, 22));
   cases.push(
-    makeCase("kernel: \"generic\" (deprecated, ignored) D=32 padding [Lk] broadcast to every batch and query", 2, 17, 64, 32, {
+    makeCase("D=32 padding [Lk] broadcast to every batch and query", 2, 17, 64, 32, {
       expectKernel: "fast",
-      kernel: "generic",
       mask: padding(1, 64, [30]),
       maskShape: [64],
     }, 25),
@@ -312,20 +331,18 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   cases.forEach((c, i) => {
     assert.equal(got[i]?.kernel, c.expectKernel, `${c.name}: kernel`);
     if (!c.raisedLimits) assert.equal(got[i]?.limit, 16384, `${c.name}: runs on a device with the WebGPU default workgroup memory`);
-    assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c.name);
+    assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c);
   });
 });
 
-test("runAttention: masked key tiles are actually skipped — non-finite V rows in tiles no query can see don't reach the output (fast kernel, head dim 32 and 64)", async (t) => {
+test("sdpa: masked key tiles are actually skipped — non-finite V rows in tiles no query can see don't reach the output (fast kernel, head dim 32 and 64)", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
   if (!PYTHON) return t.skip(NO_ORACLE);
   // Key padding: batch b sees keys [0, len_b). Every key from the next
   // 32-aligned boundary on lives in a tile no query of that batch entry can
   // see; poison those V rows with NaN. A skipped tile is never loaded; a
-  // walked one multiplies its zero weights by NaN. (Turning skipping off —
-  // the old `skipMaskedTiles: false` — no longer exists: backend-webgpu
-  // always skips, and that option is deprecated and ignored.)
+  // walked one multiplies its zero weights by NaN.
   const batch = 2;
   const seqQ = 24;
   const seqK = 128;
@@ -350,34 +367,6 @@ test("runAttention: masked key tiles are actually skipped — non-finite V rows 
   cases.forEach((c, i) => {
     assert.equal(got[i]?.kernel, c.expectKernel, `${c.name}: kernel`);
     if (!c.raisedLimits) assert.equal(got[i]?.limit, 16384, `${c.name}: runs on a device with the WebGPU default workgroup memory`);
-    assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c.name);
+    assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c);
   });
-});
-
-test("runAttention: rejects f16 operands, mismatched shapes, and non-broadcastable masks", async (t) => {
-  const harness = await getHarness();
-  if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
-  const bundle = bundleForBrowser([path.join(SRC, "attention.ts")]);
-  const errors = await harness.run<string[]>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
-    const t = (shape) => GPUTensor.fromFloat32Array(device, new Float32Array(shape.reduce((a, b) => a * b, 1)), shape);
-    const q = t([2, 4, 8]), k = t([2, 6, 8]), v = t([2, 6, 8]);
-    const msgs = [];
-    const attempt = async (f) => { try { await f(); msgs.push("no error"); } catch (e) { msgs.push(e.message); } };
-    await attempt(() => runAttention(device, q, t([2, 5, 8]), v));
-    await attempt(() => runAttention(device, q, k, v, { mask: t([3, 4, 6]) }));
-    await attempt(() => runAttention(device, q, k, v, { mask: t([4, 5]) }));
-    await attempt(() => runAttention(device, GPUTensor.fromFloat16Bits(device, new Uint16Array(64), [2, 4, 8]), k, v));
-    await attempt(() => runAttention(device, t([1, 4, 48]), t([1, 6, 48]), t([1, 6, 48]), { kernel: "fast" }));
-    return msgs;
-    `,
-    bundle,
-  );
-  assert.match(errors[0] as string, /shapes do not agree/);
-  assert.match(errors[1] as string, /not broadcastable/);
-  assert.match(errors[2] as string, /not broadcastable/);
-  assert.match(errors[3] as string, /f32 GPUTensors only/);
-  assert.match(errors[4] as string, /fast kernel needs head dim 32 or 64/);
 });

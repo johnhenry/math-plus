@@ -40,7 +40,8 @@
  * kernel available). A browser without subgroup matrices, a weaker GPU, or a
  * software adapter (lavapipe/SwiftShader in CI) crosses over later or never;
  * a faster WASM (more threads) crosses later too. It prices host-array calls —
- * operands that already live on the GPU (`runGemm` on `GPUTensor`s) make
+ * operands that already live on the GPU (`gpu.backend.matmul` on tensors
+ * from `gpu.fromTensor`) make
  * WebGPU cheaper at every size. Re-run the script on your hardware before
  * trusting it.
  */

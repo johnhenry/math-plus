@@ -47,7 +47,7 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | [`@johnhenry/math-plus-tensor-autograd`](./packages/tensor-autograd) | Reverse-mode tape, `nn.*`, `optim.*`, trainer, checkpoints |
 | [`@johnhenry/math-plus-tensor-compile`](./packages/tensor-compile) | Expression IR + elementwise fusion (opt-in); the shared lowering target for WGSL |
 | [`@johnhenry/math-plus-tensor-wasm`](./packages/tensor-wasm) | Rust→WASM kernels (SIMD, arena allocator, zero-alloc `...Into` ops) + opt-in Deno-native FFI |
-| [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU GEMM, attention primitives, IR→WGSL fusion. Chromium-family browsers only. |
+| [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU device facade over `@johnhenry/backend-webgpu` (GEMM, fused attention, the tensor-backend ops) plus IR→WGSL fusion. Browsers, and Node/Bun via Dawn. |
 | [`@johnhenry/math-plus-tensor-cpu`](./packages/tensor-cpu) | The CPU reference `Backend` for the `@johnhenry/tensor-backend` contract (RFC 0001 §12 Q3): f32 compute on tensor-core's kernels (`/kernels` subpath), every optional op native, passes the conformance suite. Pure TypeScript; Node, Bun, Deno, browsers. |
 | [`@johnhenry/math-plus-tensor-mlx`](./packages/tensor-mlx) | **Experimental.** MLX (Metal) arrays on Node/Bun with explicit `fromTensor`/`toTensor` transfers, over the `@johnhenry/tensor-backend` contract. darwin/arm64 only; not on JSR. |
 | [`@johnhenry/math-plus-safetensors`](./packages/safetensors) | safetensors reader/writer: validated headers, typed views (F16 as `Float16Array`), lazy reads from files/Blobs/HTTP ranges, optional tensor-core interop. Zero deps. |

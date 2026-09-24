@@ -22,7 +22,7 @@ import { makeTest } from "../../../test/harness.ts";
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Interval } from "@johnhenry/math-plus-scalar-types";
 import { Traced } from "@johnhenry/math-plus-tensor-compile";
-import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
+import { bundleForBrowser, closeHarness, FUSE_HOST, getHarness, SRC } from "./helpers.ts";
 
 after(closeHarness);
 
@@ -61,18 +61,16 @@ test("Interval as a precision oracle: the real GPU f32 result of add->mul->sigmo
   ];
 
   const expr = Traced.input(0).add(Traced.input(1)).mul(Traced.input(2)).sigmoid();
-  const bundle = bundleForBrowser([path.join(SRC, "elementwise.ts")]);
+  const bundle = bundleForBrowser([path.join(SRC, "facade.ts")]);
 
   for (const [a, b, c] of cases) {
     const bound = boundedFusedChain(a, b, c);
 
     const result = await harness.run<number[]>(
-      `
-      const adapter = await navigator.gpu.requestAdapter();
-      const device = await adapter.requestDevice();
+      `${FUSE_HOST}
       const node = ${JSON.stringify(expr.node)};
       const inputs = [new Float32Array([${a}]), new Float32Array([${b}]), new Float32Array([${c}])];
-      const out = await runElementwiseWGSL(device, node, inputs, 1);
+      const out = await fuseHost(node, inputs);
       return Array.from(out);
       `,
       bundle,

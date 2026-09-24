@@ -1,8 +1,9 @@
 /**
  * Per-device record of which optional GPU features GEMM may use on a device
- * you requested yourself (`detectWebGPU()`): bridge.ts reads it when it
- * creates that device's backend-webgpu `WebGpuBackend`, whose kernel
- * selector then uses subgroup matrices only if this says they are usable.
+ * you requested yourself (`detectWebGPU()`): bridge.ts passes the recorded
+ * adapter to backend-webgpu's `createWebGpuBackend({ device, adapter })` when
+ * `createWebGpuDevice({ device })` creates that device's backend, whose
+ * kernel selector then uses subgroup matrices only where they are usable.
  *
  * Why a registry at all instead of just reading `device.features`: the
  * subgroup-matrix kernel needs more than the feature flag — it needs an

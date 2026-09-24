@@ -10,7 +10,6 @@
  */
 import type { WebGpuBackend, WebGpuTensor } from "@johnhenry/backend-webgpu";
 import type { IRNode } from "@johnhenry/math-plus-tensor-compile";
-import { backendFor, readRaw, uploadSync } from "./bridge.ts";
 import { compileIRToElementwise } from "./fusion-wgsl.ts";
 
 /**
@@ -29,39 +28,3 @@ export function encodeFused(b: WebGpuBackend, node: IRNode, inputs: readonly Web
   return b.elementwise(expr, inputs, { helpers });
 }
 
-/**
- * Run a compiled elementwise expression (a traced `IRNode` from
- * `@johnhenry/math-plus-tensor-compile`) on the GPU: one shader dispatch
- * touches every output element once, fusing however many ops the expression
- * chained — no intermediate GPU buffer per op. Host arrays in, host array
- * out; `inputs` must all have `elementCount` elements (broadcast first).
- *
- * @deprecated Kept through the deprecation window. New code:
- * `createWebGpuDevice()` and `gpu.fuse(node, tensors)` /
- * `gpu.compile(n, fn)`, which keep inputs and result on the GPU and
- * broadcast.
- */
-export async function runElementwiseWGSL(
-  device: GPUDevice,
-  node: IRNode,
-  inputs: readonly Float32Array[],
-  elementCount: number,
-): Promise<Float32Array> {
-  if (inputs.some((a) => a.length !== elementCount)) {
-    throw new RangeError(
-      `runElementwiseWGSL: all inputs and the output must share elementCount ${elementCount} (broadcast first)`,
-    );
-  }
-  compileIRToElementwise(node, inputs.length); // surface IR errors before touching the GPU
-  if (elementCount === 0) return new Float32Array(0);
-  const b = backendFor(device);
-  const ins = inputs.map((d) => uploadSync(b, d, [elementCount], "f32"));
-  let out: WebGpuTensor | undefined;
-  try {
-    out = encodeFused(b, node, ins);
-    return new Float32Array(await readRaw(b, out));
-  } finally {
-    for (const x of ins) b.dispose(x);
-    if (out) b.dispose(out);
-  }
-}

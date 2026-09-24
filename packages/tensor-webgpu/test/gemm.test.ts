@@ -1,13 +1,15 @@
 /**
- * GEMM correctness: every kernel family (tiled, skinny, subgroup-matrix,
- * and backend-webgpu's automatic choice) x dtype (f32, f16) x B layout
- * (`[K,N]`, `transB`) x alignment case, through the deprecated
- * `runGemm*` shims, which run on @johnhenry/backend-webgpu's GEMM since
- * issue #146 — on a real adapter (test/helpers.ts: Dawn in-process, or
- * headless Chrome), checked
- * against a NumPy float64 oracle (scripts/gemm_oracle.py) — the repo's
+ * GEMM correctness through the device facade: every kernel family (tiled,
+ * skinny, subgroup-matrix, and backend-webgpu's automatic choice) x dtype
+ * (f32, f16) x B layout (`[K,N]` via `gpu.backend.matmul`, `[N,K]` via
+ * `gpu.backend.linear`) x alignment case, on a real adapter
+ * (test/helpers.ts: Dawn in-process, or headless Chrome), checked against a
+ * NumPy float64 oracle (scripts/gemm_oracle.py) — the repo's
  * differential-oracle convention (docs/TESTING.md), skip-don't-fail when
- * either the adapter or NumPy is unavailable.
+ * either the adapter or NumPy is unavailable. A family is forced through
+ * backend-webgpu's documented per-shape tuning table (`gemmTuning`, keyed
+ * `${storage}:${M}x${N}x${K}`) for `linear`; "tiled" is `matmul`, which only
+ * has the portable tiled kernel.
  *
  * Error bounds are derived, not hand-tuned per case: with exact inputs, an
  * f32-accumulated dot product of length K is off by at most ~K·u·(|A||B|)
@@ -22,7 +24,6 @@ import path from "node:path";
 import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
-import { gemmKernelApplicable } from "../src/gemm.ts";
 import { subgroupMatrixUsable } from "../src/gemm-caps.ts";
 import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
 
@@ -128,24 +129,6 @@ function assertWithinBound(got: Float32Array, ref: OracleResult, dtype: DType, l
 }
 
 // ---- pure logic (no GPU) --------------------------------------------------------
-//
-// The kernel generators, planGemm and selectGemmKernel were removed with the
-// duplicated kernels (issue #146); backend-webgpu's own kernel tests cover
-// its WGSL, and the oracle test below covers every family end to end.
-
-const NO_SG = { f16: true, subgroupMatrix: false };
-const SG = { f16: true, subgroupMatrix: true };
-
-test("gemmKernelApplicable: forced kernel families are refused outside their preconditions", () => {
-  assert.equal(gemmKernelApplicable("tiled", 5, 3, 7, false, NO_SG), true);
-  assert.equal(gemmKernelApplicable("skinny", 64, 64, 64, true, SG), true);
-  assert.equal(gemmKernelApplicable("skinny", 65, 64, 64, true, SG), false, "backend-webgpu's skinny configs stop at M = 64");
-  assert.equal(gemmKernelApplicable("skinny", 8, 64, 64, false, SG), false, "skinny is transB-only");
-  assert.equal(gemmKernelApplicable("skinny", 8, 66, 64, true, SG), false, "K % 4 != 0");
-  assert.equal(gemmKernelApplicable("subgroup-matrix", 128, 64, 64, false, NO_SG), false);
-  assert.equal(gemmKernelApplicable("subgroup-matrix", 128, 64, 66, false, SG), true, "[K,N] B is transposed first, so N % 4 no longer matters");
-  assert.equal(gemmKernelApplicable("subgroup-matrix", 128, 66, 64, true, SG), false, "K % 4 != 0");
-});
 
 test("subgroupMatrixUsable: needs the feature, an f32 8x8x8 config, and a fixed subgroup size of 32", () => {
   const feat = new Set(["chromium-experimental-subgroup-matrix"]);
@@ -184,6 +167,41 @@ const PAGE_CODECS = `
   const enc = (ta) => { const u8 = new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength); let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 `;
 
+/**
+ * Page-side GEMM through the facade (needs PAGE_CODECS and a `gpu` from
+ * createWebGpuDevice). `up(b64, shape, dtype)` uploads f32 or binary16 bytes
+ * with `gpu.fromHost`; `gemm(A, B, transB, kernel)` returns a new tensor:
+ * "auto" is what a caller writes (`linear` for [N,K] B, `matmul` for
+ * [K,N] B), "tiled" is `matmul` (portable tiled kernel only), and
+ * "skinny" / "subgroup-matrix" force that family for `linear` (B
+ * transposed first for [K,N]) through backend-webgpu's per-shape tuning
+ * table, restored afterwards. `applicable` mirrors the preconditions of
+ * backend-webgpu's configs: skinny up to M = 64, and both need K % 4 == 0
+ * (the vec4 Linear path).
+ */
+const PAGE_GEMM = `
+  const up = (s, shape, dtype) => gpu.fromHost({ dtype, shape, data: dtype === "f32" ? new Float32Array(dec(s)) : new Float16Array(dec(s)) });
+  const applicable = (kernel, m, k, transB) =>
+    kernel === "auto" || kernel === "tiled" ||
+    (kernel === "skinny" && transB && k % 4 === 0 && m <= 64) ||
+    (kernel === "subgroup-matrix" && gpu.backend.hasSubgroupMatrix && k % 4 === 0);
+  const SG_INDEX = 1; // backend-webgpu GEMM_DEFAULT.sg's general 32x64-tile entry (no workgroup-count gate)
+  const gemm = (A, B, transB, kernel) => {
+    const b = gpu.backend;
+    const [m, k] = A.shape;
+    return b.scope(() => {
+      if (kernel === "auto") return transB ? b.linear(A, B) : b.matmul(A, B);
+      if (kernel === "tiled") return b.matmul(A, transB ? b.transpose(B, [1, 0]) : B);
+      const W = transB ? B : b.transpose(B, [1, 0]);
+      const key = A.dtype + ":" + m + "x" + W.shape[0] + "x" + k;
+      const prev = b.gemmTuning.get(key);
+      b.gemmTuning.set(key, kernel === "skinny" ? "skinny" : SG_INDEX);
+      try { return b.linear(A, W); } finally { if (prev === undefined) b.gemmTuning.delete(key); else b.gemmTuning.set(key, prev); }
+    });
+  };
+  const readBytes = async (t) => { const h = await gpu.toHost(t); return h.data; };
+`;
+
 interface PageResult {
   caseIndex: number;
   kernel: string;
@@ -195,7 +213,7 @@ interface Caps {
   subgroupMatrix: boolean;
 }
 
-const gemmBundle = (): string => bundleForBrowser([path.join(SRC, "gemm.ts"), path.join(SRC, "device.ts")]);
+const gemmBundle = (): string => bundleForBrowser([path.join(SRC, "facade.ts"), path.join(SRC, "device.ts")]);
 
 for (const dtype of ["f32", "f16"] as const) {
   test(`GEMM ${dtype}: every applicable kernel matches NumPy across ${SHAPES.length} shapes (both B layouts, aligned + unaligned, partial tiles)`, async (t) => {
@@ -213,23 +231,27 @@ for (const dtype of ["f32", "f16"] as const) {
       `
       const cap = await detectWebGPU({ gpu: navigator.gpu });
       if (!cap.available) throw new Error(cap.reason);
-      const device = cap.device;
+      const gpu = await createWebGpuDevice({ device: cap.device });
       const caps = cap.gemm;
       ${PAGE_CODECS}
+      ${PAGE_GEMM}
+      const dtype = ${JSON.stringify(dtype)};
       const CASES = ${JSON.stringify(cases.map((c) => ({ m: c.m, k: c.k, n: c.n, transB: c.transB, a: b64(c.a), b: b64(c.b) })))};
       const results = [];
-      if (${JSON.stringify(dtype)} === "f16" && !caps.f16) return { results, caps };
+      if (dtype === "f16" && !gpu.supports("f16")) return { results, caps };
       for (let i = 0; i < CASES.length; i++) {
         const c = CASES[i];
-        const kernels = ["auto", "tiled", "skinny", "subgroup-matrix"].filter((kk) => kk === "auto" || gemmKernelApplicable(kk, c.m, c.k, c.n, c.transB, caps));
+        const A = await up(c.a, [c.m, c.k], dtype);
+        const B = await up(c.b, c.transB ? [c.n, c.k] : [c.k, c.n], dtype);
+        const kernels = ["auto", "tiled", "skinny", "subgroup-matrix"].filter((kk) => applicable(kk, c.m, c.k, c.transB));
         for (const kernel of kernels) {
-          const opts = { transB: c.transB, kernel };
-          const out = ${JSON.stringify(dtype)} === "f32"
-            ? await runGemmWGSL(device, new Float32Array(dec(c.a)), new Float32Array(dec(c.b)), c.m, c.k, c.n, opts)
-            : await runGemmF16WGSL(device, new Uint16Array(dec(c.a)), new Uint16Array(dec(c.b)), c.m, c.k, c.n, opts);
-          const resolved = kernel;
-          results.push({ caseIndex: i, kernel, resolved, out: enc(out) });
+          const out = gemm(A, B, c.transB, kernel);
+          if (out.dtype !== dtype) throw new Error("result dtype " + out.dtype);
+          results.push({ caseIndex: i, kernel, resolved: kernel, out: enc(await readBytes(out)) });
+          gpu.dispose(out);
         }
+        gpu.dispose(A);
+        gpu.dispose(B);
       }
       return { results, caps };
       `,
@@ -267,35 +289,7 @@ test("GEMM: this adapter's subgroup-matrix support is detected (Apple/Metal: Daw
   assert.equal(caps.subgroupMatrix, true);
 });
 
-test("GEMM: f16 without shader-f16 throws instead of silently widening; bad shapes and inapplicable forced kernels throw", async (t) => {
-  const harness = await getHarness();
-  if ("unavailable" in harness) {
-    t.skip(`WebGPU not available: ${harness.reason}`);
-    return;
-  }
-  const msgs = await harness.run<string[]>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice(); // no shader-f16 requested
-    const out = [];
-    const attempt = async (f) => { try { await f(); out.push("no error"); } catch (e) { out.push(e.message); } };
-    await attempt(() => runGemmF16WGSL(device, new Uint16Array(4), new Uint16Array(4), 2, 2, 2));
-    await attempt(() => runGemmWGSL(device, new Float32Array(6), new Float32Array(4), 2, 2, 2));
-    const a = GPUTensor.fromFloat32Array(device, new Float32Array(6), [2, 3]);
-    const b = GPUTensor.fromFloat32Array(device, new Float32Array(8), [2, 4]);
-    await attempt(() => runGemm(device, a, b));
-    await attempt(() => runGemmWGSL(device, new Float32Array(4), new Float32Array(4), 2, 2, 2, { kernel: "skinny" }));
-    return out;
-    `,
-    gemmBundle(),
-  );
-  assert.match(msgs[0] as string, /shader-f16/);
-  assert.match(msgs[1] as string, /a\.length 6 !== m\*k 4/);
-  assert.match(msgs[2] as string, /inner dimensions differ/);
-  assert.match(msgs[3] as string, /not applicable/);
-});
-
-test("runGemm: GPU-resident f32 and f16 chains (A·B, then a transB Linear on the result) match NumPy", async (t) => {
+test("GEMM: GPU-resident f32 and f16 chains through the facade (matmul A·B, then linear on the result) match NumPy", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) {
     t.skip(`WebGPU not available: ${harness.reason}`);
@@ -314,20 +308,18 @@ test("runGemm: GPU-resident f32 and f16 chains (A·B, then a transB Linear on th
       `
       const cap = await detectWebGPU({ gpu: navigator.gpu });
       if (!cap.available) throw new Error(cap.reason);
-      const device = cap.device;
-      if (${JSON.stringify(dtype)} === "f16" && !cap.gemm.f16) return null;
+      const gpu = await createWebGpuDevice({ device: cap.device });
+      const dtype = ${JSON.stringify(dtype)};
+      if (dtype === "f16" && !gpu.supports("f16")) return null;
       ${PAGE_CODECS}
-      const up = (s, shape) => ${JSON.stringify(dtype)} === "f32"
-        ? GPUTensor.fromFloat32Array(device, new Float32Array(dec(s)), shape)
-        : GPUTensor.fromFloat16Bits(device, new Uint16Array(dec(s)), shape);
-      const A = up(${JSON.stringify(b64(first.a))}, [${m}, ${k}]);
-      const B = up(${JSON.stringify(b64(first.b))}, [${k}, ${n}]);
-      const W = up(${JSON.stringify(b64(weight))}, [${p}, ${n}]);
-      const AB = await runGemm(device, A, B);
-      const ABW = await runGemm(device, AB, W, { transB: true });
-      const read = (t) => ${JSON.stringify(dtype)} === "f32" ? t.toFloat32Array() : t.toUint16Array();
-      const r = { ab: enc(await read(AB)), abw: enc(await read(ABW)), dtypes: [AB.dtype, ABW.dtype], shapes: [[...AB.shape], [...ABW.shape]] };
-      for (const x of [A, B, W, AB, ABW]) x.free();
+      ${PAGE_GEMM}
+      const A = await up(${JSON.stringify(b64(first.a))}, [${m}, ${k}], dtype);
+      const B = await up(${JSON.stringify(b64(first.b))}, [${k}, ${n}], dtype);
+      const W = await up(${JSON.stringify(b64(weight))}, [${p}, ${n}], dtype);
+      const AB = gpu.backend.matmul(A, B);
+      const ABW = gpu.backend.linear(AB, W);
+      const r = { ab: enc(await readBytes(AB)), abw: enc(await readBytes(ABW)), dtypes: [AB.dtype, ABW.dtype], shapes: [[...AB.shape], [...ABW.shape]] };
+      for (const x of [A, B, W, AB, ABW]) gpu.dispose(x);
       return r;
       `,
       gemmBundle(),

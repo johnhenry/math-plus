@@ -94,8 +94,8 @@ They use a fake clock.
 
 ## Running GPU benchmarks without a browser
 
-`@johnhenry/math-plus-tensor-webgpu` reaches WebGPU from Node through Dawn (`src/dawn.ts`, the
-`webgpu` npm package), so a GPU benchmark can call `runGrid` in-process with no browser round trip
+`@johnhenry/math-plus-tensor-webgpu` reaches WebGPU from Node through Dawn (backend-webgpu's
+`getGpu`, the `webgpu` npm package), so a GPU benchmark can call `runGrid` in-process with no browser round trip
 inside the timed call — `measure-gemm-threshold.ts` does this by default. When a benchmark must run
 in a browser page over CDP, have each call time itself in the page and return `{ selfTimedMs }`
 (see `timeCell`): that value becomes the sample, so the DevTools round trip stays out of it, while
