@@ -1,10 +1,10 @@
 {
   "name": "@johnhenry/math-plus-fft",
-  "version": "0.0.0",
+  "version": "0.0.2",
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
-    "@johnhenry/math-plus-scalar-types": "jsr:@johnhenry/math-plus-scalar-types@^0.0.0",
-    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0"
+    "@johnhenry/math-plus-scalar-types": "jsr:@johnhenry/math-plus-scalar-types@^0.0.2",
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.1.2"
   }
 }

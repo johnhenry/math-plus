@@ -1,12 +1,12 @@
 {
   "name": "@johnhenry/math-plus-tensor-wasm",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
     "./native": "./src/native.ts"
   },
   "imports": {
-    "@johnhenry/math-plus-telemetry": "jsr:@johnhenry/math-plus-telemetry@^0.0.0"
+    "@johnhenry/math-plus-telemetry": "jsr:@johnhenry/math-plus-telemetry@^0.0.2"
   }
 }
