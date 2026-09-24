@@ -144,3 +144,94 @@ jobs:
       - name: interop-python conformance tests
         if: matrix.runtime == 'node'
         run: python3 -m pytest packages/interop-python/tests/ -v
+
+  # tensor-mlx's MLX suites (conformance + NumPy differential + bridge) on
+  # real Apple Silicon Metal (#145, decided in RFC 0001 §12 Q5). The Linux
+  # legs above skip every MLX test (skip-don't-fail off darwin/arm64), so this
+  # is the only CI coverage of the native path. Non-blocking to start (make
+  # it required once it has been stable); it still goes red, rather than
+  # passing silently, if any MLX test skips.
+  #
+  # MLX is obtained the way laya-js's `mlx-macos` job does it: Apple's `mlx`
+  # wheel for THIS runner's macOS (pip picks mlx-metal's macosx_15_0 build
+  # here), plus mlx-c compiled against it by laya-js's own build-mlxc.sh,
+  # loaded through $LAYA_MLXC_PATH (which @johnhenry/backend-mlx resolves
+  # before its optional platform package). NOT the published
+  # @johnhenry/backend-mlx-darwin-arm64@0.1.0 prebuilt that `npm ci`
+  # installs: that bundle carries a macOS 26+ mlx.metallib, and on this
+  # macOS 15 runner every MLX device creation failed with "could not create
+  # gpu stream: vector" (this job's first run).
+  mlx-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    continue-on-error: true
+    name: mlx (macos-15 arm64, Metal)
+    env:
+      MLX_VERSION: "0.32.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      # laya-js (same author) at a pinned commit, for its build-mlxc.sh
+      # (mlx-c d4afaec + MLX 0.32.2, the versions @johnhenry/backend-mlx 0.1.x expects).
+      - uses: actions/checkout@v4
+        with:
+          repository: johnhenry/laya-js
+          ref: d17674da0739cfb9324270f0c5e6aa366a1e319a
+          path: laya-js
+          sparse-checkout: packages/backend-mlx/scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.17
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # numpy: the differential suite's oracle (packages/tensor-mlx/scripts/numpy_oracle.py).
+      - run: pip install numpy "mlx==${MLX_VERSION}"
+
+      - name: Build mlx-c against this runner's MLX wheel
+        run: |
+          MLXC_OUT="$RUNNER_TEMP/mlxc" bash laya-js/packages/backend-mlx/scripts/build-mlxc.sh
+          echo "LAYA_MLXC_PATH=$RUNNER_TEMP/mlxc" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      # Only the two packages the MLX suites import: no Rust/WASM toolchain on
+      # this leg (the Linux legs build and test everything).
+      - name: Build (tensor-core + tensor-mlx)
+        run: npm run build -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-tensor-mlx
+
+      - name: Report the runner and the MLX bundle the tests load
+        run: |
+          uname -m; sw_vers
+          cat "$LAYA_MLXC_PATH/VERSION"; ls -la "$LAYA_MLXC_PATH"
+
+      - name: tensor-mlx tests (Node, then Bun) on Metal -- must not skip
+        run: |
+          rc=0
+          npm test -w @johnhenry/math-plus-tensor-mlx > mlx-node.log 2>&1 || rc=1
+          npm run test:bun -w @johnhenry/math-plus-tensor-mlx > mlx-bun.log 2>&1 || rc=1
+          cat mlx-node.log mlx-bun.log
+          node_pass=$(grep -E "^ℹ pass " mlx-node.log | awk '{print $3}')
+          node_skip=$(grep -E "^ℹ skipped " mlx-node.log | awk '{print $3}')
+          bun_pass=$(grep -E "^ *[0-9]+ pass" mlx-bun.log | awk '{print $1}')
+          bun_skip=$(grep -E "^ *[0-9]+ skip" mlx-bun.log | awk '{print $1}')
+          bun_rt_skip=$(grep -c "\[skip\]" mlx-bun.log || true)
+          {
+            echo "### tensor-mlx on macos-15 (Metal)"
+            echo "| runtime | pass | skipped |"
+            echo "|---|---|---|"
+            echo "| node | ${node_pass:-?} | ${node_skip:-?} |"
+            echo "| bun | ${bun_pass:-?} | ${bun_skip:-0} (+${bun_rt_skip} runtime [skip]) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "${node_skip:-1}" != "0" ] || [ -n "$bun_skip" -a "${bun_skip:-0}" != "0" ] || [ "$bun_rt_skip" != "0" ]; then
+            echo "::error::MLX suites skipped on the macOS runner (the Metal path was not exercised)"; exit 1
+          fi
+          exit $rc

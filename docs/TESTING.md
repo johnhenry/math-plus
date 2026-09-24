@@ -281,7 +281,12 @@ optional dependency, a local build, Homebrew):
   GPU and CPU MLX devices.
 - `test/bridge.test.ts` — explicit-transfer and lifetime rules; its host-view half runs everywhere.
 
-CI's Linux runners skip the MLX parts; on an Apple Silicon machine with numpy a run must show
+CI's Linux runners skip the MLX parts. The `mlx-macos` job (`macos-15`, Apple Silicon, real Metal;
+non-blocking via `continue-on-error` until it has a stability record, #145) runs all three suites under
+Node and Bun, prints the pass/skip counts to the job summary, and goes red if anything skips. It builds
+mlx-c against the runner's own `mlx` wheel with laya-js's `build-mlxc.sh` (`$LAYA_MLXC_PATH`), as
+laya-js's CI does, because the published `@johnhenry/backend-mlx-darwin-arm64@0.1.0` bundle's
+`mlx.metallib` targets macOS 26+ and fails on macOS 15 ("could not create gpu stream"). On an Apple Silicon machine with numpy a run must show
 **0 skipped** (`npm test -w @johnhenry/math-plus-tensor-mlx` and `npm run test:bun -w …`). Wrap
 runs in the `~/gpu.lock` convention on shared machines:
 
