@@ -64,7 +64,24 @@ const envNumber = (key: string): number | undefined => {
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Time one (cell, backend) pair: cooldown, warmup, then a window of at most `windowMs`. */
+/**
+ * A call may time itself and return `{ selfTimedMs }` — e.g. a GEMM run in a
+ * browser page over CDP, where the page's own `performance.now()` excludes
+ * the DevTools round trip that the caller's clock would include. That value
+ * then becomes the sample; the window bound still uses the caller's clock
+ * (which only makes the window more conservative).
+ */
+export interface SelfTimed {
+  selfTimedMs: number;
+}
+
+function selfTimedMs(result: unknown): number | undefined {
+  if (result === null || typeof result !== "object") return undefined;
+  const v = (result as Partial<SelfTimed>).selfTimedMs;
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** Time one (cell, backend) pair: cooldown, warmup, then a window of at most `windowMs`. A call returning {@link SelfTimed} supplies its own sample. */
 export async function timeCell(fn: () => unknown, opts: CellOptions = {}): Promise<CellResult> {
   const cooldownMs = opts.cooldownMs ?? (envNumber("BENCH_COOL_S") ?? 5) * 1000;
   const windowMs = opts.windowMs ?? envNumber("BENCH_WINDOW_MS") ?? 1000;
@@ -80,8 +97,8 @@ export async function timeCell(fn: () => unknown, opts: CellOptions = {}): Promi
   const start = now();
   while (samples.length < maxRuns && (samples.length < minRuns || now() - start < windowMs)) {
     const a = now();
-    await fn();
-    samples.push(now() - a);
+    const result = await fn();
+    samples.push(selfTimedMs(result) ?? now() - a);
   }
   const window = now() - start;
   samples.sort((x, y) => x - y);

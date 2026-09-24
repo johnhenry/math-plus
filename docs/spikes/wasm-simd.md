@@ -183,6 +183,10 @@ crossover got ~20x faster (e.g. 1024³ kernel time 1239 ms → 57 ms here), so t
 shader must now beat ~37 GFLOP/s + copy overhead rather than ~2 — `GEMM_ELEMENT_THRESHOLD =
 Infinity` is, if anything, more clearly right until the WGSL kernel is tiled too.
 
+(Later, 2026-09-24: the WGSL kernel was tiled, and the crossover was re-measured against this SIMD
+GEMM — [`webgpu-tiled-gemm.md`](webgpu-tiled-gemm.md#re-measured-against-the-simd-wasm-gemm-2026-09-24).
+It moved from m·n = 128² to m·n >= 192² plus a k-aware work floor.)
+
 ### Reproduction
 
 ```bash
