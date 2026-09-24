@@ -129,6 +129,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ENTRY: Record<string, string> = {
   "@johnhenry/math-plus-tensor-core": path.resolve(HERE, "../../tensor-core/src/index.ts"),
   "@johnhenry/math-plus-tensor-compile": path.resolve(HERE, "../../tensor-compile/src/index.ts"),
+  // tensor-core re-exports the canonical erf/GELU from this zero-dependency leaf.
+  "@johnhenry/math-plus-special": path.resolve(HERE, "../../special/src/index.ts"),
 };
 
 const IMPORT_FROM_RE = /^[ \t]*import\s[\s\S]*?from\s*["'][^"']+["'];?[ \t]*$/gm;

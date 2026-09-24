@@ -18,6 +18,9 @@
     "test": "npm run typecheck && node --test test/*.test.ts",
     "test:bun": "bun test ./test/"
   },
+  "dependencies": {
+    "@johnhenry/math-plus-special": "^0.0.0"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/johnhenry/math-plus.git",

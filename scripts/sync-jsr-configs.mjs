@@ -40,6 +40,7 @@ const PACKAGE_DIRS = [
   "packages/safetensors",
   "packages/scalar-types",
   "packages/signal",
+  "packages/special",
   "packages/telemetry",
   "packages/tensor-autograd",
   "packages/tensor-compile",

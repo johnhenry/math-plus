@@ -216,7 +216,7 @@ arrow keeps pointing the right way.
   same buffers (host-array entry points, pooled buffers); GPU-resident
   results are fresh buffers, so chaining them misses it.
 - `erf` and exact `gelu` lower to an f32 port of tensor-core's canonical
-  erf (`src/special.ts`, loop counts from `ERF_F32_PARAMS`): ~1e-7 absolute
+  erf (`@johnhenry/math-plus-special`, loop counts from `ERF_F32_PARAMS`): ~1e-7 absolute
   for `erf`, but `erfc`'s *relative* error in the far tail (z → 9) grows
   toward ~1e-5 because WGSL only specifies `exp` to `3 + 2·|x|` ULP.
   IR op `gelu` is exact erf-GELU since #122; `gelu_tanh` is the tanh form.

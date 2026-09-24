@@ -5,8 +5,8 @@
  * implementation, in the sibling johnhenry/math repo)?
  *
  * Since #122 tensor-compile's `erf` IS tensor-core's canonical double-precision
- * `erf` (src/special.ts, ~1e-15 relative, SciPy-verified in
- * tensor-core/test/special-oracle.test.ts) rather than its own Abramowitz &
+ * `erf` (@johnhenry/math-plus-special, ~1e-15 relative, SciPy-verified in
+^ * special/test/special-oracle.test.ts) rather than its own Abramowitz &
  * Stegun 7.1.26 copy. `SpecialFunctions.erf` is the LESS accurate side of
  * this comparison (measured max |diff| ≈ 1.4e-7 over [-6, 6], near x ≈ 0.5),
  * so the 1e-6 tolerance below is bounding @johnhenry/math's own error, and

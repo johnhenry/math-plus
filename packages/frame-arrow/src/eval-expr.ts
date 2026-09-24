@@ -19,6 +19,11 @@
  * column through an Expr is not a supported v1 operation.
  */
 import type { Table, Vector } from "apache-arrow";
+// The canonical double-precision erf (issue #122) — the same function
+// tensor-core's Tensor.erf() and tensor-compile's IR evaluator use. It lives
+// in the zero-dependency @johnhenry/math-plus-special precisely so this
+// package can use it without a static dependency on the tensor track.
+import { erf } from "@johnhenry/math-plus-special";
 import {
   AggExpr,
   ArithExpr,
@@ -36,33 +41,6 @@ import {
   type LogicalOp,
   type ScalarMathFuncName,
 } from "./expr.ts";
-
-/**
- * `erf` via Abramowitz & Stegun 7.1.26 (|error| <= 1.5e-7).
- *
- * KNOWN DIVERGENCE (issue #122): this is NOT the monorepo's canonical erf.
- * The canonical double-precision erf lives in `@johnhenry/math-plus-tensor-core`
- * (src/special.ts, ~1e-15 relative), and `tensor-compile`'s IR evaluator now
- * uses it — so `fn.erf()` here and the `tensor-compile`-IR path a `Symbolic`
- * expression would take (#38) now differ by up to ~1.5e-7. It stays a local
- * copy only because frame-arrow deliberately has no static dependency edge to
- * the tensor track (tensor-core is an optional peer, imported lazily — see
- * series.ts / test/tensor.test.ts); resolving that is a design decision
- * left open as a follow-up to #122, not something to paper over here.
- */
-function erf(x: number): number {
-  const sign = x < 0 ? -1 : 1;
-  const ax = Math.abs(x);
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
-  const t = 1 / (1 + p * ax);
-  const y = 1 - (((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t) * Math.exp(-ax * ax);
-  return sign * y;
-}
 
 /** Value-only formulas for every {@link ScalarMathFuncName} — matches `tensor-compile`'s
  * `unaryValueAndDeriv` value branch (packages/tensor-compile/src/ir.ts) so a computed column's

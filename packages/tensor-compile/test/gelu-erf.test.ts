@@ -1,10 +1,11 @@
 /**
- * Issue #122: tensor-compile's `erf` and both GELU modes come from tensor-core's
- * canonical src/special.ts — so the compiled/traced path and eager `Tensor`
+ * Issue #122: tensor-compile's `erf` and both GELU modes come from the
+ * canonical @johnhenry/math-plus-special (via tensor-core's re-export) — so the compiled/traced path and eager `Tensor`
  * must agree BIT-FOR-BIT (same scalar functions, no second approximation),
  * and the fused gradient must match the eager `Variable.gelu()` backward in
- * both modes. Accuracy against SciPy/PyTorch is tensor-core's job
- * (tensor-core/test/special-oracle.test.ts); this file guards the wiring.
+ * both modes. Accuracy against SciPy/PyTorch is checked in
+ * special/test/special-oracle.test.ts and tensor-core/test/special-oracle.test.ts;
+ * this file guards the wiring.
  */
 import assert from "node:assert/strict";
 import { makeTest } from "../../../test/harness.ts";

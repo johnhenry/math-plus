@@ -105,7 +105,7 @@ function unaryValueAndDeriv(op: UnaryOp, x: number): { value: number; deriv: num
     }
     // "gelu" is EXACT erf-GELU (Tensor.gelu()'s default since #122);
     // "gelu_tanh" is the tanh approximation (Tensor.gelu({ approximate: "tanh" })).
-    // Both value and derivative come from tensor-core's canonical src/special.ts.
+    // Both value and derivative come from the canonical @johnhenry/math-plus-special (re-exported by tensor-core).
     case "gelu":
       return { value: geluErf(x), deriv: geluDerivative(x, "none") };
     case "gelu_tanh":
@@ -208,7 +208,7 @@ function unaryValueAndDeriv(op: UnaryOp, x: number): { value: number; deriv: num
     }
     case "log1p":
       return { value: Math.log1p(x), deriv: 1 / (1 + x) };
-    // Canonical double-precision erf (tensor-core src/special.ts, #122) —
+    // Canonical double-precision erf (@johnhenry/math-plus-special, re-exported by tensor-core, #122) —
     // replaced the Abramowitz & Stegun 7.1.26 copy (~1.5e-7 absolute) that lived here.
     case "erf":
       return { value: erf(x), deriv: (2 / Math.sqrt(Math.PI)) * Math.exp(-x * x) };

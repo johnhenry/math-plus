@@ -48,7 +48,7 @@ import {
   geluErf,
   geluTanh,
   type GeluApproximate,
-} from "./special.ts";
+} from "@johnhenry/math-plus-special";
 import {
   fillFrom,
   normalSample,
@@ -85,7 +85,7 @@ export {
   ERF_F32_PARAMS,
   checkGeluApproximate,
   type GeluApproximate,
-} from "./special.ts";
+} from "@johnhenry/math-plus-special";
 
 export type Shape = readonly number[];
 export type Axis = number;
@@ -1357,7 +1357,7 @@ export class Tensor {
    * `torch.nn.functional.gelu(x, approximate=...)`:
    *
    * - `approximate: "none"` (**the default**): exact `x·Φ(x) = 0.5·x·(1 + erf(x/√2))`,
-   *   via the canonical double-precision `erf` (src/special.ts) — what BERT,
+   *   via the canonical double-precision `erf` (@johnhenry/math-plus-special) — what BERT,
    *   ModernBERT and `nn.GELU()` use.
    * - `approximate: "tanh"`: `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))` —
    *   GPT-2-style; up to ~4.7e-4 absolute away from exact GELU (at |x| ≈ 2.7).
@@ -1371,12 +1371,12 @@ export class Tensor {
     return this.#unaryFloat(approximate === "tanh" ? geluTanh : geluErf);
   }
 
-  /** Elementwise error function, via the canonical double-precision `erf` (src/special.ts, ~1e-15 relative). Float dtypes only. */
+  /** Elementwise error function, via the canonical double-precision `erf` (@johnhenry/math-plus-special, ~1e-15 relative). Float dtypes only. */
   erf(): Tensor {
     return this.#unaryFloat(erfScalar);
   }
 
-  /** Elementwise complementary error function `1 - erf(x)`, computed without cancellation in the right tail (src/special.ts). Float dtypes only. */
+  /** Elementwise complementary error function `1 - erf(x)`, computed without cancellation in the right tail (@johnhenry/math-plus-special). Float dtypes only. */
   erfc(): Tensor {
     return this.#unaryFloat(erfcScalar);
   }

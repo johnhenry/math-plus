@@ -8,6 +8,7 @@ import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Float64, Int64, Table, Utf8, vectorFromArray } from "apache-arrow";
+import { erf as canonicalErf } from "@johnhenry/math-plus-special";
 import { col, fn, Frame, SCALAR_MATH_FUNCS, type ScalarMathFuncName } from "../src/index.ts";
 
 test("fn.* elementary functions compute per-row and agree with Math.* / textbook formulas", () => {
@@ -61,14 +62,14 @@ test("fn.ln matches Math.log (spelled 'ln' to match @johnhenry/math's Symbolic F
   assert.deepEqual(result, [0, 1, Math.log(10)]);
 });
 
-test("fn.erf is within its Abramowitz & Stegun 7.1.26 error bound (a known non-canonical copy, see eval-expr.ts / #122)", () => {
-  const frame = Frame.fromArrow(new Table({ x: vectorFromArray([-1, 0, 1, 2], new Float64()) }));
+test("fn.erf IS the canonical @johnhenry/math-plus-special erf (#122: no second, A&S 7.1.26 copy)", () => {
+  const xs = [-6, -2, -1, -0.5, -1e-9, 0, 1e-9, 0.5, 1 - Number.EPSILON / 2, 1, 1 + Number.EPSILON, 2, 4.5, 6];
+  const frame = Frame.fromArrow(new Table({ x: vectorFromArray(xs, new Float64()) }));
   const result = frame.withColumns({ y: fn.erf(col("x")) }).toRows().map((r) => r.y as number);
-  // erf is odd, erf(0) = 0, and it should be within the approximation's documented error bound of the true values.
-  assert.ok(Math.abs(result[1] as number) < 1.5e-7);
-  assert.ok(Math.abs((result[0] as number) + (result[2] as number)) < 1e-6); // erf(-1) ~= -erf(1)
-  assert.ok(Math.abs((result[2] as number) - 0.8427007929) < 1.5e-7);
-  assert.ok(Math.abs((result[3] as number) - 0.9953222650) < 1.5e-7);
+  // Bit-for-bit, not within a tolerance: the column expression calls the same
+  // function (whose accuracy is SciPy-checked in @johnhenry/math-plus-special).
+  // The old A&S 7.1.26 copy differed by up to ~1.5e-7 and fails this.
+  assert.deepEqual(result, xs.map(canonicalErf));
 });
 
 test("fn.* propagates null through elementwise math, same as arithmetic combinators", () => {

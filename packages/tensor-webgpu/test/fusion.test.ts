@@ -183,7 +183,7 @@ test("fusion cross-check: cmp ops produce 0.0/1.0 matching CPU", async (t) => {
 
 /**
  * Issue #122: the WGSL erf/erfc/GELU are an f32 lowering of tensor-core's
- * canonical f64 erf (src/special.ts), so the GPU result is checked against
+ * canonical f64 erf (@johnhenry/math-plus-special), so the GPU result is checked against
  * that canonical implementation directly, over the full range the f32
  * lowering claims ([-6, 6] for erf, both tails for GELU) and at a much tighter
  * bound than the generic 1e-2 cross-check above. The bound is f32 rounding
