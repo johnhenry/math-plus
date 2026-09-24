@@ -146,11 +146,52 @@ test("fuse: works on backend views at an element offset; results are tracked by 
   assert.equal(kept.disposed, false);
   const got = (await gpu.toTensor(kept)).data as Float32Array;
   assertClose(got, (X.data as Float32Array).slice(100, 150).map((v) => 4 * v), 0, "offset view");
-  assert.throws(() => gpu.fuse(twice, [x, row2]), /share one shape/);
+  assert.throws(() => gpu.fuse(twice.add(new Traced({ kind: "input", index: 1 })), [x, b.slice(x, [0, 0], [3, 50])]), /cannot broadcast/);
   const i32 = await gpu.fromTensor(Tensor.from([1, 2], { dtype: "i32" }));
   assert.throws(() => gpu.fuse(twice, [i32]), /f32 inputs only/);
   assert.throws(() => gpu.fuse(twice, []), /at least one input/);
   for (const t of [x, row2, kept, i32]) gpu.dispose(t);
+});
+
+test("fuse/compile broadcast their inputs like tensor-compile's CPU forward (NumPy rules): trailing axes, size-1 axes, lower rank, offset views, an input the expression ignores; still ONE dispatch", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  const b = gpu.backend;
+  const fn = (x: Traced, y: Traced, z: Traced): Traced => x.mul(y).add(z).erf().select(x.gt(y), z.neg().exp());
+  const cases: [string, number[], number[], number[]][] = [
+    ["[4,5,6] · [6] + [5,1]", [4, 5, 6], [6], [5, 1]],
+    ["[4,1,6] · [1,5,1] + [4,5,6] (both sides broadcast)", [4, 1, 6], [1, 5, 1], [4, 5, 6]],
+    ["[1] · [3,7] + [7]", [1], [3, 7], [7]],
+    ["[2,3,1,5] · [3,4,1] + [1] (rank 4 against lower ranks)", [2, 3, 1, 5], [3, 4, 1], [1]],
+    ["[300,257] · [257] + [300,1] (more than one workgroup, odd sizes)", [300, 257], [257], [300, 1]],
+  ];
+  let seed = 40;
+  for (const [label, sx, sy, sz] of cases) {
+    const numel = (sh: number[]): number => sh.reduce((a, d) => a * d, 1);
+    const [X, Y, Z] = [sx, sy, sz].map((sh) => Tensor.fromTypedArray(lcg(numel(sh), seed++), sh, { dtype: "f32" }));
+    const want = compile(3, fn).forward(X!, Y!, Z!);
+    const [x, y, z] = await Promise.all([X!, Y!, Z!].map((t) => gpu.fromTensor(t)));
+    const before = b.rt.stats.dispatches;
+    const out = gpu.compile(3, fn)(x!, y!, z!);
+    assert.equal(b.rt.stats.dispatches - before, 1, `${label}: one fused dispatch`);
+    assert.deepEqual([...out.shape], [...want.shape], `${label}: broadcast shape`);
+    assertClose((await gpu.toTensor(out)).data as Float32Array, want.contiguous().data as Float32Array, 1e-5, label);
+    for (const t of [x!, y!, z!, out]) gpu.dispose(t);
+  }
+
+  // A row view at an element offset broadcast against a matrix, and an input the IR never reads
+  // (it still takes part in the broadcast, as in tensor-compile's forward).
+  const M = Tensor.fromTypedArray(lcg(5 * 6, 90), [5, 6], { dtype: "f32" });
+  const R = Tensor.fromTypedArray(lcg(4 * 6, 91), [4, 6], { dtype: "f32" });
+  const U = Tensor.fromTypedArray(lcg(3 * 1 * 1, 92), [3, 1, 1], { dtype: "f32" });
+  const [m, r, u] = await Promise.all([M, R, U].map((t) => gpu.fromTensor(t)));
+  const row2 = b.slice(r!, [2, 0], [3, 6]); // [1, 6] at offset 12
+  const expr = (a: Traced, c: Traced, _unused: Traced): Traced => a.sub(c).mul(a);
+  const want = compile(3, expr).forward(M, R.slice({ start: 2, end: 3 }), U);
+  const got = gpu.fuse(expr(Traced.input(0), Traced.input(1), Traced.input(2)), [m!, row2, u!]);
+  assert.deepEqual([...got.shape], [3, 5, 6]);
+  assert.deepEqual([...want.shape], [3, 5, 6]);
+  assertClose((await gpu.toTensor(got)).data as Float32Array, want.contiguous().data as Float32Array, 1e-6, "offset view + ignored input");
+  for (const t of [m!, r!, u!, row2, got]) gpu.dispose(t);
 });
 
 test("createWebGpuDevice({ device }) shares the device's backend with the deprecated GPUTensor API (migration path)", { skip: skip ?? false }, async () => {

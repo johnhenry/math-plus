@@ -22,11 +22,11 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../../scripts/rewrite-dts-extensions.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "npm run typecheck && node --test --test-concurrency=1 test/*.test.ts",
     "test:bun": "bun test ./test/",
-    "test:deno": "deno test -A --no-check --node-modules-dir=manual test/"
+    "test:deno": "deno test -A --node-modules-dir=manual test/"
   },
   "dependencies": {
     "@johnhenry/backend-mlx": "^0.3.0",

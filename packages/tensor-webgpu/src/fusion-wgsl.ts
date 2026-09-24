@@ -356,14 +356,39 @@ function irUsesErfHelpers(node: IRNode): boolean {
   }
 }
 
-/** Threads per workgroup of the fused kernel on backend-webgpu's runtime. */
+/** A traced expression lowered for backend-webgpu's `elementwise(expr, xs, { helpers })` hook. */
+export interface ElementwiseExpr {
+  /** One f32 WGSL expression over the inputs `x0, x1, …`. */
+  expr: string;
+  /** WGSL functions the expression calls (the erf helpers when the IR uses `erf` or exact `gelu`), else `""`. */
+  helpers: string;
+}
+
+/**
+ * The same lowering as {@link compileIRToWGSL}, as an expression for
+ * `@johnhenry/backend-webgpu`'s `elementwise` hook (0.3.1+), which is how
+ * `WebGpuDevice.fuse` runs it: the backend generates the kernel around it
+ * (NumPy broadcasting of the inputs, element offsets, dtype loads, a 2-D
+ * grid for large outputs) and compiles, caches and batches it on the one
+ * runtime. Input `i` of the IR is `x<i>`.
+ */
+export function compileIRToElementwise(node: IRNode, numInputs: number): ElementwiseExpr {
+  const expr = lower(node, (index) => {
+    if (index < 0 || index >= numInputs) throw new RangeError(`IR references input ${index}, but numInputs is ${numInputs}`);
+    return `x${index}`;
+  });
+  return { expr, helpers: irUsesErfHelpers(node) ? ERF_WGSL_FN : "" };
+}
+
+/** Threads per workgroup of the {@link compileIRToKernel} kernel. */
 export const FUSED_WORKGROUP_SIZE = 256;
 
 /**
- * The same lowering as {@link compileIRToWGSL}, packaged as a kernel for
- * `@johnhenry/backend-webgpu`'s runtime (issue #146: the fusion runs on the
- * one WebGPU runtime — its buffer pool, pipeline and bind-group caches and
- * dispatch batching). The runtime generates the header: inputs `in0..inN-1`
+ * The same lowering as {@link compileIRToWGSL}, packaged as a kernel
+ * description for `@johnhenry/backend-webgpu`'s `rt.kernel` / `rt.dispatch`
+ * (issue #146). `WebGpuDevice.fuse` no longer uses it: since backend-webgpu
+ * 0.3.1 fusion goes through {@link compileIRToElementwise} and the
+ * backend's `elementwise` hook, which broadcasts. The runtime generates the header: inputs `in0..inN-1`
  * (`array<f32>`, read-only), output `outp`, and a uniform `P` with the
  * element count `n` and each input's element offset `o<j>` (so backend
  * tensor views work). The dispatch is 1-D, possibly folded into a 2-D grid

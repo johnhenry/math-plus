@@ -29,7 +29,7 @@
     "build:wasm:scalar": "cargo build --release --target wasm32-unknown-unknown -p tensor-wasm-kernels && node scripts/copy-wasm.mjs tensor_wasm_kernels.wasm",
     "build:wasm:simd": "RUSTFLAGS=\"-C link-args=--import-memory\" cargo build --release --target wasm32-unknown-unknown -p tensor-wasm-kernels --features simd && node scripts/copy-wasm.mjs tensor_wasm_kernels_simd128.wasm",
     "build:wasm": "npm run build:wasm:scalar && npm run build:wasm:simd",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../../scripts/rewrite-dts-extensions.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "npm run typecheck && node --test test/*.test.ts",
     "test:bun": "bun test ./test/",

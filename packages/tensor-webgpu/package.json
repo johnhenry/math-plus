@@ -17,13 +17,13 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../../scripts/rewrite-dts-extensions.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "npm run typecheck && node --test --test-concurrency=1 test/*.test.ts",
     "test:bun": "bun test ./test/"
   },
   "dependencies": {
-    "@johnhenry/backend-webgpu": "^0.3.0",
+    "@johnhenry/backend-webgpu": "^0.3.1",
     "@johnhenry/math-plus-tensor-compile": "^0.1.2",
     "@johnhenry/math-plus-tensor-core": "^0.2.0",
     "@johnhenry/math-plus-tensor-cpu": "^0.2.0",

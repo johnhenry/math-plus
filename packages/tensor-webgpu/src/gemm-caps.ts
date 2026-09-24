@@ -28,6 +28,7 @@ export interface GemmCapabilities {
 export const SUBGROUP_MATRIX_FEATURE = "chromium-experimental-subgroup-matrix";
 
 const registered = new WeakMap<GPUDevice, GemmCapabilities>();
+const adapters = new WeakMap<GPUDevice, GPUAdapter>();
 
 interface SubgroupMatrixConfigLike {
   componentType: string;
@@ -62,7 +63,13 @@ export function registerGemmAdapter(device: GPUDevice, adapter: GPUAdapter): Gem
     subgroupMatrix: subgroupMatrixUsable((adapter as { info?: unknown }).info, features),
   };
   registered.set(device, caps);
+  adapters.set(device, adapter);
   return caps;
+}
+
+/** The adapter {@link registerGemmAdapter} saw for `device`, if any (bridge.ts passes it to backend-webgpu's `createWebGpuBackend({ device, adapter })`). */
+export function gemmAdapter(device: GPUDevice): GPUAdapter | undefined {
+  return adapters.get(device);
 }
 
 /**

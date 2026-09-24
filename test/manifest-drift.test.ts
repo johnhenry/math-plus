@@ -15,9 +15,12 @@ import assert from "node:assert/strict";
 import { makeTest } from "./harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 // @ts-expect-error -- plain .mjs script without type declarations (importing it does not write files)
 import { PACKAGE_DIRS, buildImports, jsrRange } from "../scripts/sync-jsr-configs.mjs";
+// @ts-expect-error -- plain .mjs script without type declarations (importing it does not rewrite files)
+import { addSelfTypes, findMissingSelfTypes, findTsSpecifiers, rewriteSpecifiers } from "../scripts/rewrite-dts-extensions.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -197,4 +200,90 @@ test("jsrRange turns npm unions into the highest single comparator and refuses w
   assert.equal(jsrRange("21.2.0"), "21.2.0");
   assert.throws(() => jsrRange(">=1.0.0 <2.0.0"), /single/);
   assert.throws(() => jsrRange("^1.0.0 || >=3"), /single/);
+});
+
+/**
+ * Issue #157: tsc rewrites `./x.ts` imports to `./x.js` in emitted JS but not
+ * in emitted `.d.ts`, so published declarations pointed at files that don't
+ * exist in `dist/` (Deno's type check fails on them). Every package's build
+ * runs scripts/rewrite-dts-extensions.mjs after tsc.
+ */
+const DTS_STEP = "tsc -p tsconfig.json && node ../../scripts/rewrite-dts-extensions.mjs";
+
+test('every npm workspace package\'s "build" runs scripts/rewrite-dts-extensions.mjs after tsc (issue #157)', () => {
+  const missing = discoverWorkspacePackages()
+    .filter((p) => {
+      const pkg = JSON.parse(readFileSync(join(ROOT, p.dir, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+      return pkg.scripts?.build !== DTS_STEP;
+    })
+    .map((p) => p.name);
+  assert.deepEqual(missing, [], `package(s) whose "build" is not "${DTS_STEP}": ${missing.join(", ")}`);
+});
+
+test("no built dist/**/*.d.ts references a relative .ts path (issue #157)", (t) => {
+  const built = discoverWorkspacePackages().filter((p) => existsSync(join(ROOT, p.dir, "dist")));
+  if (!built.length) return t.skip("no package is built (run npm run build first)");
+  const hits = built.flatMap((p) => (findTsSpecifiers(join(ROOT, p.dir, "dist")) as string[]).map((h) => h.slice(ROOT.length + 1)));
+  assert.deepEqual(hits, [], `declaration files still import .ts paths (rebuild; see scripts/rewrite-dts-extensions.mjs):\n${hits.join("\n")}`);
+});
+
+test("every built dist/**/*.js with a declaration file points Deno at it with a @ts-self-types first line (issue #157)", (t) => {
+  const built = discoverWorkspacePackages().filter((p) => existsSync(join(ROOT, p.dir, "dist")));
+  if (!built.length) return t.skip("no package is built (run npm run build first)");
+  const missing = built.flatMap((p) => (findMissingSelfTypes(join(ROOT, p.dir, "dist")) as string[]).map((f) => f.slice(ROOT.length + 1)));
+  assert.deepEqual(missing, [], `emitted JS without the @ts-self-types directive (rebuild; see scripts/rewrite-dts-extensions.mjs):\n${missing.join("\n")}`);
+});
+
+test("rewrite-dts-extensions rewrites relative .ts/.mts/.cts specifiers in every import/export form, and nothing else", () => {
+  const src = [
+    'import { a } from "./a.ts";',
+    "export * from '../b/c.ts';",
+    'export { type D } from "./d.mts";',
+    'type E = import("./e.cts").E;',
+    'import "./side-effect.ts";',
+    'import type { F } from "./f.d.ts";',
+    'import { G } from "pkg/g.ts";',
+    'import { H } from "./h.js";',
+    'const s = "./not-an-import.ts";',
+  ].join("\n");
+  const { out, n } = rewriteSpecifiers(src) as { out: string; n: number };
+  assert.equal(n, 5);
+  assert.equal(
+    out,
+    [
+      'import { a } from "./a.js";',
+      "export * from '../b/c.js';",
+      'export { type D } from "./d.mjs";',
+      'type E = import("./e.cjs").E;',
+      'import "./side-effect.js";',
+      'import type { F } from "./f.d.ts";',
+      'import { G } from "pkg/g.ts";',
+      'import { H } from "./h.js";',
+      'const s = "./not-an-import.ts";',
+    ].join("\n"),
+  );
+});
+
+test("addSelfTypes: inserts the directive once (after a #! line), shifts the source map by one line, and skips JS without declarations", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dts-self-types-"));
+  try {
+    writeFileSync(join(dir, "a.js"), "export const a = 1;\n");
+    writeFileSync(join(dir, "a.d.ts"), "export declare const a = 1;\n");
+    writeFileSync(join(dir, "a.js.map"), JSON.stringify({ version: 3, mappings: "AAAA;AACA" }));
+    writeFileSync(join(dir, "cli.js"), "#!/usr/bin/env node\nrun();\n");
+    writeFileSync(join(dir, "cli.d.ts"), "export {};\n");
+    writeFileSync(join(dir, "cli.js.map"), JSON.stringify({ version: 3, mappings: ";AAAA;AACA" }));
+    writeFileSync(join(dir, "untyped.js"), "1;\n");
+    assert.deepEqual((findMissingSelfTypes(dir) as string[]).map((f) => f.slice(dir.length + 1)).sort(), ["a.js", "cli.js"]);
+    assert.equal(addSelfTypes(join(dir, "a.js")), true);
+    assert.equal(addSelfTypes(join(dir, "a.js")), false, "idempotent");
+    assert.equal(readFileSync(join(dir, "a.js"), "utf8"), '// @ts-self-types="./a.d.ts"\nexport const a = 1;\n');
+    assert.equal(JSON.parse(readFileSync(join(dir, "a.js.map"), "utf8")).mappings, ";AAAA;AACA");
+    assert.equal(addSelfTypes(join(dir, "cli.js")), true);
+    assert.equal(readFileSync(join(dir, "cli.js"), "utf8"), '#!/usr/bin/env node\n// @ts-self-types="./cli.d.ts"\nrun();\n');
+    assert.equal(JSON.parse(readFileSync(join(dir, "cli.js.map"), "utf8")).mappings, ";;AAAA;AACA");
+    assert.deepEqual(findMissingSelfTypes(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

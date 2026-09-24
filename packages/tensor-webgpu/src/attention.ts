@@ -9,9 +9,9 @@
  *   a head-dim 32/64 fast path that skips masked key tiles, and a generic
  *   kernel up to head dim 256), with this package's f32 mask convention
  *   and its "a query row with no visible key produces 0" guarantee kept on
- *   top (the backend leaves that case undefined). On devices with less
- *   than 32 KiB of workgroup memory it is composed from matmul/softmax
- *   instead (see `FUSED_SDPA_MIN_WORKGROUP_BYTES`).
+ *   top (the backend leaves that case undefined). backend-webgpu 0.3.1
+ *   sizes the kernels to the device's `maxComputeWorkgroupStorageSize`, so
+ *   this is fused on every device, including one with the 16 KiB default.
  *
  * Shape convention (unchanged): `Q`/`K`/`V` are `(batch, seq, dim)`
  * row-major, f32; fold heads into `batch`. Every result is a GPU-resident
@@ -149,22 +149,11 @@ function checkMaskShape(op: string, shape: readonly number[], target: readonly n
 }
 
 /**
- * Workgroup memory backend-webgpu@0.3's `sdpa` kernels may need: up to
- * ~20 KiB (fast, head dim 64) and ~25 KiB (generic, head dims 32–256), and
- * 0.3 does not check the device limit. Devices below this (the WebGPU
- * default is 16 KiB; `detectWebGPU()` and `createWebGpuDevice()` raise it to
- * the adapter's maximum) take the composed path instead. The limit-aware
- * kernel choice is proposed upstream (johnhenry/laya-js#10).
- */
-const FUSED_SDPA_MIN_WORKGROUP_BYTES = 32768;
-
-/**
- * Attention on the backend: `q` `[B, Lq, D]`, `k`/`v` `[B, Lk, D]` (f32),
- * `mask` f32 broadcastable to `[B, Lq, Lk]` (nonzero = attend) or null.
- * Returns a new untracked `[B, Lq, D]` tensor (caller disposes). Query rows
- * with no visible key are 0. Fused (`sdpa`) when the device has the
- * workgroup memory for it; otherwise composed from `matmul`, `softmax` and
- * `where`, which materializes the `[B, Lq, Lk]` scores.
+ * Attention on the backend's fused `sdpa`: `q` `[B, Lq, D]`, `k`/`v`
+ * `[B, Lk, D]` (f32), `mask` f32 broadcastable to `[B, Lq, Lk]` (nonzero =
+ * attend) or null. Returns a new `[B, Lq, D]` tensor (tracked by an
+ * enclosing scope, if any; otherwise the caller disposes it). Query rows
+ * with no visible key are 0.
  */
 export function encodeAttention(
   b: WebGpuBackend,
@@ -176,30 +165,19 @@ export function encodeAttention(
 ): WebGpuTensor {
   const [batch, seqQ, dim] = q.shape as [number, number, number];
   const seqK = k.shape[1] as number;
-  const fused = (b.device.limits.maxComputeWorkgroupStorageSize ?? 16384) >= FUSED_SDPA_MIN_WORKGROUP_BYTES;
   return b.scope(() => {
     // The mask right-aligned to (batch, seqQ, seqK), as bool.
     const m3 = mask ? ([...Array<number>(3 - mask.shape.length).fill(1), ...mask.shape] as [number, number, number]) : null;
     const mask3 = mask && m3 ? b.reshape(mask, m3) : null;
     const visible = mask3 ? b.cast(mask3, "bool") : null;
-    let out: WebGpuTensor;
-    if (fused) {
-      const q4 = b.reshape(q, [batch, 1, seqQ, dim]);
-      const k4 = b.reshape(k, [batch, 1, seqK, dim]);
-      const v4 = b.reshape(v, [batch, 1, seqK, dim]);
-      const m4 = visible && m3 ? b.reshape(visible, [m3[0], 1, m3[1], m3[2]]) : null;
-      out = b.reshape(b.sdpa(q4, k4, v4, m4, scale), [batch, seqQ, dim]);
-    } else {
-      let logits = b.scale(b.matmul(q, b.transpose(k, [0, 2, 1])), scale);
-      if (visible) {
-        const ones = b.cast(b.logicalOr(visible, b.logicalNot(visible)), "f32");
-        logits = b.where(visible, logits, b.scale(ones, -1e30));
-      }
-      out = b.matmul(b.softmax(logits, -1), v);
-    }
+    const q4 = b.reshape(q, [batch, 1, seqQ, dim]);
+    const k4 = b.reshape(k, [batch, 1, seqK, dim]);
+    const v4 = b.reshape(v, [batch, 1, seqK, dim]);
+    const m4 = visible && m3 ? b.reshape(visible, [m3[0], 1, m3[1], m3[2]]) : null;
+    const out = b.reshape(b.sdpa(q4, k4, v4, m4, scale), [batch, seqQ, dim]);
     if (!mask3) return out;
-    // Rows with no visible key: the fused kernel leaves them undefined (the
-    // composed one averages V); this API promises 0. anyVisible = max|mask|
+    // Rows with no visible key: the kernel leaves them undefined; this API
+    // promises 0. anyVisible = max|mask|
     // per (batch, query) row is nonzero iff some key is visible, and its ×0
     // is a finite zero even where `out` is NaN.
     const anyVisible = b.max(b.abs(mask3), 2, true);

@@ -16,12 +16,12 @@
  * - What this package adds on top is the tensor-compile IR -> WGSL
  *   elementwise fusion (`fuse`, `compile`), running on the same runtime.
  */
-import { createWebGpuBackend, isWebGpuAvailable, type AdapterSummary, type CreateWebGpuBackendOptions, type WebGpuBackend, type WebGpuTensor } from "@johnhenry/backend-webgpu";
+import { isWebGpuAvailable, type AdapterSummary, type CreateWebGpuBackendOptions, type WebGpuBackend, type WebGpuTensor } from "@johnhenry/backend-webgpu";
 import { Traced, type IRNode } from "@johnhenry/math-plus-tensor-compile";
 import type { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { hostFromTensor, tensorFromHost } from "@johnhenry/math-plus-tensor-cpu";
 import type { DType, HostTensor } from "@johnhenry/tensor-backend";
-import { adopt, backendFor, registerBackend, SLEEP_WHILE_WAITING_DEFAULT, unregisterBackend } from "./bridge.ts";
+import { createBackend, registerBackend, unregisterBackend, lookupBackend } from "./bridge.ts";
 import { encodeFused } from "./elementwise.ts";
 
 export type { WebGpuBackend, WebGpuTensor };
@@ -30,10 +30,10 @@ export interface WebGpuDeviceOptions extends CreateWebGpuBackendOptions {
   /**
    * Use this `GPUDevice` (e.g. `detectWebGPU().device`) instead of
    * requesting one. The device's existing backend is shared if it has one
-   * (one runtime per device); subgroup-matrix GEMM is used when
-   * `detectWebGPU()`/`registerGemmAdapter()` saw its adapter. The device is
-   * never destroyed by `destroy()`. The other options are ignored when a
-   * backend already exists for the device.
+   * (one runtime per device). Subgroup-matrix GEMM is used when `adapter`
+   * is given or `detectWebGPU()`/`registerGemmAdapter()` saw the device's
+   * adapter. The device is never destroyed by `destroy()`. The other
+   * options are ignored when a backend already exists for the device.
    */
   device?: GPUDevice;
 }
@@ -46,10 +46,17 @@ export interface WebGpuDeviceOptions extends CreateWebGpuBackendOptions {
  * {@link webGpuUnavailableReason} first to skip instead.
  */
 export async function createWebGpuDevice(opts: WebGpuDeviceOptions = {}): Promise<WebGpuDevice> {
-  if (opts.device) return new WebGpuDevice(backendFor(opts.device), false);
-  const backend = await createWebGpuBackend({ sleepWhileWaiting: SLEEP_WHILE_WAITING_DEFAULT, ...opts });
+  const existing = opts.device && lookupBackend(opts.device);
+  if (existing) return new WebGpuDevice(existing, false);
+  const backend = await createBackend(opts);
+  // A concurrent call for the same device may have registered one meanwhile: share it.
+  const raced = opts.device && lookupBackend(opts.device);
+  if (raced) {
+    backend.destroy(); // releases only its (empty) pools: it does not own the device
+    return new WebGpuDevice(raced, false);
+  }
   registerBackend(backend);
-  return new WebGpuDevice(backend, true);
+  return new WebGpuDevice(backend, !opts.device);
 }
 
 /** Why a WebGPU device cannot be created in this runtime, or `null` when an adapter is available. For skipping tests and falling back. */
@@ -129,20 +136,16 @@ export class WebGpuDevice {
    * Evaluates a traced elementwise expression (an `IRNode`, or a `Traced`
    * built with `Traced.input(i)` / `compile`'s tracer) over `inputs` in ONE
    * dispatch: every op the expression chains is fused, with no intermediate
-   * GPU buffer. Inputs are f32 and all the same shape (broadcast with
-   * backend ops first; see README "Limitations"); the result is a new f32
-   * tensor of that shape, tracked by the enclosing `scope`.
+   * GPU buffer. Inputs are f32 and broadcast against each other like
+   * NumPy's (and like tensor-compile's CPU `forward`): e.g. `[B, N]` with
+   * `[N]` or `[B, 1]`. The result is a new f32 tensor of the broadcast
+   * shape, tracked by the enclosing `scope`. Runs on backend-webgpu's
+   * `elementwise` hook.
    */
   fuse(expr: IRNode | Traced, inputs: readonly WebGpuTensor[]): WebGpuTensor {
     const node = expr instanceof Traced ? expr.node : expr;
-    const shape = inputs[0]?.shape;
-    if (!shape) throw new RangeError("tensor-webgpu fuse: needs at least one input");
-    for (const x of inputs) {
-      if (x.shape.length !== shape.length || x.shape.some((d, i) => d !== shape[i])) {
-        throw new RangeError(`tensor-webgpu fuse: inputs must share one shape, got [${shape}] and [${x.shape}] (broadcast first)`);
-      }
-    }
-    return adopt(this.backend, encodeFused(this.backend, node, inputs, shape));
+    if (!inputs.length) throw new RangeError("tensor-webgpu fuse: needs at least one input");
+    return encodeFused(this.backend, node, inputs);
   }
 
   /**
