@@ -208,7 +208,7 @@ Behaviour changes in the shims:
   but does not document (`backend.rt.kernel` / `dispatch` / `acquire`,
   and the `WebGpuTensor` and `WebGpuBackend` constructors), all confined
   to `src/bridge.ts`. Documented hooks are proposed in laya-js
-  (`feat/runtime-hooks`).
+  ([johnhenry/laya-js#10](https://github.com/johnhenry/laya-js/pull/10)).
 - The deprecated shims are 2-D (GEMM) and 3-D (attention), and f32 except
   for GEMM.
 - Subgroup matrices need Dawn's experimental

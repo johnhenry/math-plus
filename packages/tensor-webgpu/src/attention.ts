@@ -154,7 +154,7 @@ function checkMaskShape(op: string, shape: readonly number[], target: readonly n
  * 0.3 does not check the device limit. Devices below this (the WebGPU
  * default is 16 KiB; `detectWebGPU()` and `createWebGpuDevice()` raise it to
  * the adapter's maximum) take the composed path instead. The limit-aware
- * kernel choice is proposed upstream (johnhenry/laya-js, feat/runtime-hooks).
+ * kernel choice is proposed upstream (johnhenry/laya-js#10).
  */
 const FUSED_SDPA_MIN_WORKGROUP_BYTES = 32768;
 

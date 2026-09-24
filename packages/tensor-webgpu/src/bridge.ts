@@ -18,7 +18,7 @@
  * write/readBytes`, the `WebGpuTensor` constructor and the `WebGpuBackend`
  * constructor. The documented replacement (`WebGpuBackend.elementwise`,
  * `empty`, `wrapBuffer`, the `adapter` option and exported runtime types)
- * is proposed in johnhenry/laya-js (feat/runtime-hooks); once released,
+ * is proposed in johnhenry/laya-js#10; once released,
  * only this file changes.
  */
 import { WebGpuBackend, WebGpuTensor, type AdapterSummary } from "@johnhenry/backend-webgpu";
@@ -42,7 +42,7 @@ const backends = new WeakMap<GPUDevice, WebGpuBackend>();
  * Opt in with `configureGPURuntime(device, { sleepWhileWaiting: true })` or
  * `createWebGpuDevice({ sleepWhileWaiting: true })` when CPU matters more
  * than latency (long waits under Bun). A threshold option is proposed
- * upstream (johnhenry/laya-js, feat/runtime-hooks).
+ * upstream (johnhenry/laya-js#10).
  */
 export const SLEEP_WHILE_WAITING_DEFAULT = false;
 

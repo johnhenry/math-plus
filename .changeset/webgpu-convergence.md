@@ -20,7 +20,7 @@ WebGPU convergence (#146, RFC 0001 §12 Q6 path (a)): `@johnhenry/backend-webgpu
 
 `detectWebGPU`, `registerGemmAdapter`, `gemmCapabilities`, `chooseGemmBackend` and the threshold constants stay supported.
 
-**Removal plan:** the deprecated surface will be removed in the first minor release after laya-js publishes the documented runtime hooks (johnhenry/laya-js `feat/runtime-hooks`: `WebGpuBackend.elementwise`, `empty`, `wrapBuffer`, the `adapter` option, a limit-aware `sdpa` and a readback-sleep threshold). It will be at least one minor release after this one.
+**Removal plan:** the deprecated surface will be removed in the first minor release after laya-js publishes the documented runtime hooks (johnhenry/laya-js#10: `WebGpuBackend.elementwise`, `empty`, `wrapBuffer`, the `adapter` option, a limit-aware `sdpa` and a readback-sleep threshold). It will be at least one minor release after this one.
 
 **Removed** (the duplicated kernels and runtime, per the canonical-implementation rule):
 - modules: `gemm-kernels.ts`, `attention-kernels.ts`, `gpu-runtime.ts`
