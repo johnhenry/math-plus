@@ -276,3 +276,42 @@ test("matmul: i64 keeps the BigInt path", () => {
   const out = a.matmul(a);
   assert.deepEqual(out.toArray(), [[7n, 10n], [15n, 22n]]);
 });
+
+test("argmax/argmin and cumsum: contiguous kernels match the strided path (every axis, NaN ties included)", () => {
+  for (const dtype of NUM_DTYPES) {
+    const x = rand(SHAPE, dtype);
+    for (const axis of [0, 1, 2, -1]) {
+      for (const op of ["argmax", "argmin", "cumsum"] as const) {
+        assertIdentical(x[op](axis), stridedTwin(x)[op](axis), `${dtype} ${op}(${axis})`);
+        assertIdentical(offsetTwin(x)[op](axis), x[op](axis), `${dtype} ${op}(${axis}) offset`);
+      }
+    }
+    assertIdentical(x.cumsum(), stridedTwin(x).cumsum(), `${dtype} cumsum()`);
+  }
+  const nan = Tensor.from([NaN, 1, 3, 2, NaN, 3, 0, 0, -1], { dtype: "f64" }).reshape([3, 3]);
+  for (const axis of [0, 1]) {
+    assertIdentical(nan.argmax(axis), stridedTwin(nan).argmax(axis), `NaN argmax(${axis})`);
+    assertIdentical(nan.argmin(axis), stridedTwin(nan).argmin(axis), `NaN argmin(${axis})`);
+  }
+  // i32 cumsum wraps on store exactly like the strided path.
+  const big = Tensor.from([2 ** 31 - 1, 1, 5], { dtype: "i32" });
+  assertIdentical(big.cumsum(0), stridedTwin(big).cumsum(0), "i32 wrap");
+});
+
+test("contiguous() of transposed, stepped and broadcast views copies the right elements (all Number dtypes + f16)", () => {
+  for (const dtype of [...NUM_DTYPES, "i8", "f16"] as DType[]) {
+    const x = dtype === "f16" ? rand(SHAPE, "f32").cast("f16") : rand(SHAPE, dtype);
+    const views: Array<[string, Tensor]> = [
+      ["permute", x.permute([2, 0, 1])],
+      ["stepped", x.slice({ start: 2, end: 0, step: -1 }, null, { step: 3 })],
+      ["broadcast", x.select(1, 2).unsqueeze(1).broadcastTo([3, 4, 7])],
+      ["0-d", x.select(0, 1).select(0, 2).select(0, 3)],
+    ];
+    for (const [name, v] of views) {
+      const c = v.contiguous();
+      assert.ok(c.isContiguous && c.offset === 0, `${dtype} ${name}: packed`);
+      assert.equal(c.dtype, v.dtype);
+      assert.deepEqual(c.toArray(), v.toArray(), `${dtype} ${name}`);
+    }
+  }
+});

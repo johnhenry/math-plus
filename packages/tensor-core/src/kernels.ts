@@ -1,6 +1,10 @@
 /**
  * Flat typed-array kernels behind tensor-core's contiguous fast paths
- * (issue #120). Internal module — not re-exported from the package entry.
+ * (issue #120). Not re-exported from the package entry; device packages
+ * that store flat typed arrays (the CPU `Backend`, issue #144) import them
+ * from the `@johnhenry/math-plus-tensor-core/kernels` subpath
+ * (src/public-kernels.ts), together with the fused NN kernels in
+ * src/nn-kernels.ts.
  *
  * Contract every kernel here keeps: it produces results BIT-IDENTICAL to the
  * general strided path in `index.ts` it replaces. Same operation per element,
@@ -380,3 +384,234 @@ export function packPanel(
     for (let c = 0; c < cols; c++) dst[d + c] = src[s + c * colStride]!;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Strided / broadcasting building blocks (issue #144). Shared by tensor-core's
+// own fast paths (`contiguous()`, `argmax`/`argmin`, `cumsum`) and by device
+// packages that store flat typed arrays (the CPU `Backend` in
+// @johnhenry/math-plus-tensor-cpu), so there is one copy of each loop.
+// ---------------------------------------------------------------------------
+
+/**
+ * Row-major strides of `shape` aligned to `outShape` (right-aligned numpy
+ * broadcasting), with 0 on every axis `shape` broadcasts along (size 1, or
+ * missing on the left).
+ */
+export function alignedStrides(shape: readonly number[], outShape: readonly number[]): number[] {
+  const out = new Array<number>(outShape.length).fill(0);
+  let acc = 1;
+  for (let i = shape.length - 1; i >= 0; i--) {
+    const d = shape[i]!;
+    out[outShape.length - shape.length + i] = d === 1 ? 0 : acc;
+    acc *= d;
+  }
+  return out;
+}
+
+/**
+ * Offset of the first element of every "row" (all axes but the last, in C
+ * order) of a `shape`-shaped walk over storage laid out with `strides`,
+ * starting at `base`. Rank 0 and rank 1 give a single row at `base`.
+ */
+export function rowOffsets(shape: readonly number[], strides: readonly number[], base = 0): Float64Array {
+  const rank = shape.length;
+  let rows = 1;
+  for (let i = 0; i < rank - 1; i++) rows *= shape[i]!;
+  const offs = new Float64Array(rows);
+  if (rows === 0) return offs;
+  const idx = new Array<number>(Math.max(0, rank - 1)).fill(0);
+  let off = base;
+  for (let r = 0; r < rows; r++) {
+    offs[r] = off;
+    for (let d = rank - 2; d >= 0; d--) {
+      idx[d]!++;
+      off += strides[d]!;
+      if (idx[d]! < shape[d]!) break;
+      off -= strides[d]! * shape[d]!;
+      idx[d] = 0;
+    }
+  }
+  return offs;
+}
+
+/**
+ * Copies the strided view (`src`, `off`, `shape`, `strides`) into `dst` in C
+ * order starting at `dstOff`. A plain copy, so exact for every Number-valued
+ * dtype (including f16/bf16 bit patterns stored as Uint16Array).
+ */
+export function stridedCopy(
+  src: NumArray, off: number,
+  shape: readonly number[], strides: readonly number[],
+  dst: NumArray, dstOff = 0,
+): void {
+  const rank = shape.length;
+  if (rank === 0) {
+    dst[dstOff] = src[off]!;
+    return;
+  }
+  const n = shape[rank - 1]!;
+  if (n === 0) return;
+  const s = strides[rank - 1]!;
+  const offs = rowOffsets(shape, strides, off);
+  const sameKind = src.constructor === dst.constructor;
+  for (let r = 0; r < offs.length; r++) {
+    const o = offs[r]!, d = dstOff + r * n;
+    if (s === 1 && sameKind) dst.set(src.subarray(o, o + n), d);
+    else for (let j = 0; j < n; j++) dst[d + j] = src[o + j * s]!;
+  }
+}
+
+/** Binary op code for {@link binaryStrided}: NaN-propagating `max(a, b)`. */
+export const OP_MAXIMUM = 4;
+/** Binary op code for {@link binaryStrided}: `Math.pow(a, b)`. */
+export const OP_POW = 5;
+
+/**
+ * `o[oo+j] = A[ao + j*as] (op) B[bo + j*bs]` for `j < n` — one row of a
+ * broadcast binary op (a stride of 0 repeats an operand). Ops: OP_ADD,
+ * OP_SUB, OP_MUL, OP_DIV, OP_MAXIMUM (NaN if either side is NaN), OP_POW.
+ */
+export function binaryStrided(
+  op: number,
+  A: NumArray, ao: number, as: number,
+  B: NumArray, bo: number, bs: number,
+  O: NumArray, oo: number,
+  n: number,
+): void {
+  switch (op) {
+    case OP_ADD: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! + B[bo + j * bs]!; break;
+    case OP_SUB: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! - B[bo + j * bs]!; break;
+    case OP_MUL: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! * B[bo + j * bs]!; break;
+    case OP_DIV: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! / B[bo + j * bs]!; break;
+    case OP_MAXIMUM:
+      for (let j = 0; j < n; j++) {
+        const x = A[ao + j * as]!, y = B[bo + j * bs]!;
+        O[oo + j] = x !== x || y !== y ? NaN : x > y ? x : y;
+      }
+      break;
+    default: for (let j = 0; j < n; j++) O[oo + j] = Math.pow(A[ao + j * as]!, B[bo + j * bs]!);
+  }
+}
+
+/** Comparison code for {@link compareStrided}: both nonzero. */
+export const CMP_AND = 6;
+/** Comparison code for {@link compareStrided}: either nonzero. */
+export const CMP_OR = 7;
+
+/**
+ * `o[oo+j] = A[ao + j*as] (cmp) B[bo + j*bs] ? 1 : 0` — one row of a
+ * broadcast comparison. Codes: CMP_EQ … CMP_GTE, CMP_AND, CMP_OR
+ * (nonzero-is-true).
+ */
+export function compareStrided(
+  op: number,
+  A: NumArray, ao: number, as: number,
+  B: NumArray, bo: number, bs: number,
+  O: Uint8Array, oo: number,
+  n: number,
+): void {
+  switch (op) {
+    case CMP_EQ: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! === B[bo + j * bs]! ? 1 : 0; break;
+    case CMP_NE: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! !== B[bo + j * bs]! ? 1 : 0; break;
+    case CMP_LT: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! < B[bo + j * bs]! ? 1 : 0; break;
+    case CMP_LTE: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! <= B[bo + j * bs]! ? 1 : 0; break;
+    case CMP_GT: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! > B[bo + j * bs]! ? 1 : 0; break;
+    case CMP_GTE: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! >= B[bo + j * bs]! ? 1 : 0; break;
+    case CMP_AND: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! !== 0 && B[bo + j * bs]! !== 0 ? 1 : 0; break;
+    default: for (let j = 0; j < n; j++) O[oo + j] = A[ao + j * as]! !== 0 || B[bo + j * bs]! !== 0 ? 1 : 0;
+  }
+}
+
+/** `o[oo+j] = C[co + j*cs] ? A[ao + j*as] : B[bo + j*bs]` — one row of a broadcast select. */
+export function whereStrided(
+  C: NumArray, co: number, cs: number,
+  A: NumArray, ao: number, as: number,
+  B: NumArray, bo: number, bs: number,
+  O: NumArray, oo: number,
+  n: number,
+): void {
+  for (let j = 0; j < n; j++) O[oo + j] = C[co + j * cs] ? A[ao + j * as]! : B[bo + j * bs]!;
+}
+
+/**
+ * Index of the first maximum (`wantMax`) or minimum along the middle axis of
+ * a contiguous `[outer, dim, inner]` block (`dim >= 1`), into `o`. Same
+ * comparison semantics as {@link extremumAxis}: the running best starts at
+ * element 0 and moves only on a strict `>` (`<`), so a NaN wins only in
+ * position 0.
+ */
+export function argExtremumAxis(
+  x: NumArray, xo: number,
+  outer: number, dim: number, inner: number,
+  o: NumArray,
+  wantMax: boolean,
+): void {
+  for (let r = 0; r < outer; r++) {
+    const base = xo + r * dim * inner;
+    for (let t = 0; t < inner; t++) {
+      const lane = base + t;
+      let best = x[lane]!, bi = 0;
+      if (wantMax) {
+        for (let j = 1; j < dim; j++) {
+          const v = x[lane + j * inner]!;
+          if (v > best) { best = v; bi = j; }
+        }
+      } else {
+        for (let j = 1; j < dim; j++) {
+          const v = x[lane + j * inner]!;
+          if (v < best) { best = v; bi = j; }
+        }
+      }
+      o[r * inner + t] = bi;
+    }
+  }
+}
+
+/**
+ * Inclusive prefix sum along the middle axis of a contiguous
+ * `[outer, dim, inner]` block into the contiguous `o` (same layout). The
+ * running sum is a JS number (f64) and each partial is rounded only by the
+ * store into `o`, exactly as tensor-core's general `cumsum` path does; an
+ * Int32Array `o` therefore wraps like two's complement.
+ */
+export function cumsumAxis(
+  x: NumArray, xo: number,
+  outer: number, dim: number, inner: number,
+  o: NumArray,
+): void {
+  for (let r = 0; r < outer; r++) {
+    const base = r * dim * inner;
+    for (let t = 0; t < inner; t++) {
+      const lane = base + t;
+      let acc = 0;
+      for (let j = 0; j < dim; j++) {
+        acc += x[xo + lane + j * inner]!;
+        o[lane + j * inner] = acc;
+      }
+    }
+  }
+}
+
+/**
+ * Ascending sort of every lane along the middle axis of a contiguous
+ * `[outer, dim, inner]` block into `o` (same layout). Uses the typed-array
+ * numeric sort, so NaNs sort last. `lane` is scratch of length >= `dim` with
+ * the same element type as `x`.
+ */
+export function sortAxis(
+  x: NumArray, xo: number,
+  outer: number, dim: number, inner: number,
+  o: NumArray,
+  lane: NumArray,
+): void {
+  const buf = lane.subarray(0, dim);
+  for (let r = 0; r < outer; r++) {
+    for (let t = 0; t < inner; t++) {
+      const base = r * dim * inner + t;
+      for (let j = 0; j < dim; j++) buf[j] = x[xo + base + j * inner]!;
+      buf.sort();
+      for (let j = 0; j < dim; j++) o[base + j * inner] = buf[j]!;
+    }
+  }
+}
+

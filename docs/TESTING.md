@@ -271,6 +271,21 @@ IS tested against a live adapter; the WASM-vs-WebGPU crossover itself is a manua
 naive-kernel numbers), the same way `docs/spikes/wasm-baseline.md` records the WASM-vs-pure-JS
 numbers.
 
+## CPU reference backend tests (`@johnhenry/math-plus-tensor-cpu`)
+
+Pure TypeScript, so nothing is platform-gated:
+
+- `test/conformance.test.ts` — `@johnhenry/tensor-backend`'s shared conformance suite (the core
+  and general-numerics fixtures), once with every op native and once with the numerics ops hidden
+  so `compose.ts`'s default compositions run on this backend. f32 only: the backend widens
+  f16/bf16 on upload and reports `supports(...) === false` for them.
+- `test/differential.test.ts` — the fused transformer ops and broadcasting/reduction/dtype corners
+  vs a batch NumPy float64 oracle (`packages/tensor-cpu/scripts/numpy_oracle.py`; same
+  `$MATH_PLUS_ORACLE_PYTHON` / `python3` resolution as above, **skip-don't-fail**, so a real run
+  must show **0 skipped**).
+- `test/backend.test.ts` — lifetime, error paths, and a drop-in-compatibility check against
+  laya-js's `@johnhenry/backend-cpu@0.2.0` (a pinned devDependency).
+
 ## MLX device tests (`@johnhenry/math-plus-tensor-mlx`, experimental)
 
 Three suites, all **skip-don't-fail** off darwin/arm64 or when no `libmlxc.dylib` resolves
