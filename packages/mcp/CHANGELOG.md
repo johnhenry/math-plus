@@ -1,5 +1,13 @@
 # @johnhenry/math-plus-mcp
 
+## 0.0.4
+
+### Patch Changes
+
+- Updated dependencies [f68063d]
+  - @johnhenry/math-plus-tensor-core@0.2.0
+  - @johnhenry/math-plus-adapter-math@0.0.4
+
 ## 0.0.3
 
 ### Patch Changes

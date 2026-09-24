@@ -1,5 +1,12 @@
 # @johnhenry/math-plus-frame-parquet
 
+## 0.0.4
+
+### Patch Changes
+
+- Updated dependencies [71fa3f0]
+  - @johnhenry/math-plus-frame-arrow@0.0.4
+
 ## 0.0.3
 
 ### Patch Changes

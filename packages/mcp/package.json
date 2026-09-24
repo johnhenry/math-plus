@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-mcp",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "MCP server exposing @johnhenry/math Symbolic evaluation + guarded tensor/linalg computation as agent-callable tools (issue #45) — no arbitrary code execution, structured inputs only",
   "type": "module",
   "exports": {
@@ -24,9 +24,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.0",
-    "@johnhenry/math-plus-adapter-math": "^0.0.3",
+    "@johnhenry/math-plus-adapter-math": "^0.0.4",
     "@johnhenry/math": "^0.0.1",
-    "@johnhenry/math-plus-tensor-core": "^0.1.2"
+    "@johnhenry/math-plus-tensor-core": "^0.2.0"
   },
   "repository": {
     "type": "git",
