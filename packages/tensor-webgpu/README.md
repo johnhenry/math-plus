@@ -137,21 +137,24 @@ already has one shares it. A second backend for the same device is refused.
 ### GEMM threshold
 
 `chooseGemmBackend(m, n, k?)` returns `"webgpu"` when the output has at
-least `GEMM_ELEMENT_THRESHOLD` = 192² elements **and** the product does at
-least `GEMM_WORK_THRESHOLD` = 2²² multiply-adds; otherwise it returns
-`"wasm"`. This was measured end to end (upload, compute and readback of
-host arrays) against tensor-wasm's SIMD128 GEMM on an Apple M2.
+least `GEMM_ELEMENT_THRESHOLD` = 256² elements **and** the product does at
+least `GEMM_WORK_THRESHOLD` = 2²⁴ multiply-adds; otherwise it returns
+`"wasm"`. It prices a host-array call end to end (upload, `matmul` or
+`linear`, readback) against tensor-wasm's SIMD128 GEMM, on an Apple M2.
 
-It was re-measured under Dawn on backend-webgpu's GEMM for 0.2.0 (see
-[`docs/spikes/webgpu-tiled-gemm.md`](../../docs/spikes/webgpu-tiled-gemm.md)).
-The rule still sends no measured shape to WebGPU that runs slower there.
-The new path also wins some shapes the rule leaves on WASM (large k on
-small outputs). The rule is unchanged because headless Chrome was not
-re-measured, and it deliberately follows the more conservative browser
-crossover.
+For 0.3.0 it was re-measured on 43 shapes in three environments: Dawn,
+headless Chrome, and a real, visible Chromium without subgroup matrices
+(see [`docs/spikes/webgpu-tiled-gemm.md`](../../docs/spikes/webgpu-tiled-gemm.md#re-measured-in-three-environments-tensor-webgpu-030-2026-09-24)).
+Dawn wins from 160³, but both browsers lose at 192³, and the visible
+browser also loses a few shapes the previous rule (`m·n >= 192²` and
+`m·n·k >= 2²²`) sent to WebGPU. The new rule sends no measured shape to a
+slower WebGPU in any of the three. It leaves some wins on WASM, such as
+Dawn's from 160³ and large-k products like 192x4096x192.
 
-This is one machine's number, and it ignores residency. Re-run
-`scripts/measure-gemm-threshold.ts` on your own hardware.
+This is one machine's number, and it ignores residency: operands already
+on the GPU make WebGPU cheaper at every size. Re-run
+`scripts/measure-gemm-threshold.ts` (Dawn or headless Chrome) and
+`scripts/gemm-threshold-page/serve.ts` (any browser) on your own hardware.
 
 ## Removed in 0.3.0
 

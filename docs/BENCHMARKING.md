@@ -87,7 +87,8 @@ They use a fake clock.
   Treat it as a lower bound for that machine only. Re-run it with this method on real GPUs (Apple
   M-series, a discrete NVIDIA/AMD card) before using it to set `tensor-webgpu` thresholds.
   `packages/tensor-webgpu/scripts/measure-gemm-threshold.ts` now uses `runGrid`; its 2026-09-24
-  re-measurement is in `docs/spikes/webgpu-tiled-gemm.md`.
+  re-measurements (the latest in Dawn, headless Chrome and a visible browser) are in
+  `docs/spikes/webgpu-tiled-gemm.md`.
 - `docs/spikes/wasm-baseline.md` and `docs/spikes/wasm-simd.md` are CPU-bound, short, and
   single-backend-per-run. Throttling affects them less, but a re-measurement should still use the
   helper.
@@ -99,4 +100,7 @@ They use a fake clock.
 inside the timed call — `measure-gemm-threshold.ts` does this by default. When a benchmark must run
 in a browser page over CDP, have each call time itself in the page and return `{ selfTimedMs }`
 (see `timeCell`): that value becomes the sample, so the DevTools round trip stays out of it, while
-the window bound still uses the caller's clock.
+the window bound still uses the caller's clock. For a real, visible browser, run the whole grid in
+the page instead (`packages/tensor-webgpu/scripts/gemm-threshold-page/`: `runGrid` bundled for
+the browser, served cross-origin isolated so `performance.now()` has 5 µs rather than 100 µs
+resolution), and read the rows back from the page.
