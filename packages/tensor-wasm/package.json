@@ -22,8 +22,8 @@
     "@johnhenry/math-plus-telemetry": "^0.0.2"
   },
   "devDependencies": {
-    "@johnhenry/math-plus-adapter-math": "^0.0.2",
-    "@johnhenry/math-plus-tensor-core": "^0.1.1"
+    "@johnhenry/math-plus-adapter-math": "^0.0.3",
+    "@johnhenry/math-plus-tensor-core": "^0.1.2"
   },
   "scripts": {
     "build:wasm:scalar": "cargo build --release --target wasm32-unknown-unknown -p tensor-wasm-kernels && node scripts/copy-wasm.mjs tensor_wasm_kernels.wasm",

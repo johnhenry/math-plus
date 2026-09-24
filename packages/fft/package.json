@@ -20,10 +20,10 @@
   },
   "dependencies": {
     "@johnhenry/math-plus-scalar-types": "^0.0.2",
-    "@johnhenry/math-plus-tensor-core": "^0.1.1"
+    "@johnhenry/math-plus-tensor-core": "^0.1.2"
   },
   "devDependencies": {
-    "@johnhenry/math-plus-adapter-math": "^0.0.2",
+    "@johnhenry/math-plus-adapter-math": "^0.0.3",
     "@johnhenry/math": "^0.0.1"
   },
   "repository": {
