@@ -106,7 +106,7 @@ Consolidated from the source conversation's two explicit "non-goals" lists plus 
 3. No object-dtype / generic boxed-object tensors. No `Tensor<BigNumber>` or generic `Tensor<T>` — a future `DecimalTensor` would need its own fixed-width storage family. Boxed mallory-math scalars (`ComplexNumber`/`Rational`/`Decimal`) appear only at tensor API edges (`at()`/`item()`/constructors), never in storage or kernels.
 4. No Python pickle compatibility (unsafe, ecosystem-specific).
 5. No implicit CPU↔GPU or JS↔WASM copying — device transfer is explicit and async-visible (`await x.to("webgpu")`).
-6. No magic lazy execution — eager is default, compilation/fusion is opt-in.
+6. No magic lazy execution — results are eager-observable (errors surface at the call site; a device may evaluate lazily internally, per RFC 0001 §12), and compilation/fusion is opt-in.
 7. No in-place autograd mutation until versioning/saved-tensor rules are solid.
 8. No arbitrary user-defined WASM kernels in the trusted process without a validated ABI, quotas, and differential tests.
 9. No nested-array storage in kernels (fine at input/output edges only).
