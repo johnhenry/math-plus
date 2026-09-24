@@ -69,34 +69,34 @@ jobs:
       # withCompute oracle tests (test/half-compute.test.ts). safetensors:
       # the reference reader/writer @johnhenry/math-plus-safetensors' oracle
       # tests compare against (they skipped in CI without it).
-      - run: pip install numpy pyarrow pandas ml_dtypes safetensors
+      # scipy: @johnhenry/math-plus-signal's scipy.signal oracle and
+      # tensor-core's scipy.special erf/GELU oracle (26 tests skipped in CI
+      # without it). torch (CPU-only wheel, the small one): the PyTorch
+      # parity oracles in tensor-autograd and safetensors (55 skipped).
+      - run: |
+          pip install numpy pyarrow pandas ml_dtypes safetensors scipy
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Verify the oracles are importable (differential/round-trip tests must not skip)
-        run: python3 -c "import numpy, pyarrow, pandas, ml_dtypes, safetensors.numpy; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__, 'pandas', pandas.__version__, 'ml_dtypes', ml_dtypes.__version__, 'safetensors', safetensors.__version__)"
+        run: python3 -c "import numpy, pyarrow, pandas, ml_dtypes, safetensors.numpy, scipy.signal, scipy.special, torch; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__, 'pandas', pandas.__version__, 'ml_dtypes', ml_dtypes.__version__, 'safetensors', safetensors.__version__, 'scipy', scipy.__version__, 'torch', torch.__version__)"
 
-      # Headless-WebGPU oracle for @johnhenry/math-plus-tensor-webgpu's GPU-correctness
-      # tests (docs/TESTING.md "Headless WebGPU oracle"). Chrome-for-Testing
-      # (not the runner image's preinstalled browser) for a pinned, reliable
-      # version; Xvfb because headless WebGPU needs a real (virtual) display,
-      # not `--headless=new` alone — same reasoning as ~/.local/bin/gl-report
-      # on the trycooy dev machine. `--enable-unsafe-swiftshader` (in
-      # test/helpers.ts's Chrome flags) is meant to unblock Dawn's software
-      # adapter on a GPU-less runner like this one, verified locally by
-      # forcing the same flag combination on a machine WITH a real GPU
-      # (docs/spikes/webgpu-baseline.md) — not yet confirmed on an actual
-      # GitHub Actions runner. If these tests skip here instead of running,
-      # check the first CI run's log for the actual `requestAdapter()`
-      # failure reason before assuming the package itself is broken.
-      - name: Set up Chrome for headless WebGPU tests (@johnhenry/math-plus-tensor-webgpu)
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
+      # Real WebGPU for @johnhenry/math-plus-tensor-webgpu's GPU-correctness
+      # tests: Dawn in-process (the `webgpu` npm package, test/helpers.ts's
+      # `dawn` harness) over Mesa's lavapipe software Vulkan. The runner has
+      # no GPU; with lavapipe installed, Dawn's plain requestAdapter()
+      # returns the llvmpipe CPU adapter and every WebGPU test runs (no
+      # subgroup matrices there, so the one Apple-only kernel test skips).
+      # This replaced the headless-Chrome + Xvfb + SwiftShader setup, which
+      # never worked on these runners: Chrome never exposed its CDP endpoint,
+      # so all 33 WebGPU tests skipped. MATH_PLUS_WEBGPU_HARNESS=dawn (set on
+      # the test steps) keeps the harness from spending three Chrome launch
+      # timeouts looking for a browser that isn't installed.
+      - name: Install software Vulkan (lavapipe) for Dawn
+        run: sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools && (vulkaninfo --summary || true)
 
-      - name: Install Xvfb
-        run: sudo apt-get install -y xvfb
-
+      # Both legs: the node leg's write-buffer test spawns `bun` for its
+      # Bun-only repro (it skipped here with "no `bun` on PATH").
       - name: Set up Bun
-        if: matrix.runtime == 'bun'
         uses: oven-sh/setup-bun@v2
         with:
           # Pinned to the version the harness was verified against (1.2.17
@@ -114,7 +114,14 @@ jobs:
 
       - name: Unit + differential tests
         if: matrix.runtime == 'node'
-        run: npm test
+        env:
+          MATH_PLUS_WEBGPU_HARNESS: dawn
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
+          echo "### Skipped tests (node)" >> "$GITHUB_STEP_SUMMARY"
+          echo "total: $(grep -c '^﹣' test.log || true)" >> "$GITHUB_STEP_SUMMARY"
+          grep '^﹣' test.log | sed -E 's/.*# //' | sort | uniq -c | sort -rn | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
 
       # Fails on any failing test AND on any suite where Bun ran fewer files
       # than exist (the multi-file bug's signature). Runtime `t.skip()`s are
@@ -122,6 +129,8 @@ jobs:
       # 1.2 cannot mark a running test skipped.
       - name: Unit + differential tests (Bun)
         if: matrix.runtime == 'bun'
+        env:
+          MATH_PLUS_WEBGPU_HARNESS: dawn
         run: |
           npm run typecheck --workspaces --if-present
           npm run test:bun

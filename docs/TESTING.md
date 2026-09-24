@@ -206,10 +206,6 @@ nix-shell -p "python3.withPackages(ps: [ps.pyarrow ps.pandas ps.numpy ps.pytest]
 
 ## Headless WebGPU oracle (`@johnhenry/math-plus-tensor-webgpu`)
 
-> A **Dawn/Node test path** is being added by the tensor-webgpu tiled-GEMM PR (issue #127, item 4).
-> It runs these tests against WebGPU from Node directly, with no Chrome or Xvfb. That PR owns the
-> path and its documentation. The Chrome harness below is the current path until it lands.
-
 Same "oracle unavailable -> skip, never fail" convention as the NumPy/pyarrow oracles above, but
 the oracle is a live `GPUAdapter` reached over the Chrome DevTools Protocol instead of a Python
 subprocess — `packages/tensor-webgpu/test/helpers.ts` launches headless Chrome under Xvfb (mirroring
@@ -227,8 +223,15 @@ result. Individual tests call `getHarness()` and `t.skip(reason)` when unavailab
   kernel is exercised where the adapter supports it.
 - `chrome` — the headless-Chrome-over-CDP harness described below (Linux: Xvfb; macOS:
   `--headless=new --use-angle=metal`, no display needed).
-- unset / `auto` — Dawn first, Chrome if Dawn has no adapter (e.g. a GPU-less CI runner, where
-  Chrome's SwiftShader path is the one that works).
+- unset / `auto` — Dawn first, Chrome if Dawn has no adapter.
+
+**On a GPU-less Linux machine (CI)**, install Mesa's lavapipe software Vulkan driver
+(`apt-get install mesa-vulkan-drivers libvulkan1`): Dawn's plain `requestAdapter()` then returns the
+`llvmpipe` CPU adapter and every WebGPU test runs, slowly but for real. CI does exactly this with
+`MATH_PLUS_WEBGPU_HARNESS=dawn`; the only WebGPU test that skips there is the Apple-only
+subgroup-matrix kernel (lavapipe has no f32 8x8x8 subgroup matrices). CI does not install Chrome:
+headless Chrome under Xvfb with `--enable-unsafe-swiftshader` never exposed its CDP endpoint on
+GitHub's runners, so before the lavapipe switch all 33 WebGPU tests skipped there.
 
 GEMM correctness (`test/gemm.test.ts`) additionally uses a NumPy float64 oracle
 (`packages/tensor-webgpu/scripts/gemm_oracle.py`, same `$MATH_PLUS_ORACLE_PYTHON` / `python3`
