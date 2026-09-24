@@ -15,6 +15,9 @@ cases on f16-rounded inputs; the harness compares those against this f32
 reference with an f16 tolerance). `cast` to f16/bf16 returns the raw bit
 pattern as uint16 so the test can compare bits exactly.
 
+Comparison and logical ops return bool, arg-reductions and integer results
+int32 (the device's dtypes), so the harness can compare those exactly.
+
 This is separate from tensor-core's scripts/numpy_oracle.py on purpose:
 that one is one-op-per-process and has no layer_norm, exact-erf gelu or
 half-precision casts, which are this package's core ops.
@@ -43,6 +46,14 @@ def bf16_bits(x):
     return rounded.astype(np.uint16)
 
 
+BINARY = {
+    "add": np.add, "sub": np.subtract, "mul": np.multiply, "div": np.divide,
+    "maximum": np.maximum, "minimum": np.minimum, "pow": np.power,
+    "equal": np.equal, "not_equal": np.not_equal, "less": np.less,
+    "less_equal": np.less_equal, "greater": np.greater, "greater_equal": np.greater_equal,
+}
+
+
 def run(job):
     op = job["op"]
     a = job.get("args", {})
@@ -51,10 +62,32 @@ def run(job):
     axis = a.get("axis")
     keep = bool(a.get("keepdims", False))
 
-    if op in ("add", "sub", "mul", "div", "maximum", "minimum"):
+    if op in BINARY:
         y = np.asarray(a["scalar"], dtype=x.dtype) if "scalar" in a else xs[1]
-        r = {"add": np.add, "sub": np.subtract, "mul": np.multiply, "div": np.divide,
-             "maximum": np.maximum, "minimum": np.minimum}[op](x, y)
+        if op == "pow":
+            r = np.power(x.astype(np.float64), y.astype(np.float64))
+        else:
+            r = BINARY[op](x, y)
+    elif op in ("logical_and", "logical_or"):
+        r = getattr(np, op)(x, xs[1])
+    elif op == "logical_not":
+        r = np.logical_not(x)
+    elif op == "abs":
+        r = np.abs(x)
+    elif op in ("sqrt", "tanh"):
+        r = getattr(np, op)(x.astype(np.float64))
+    elif op == "rsqrt":
+        r = 1.0 / np.sqrt(x.astype(np.float64))
+    elif op == "sigmoid":
+        r = 1.0 / (1.0 + np.exp(-x.astype(np.float64)))
+    elif op == "erf":
+        r = _erf(x.astype(np.float64))
+    elif op in ("argmax", "argmin"):
+        r = getattr(np, op)(x, axis=axis, keepdims=keep).astype(np.int32)
+    elif op == "cumsum":
+        r = np.cumsum(x.astype(np.float64) if x.dtype.kind == "f" else x, axis=axis)
+        if r.dtype.kind in "iu":
+            r = r.astype(np.int32)
     elif op == "neg":
         r = -x
     elif op == "exp":
@@ -109,6 +142,8 @@ def run(job):
     r = np.asarray(r)
     if r.dtype.kind == "f":
         r = r.astype(np.float32)
+    elif r.dtype.kind in "iu":
+        r = r.astype(np.int32)
     np.save(job["output"], np.array(r, order="C"))  # not ascontiguousarray: it promotes 0-d to 1-d
 
 

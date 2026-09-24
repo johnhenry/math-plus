@@ -1,14 +1,15 @@
 {
   "name": "@johnhenry/math-plus-tensor-mlx",
   "version": "0.1.2",
-  "description": "EXPERIMENTAL: native Apple Silicon (MLX/Metal) arrays for Math Plus on Node and Bun, with explicit transfers to/from tensor-core Tensor — built on @johnhenry/backend-mlx (issue #125, RFC 0001)",
+  "description": "EXPERIMENTAL: native Apple Silicon (MLX/Metal) arrays for Math Plus on Node, Bun and Deno, with explicit async transfers to/from tensor-core Tensor — built on @johnhenry/backend-mlx (issue #125, RFC 0001)",
   "keywords": [
     "tensor",
     "mlx",
     "apple-silicon",
     "metal",
     "gpu",
-    "math-plus"
+    "math-plus",
+    "deno"
   ],
   "type": "module",
   "exports": {
@@ -24,13 +25,14 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "npm run typecheck && node --test --test-concurrency=1 test/*.test.ts",
-    "test:bun": "bun test ./test/"
+    "test:bun": "bun test ./test/",
+    "test:deno": "deno test -A --no-check --node-modules-dir=manual test/"
   },
   "dependencies": {
-    "@johnhenry/backend-mlx": "^0.1.0",
+    "@johnhenry/backend-mlx": "^0.3.0",
     "@johnhenry/math-plus-tensor-core": "^0.2.0",
     "@johnhenry/math-plus-tensor-cpu": "^0.1.0",
-    "@johnhenry/tensor-backend": "^0.1.0"
+    "@johnhenry/tensor-backend": "^0.2.0"
   },
   "repository": {
     "type": "git",

@@ -1,7 +1,9 @@
 /**
- * The @johnhenry/tensor-backend conformance suite (49 MLX/NumPy-generated op
- * cases, f32 + f16) run against the Backend behind `MlxDevice.backend` —
- * the contract gate RFC 0001 proposes every math-plus device package runs.
+ * The @johnhenry/tensor-backend conformance suite (MLX/NumPy-generated op
+ * cases: the core ops plus the "general numerics" ops, f32 + f16 + bf16) run
+ * against the Backend behind `MlxDevice.backend` — the contract gate RFC 0001
+ * proposes every math-plus device package runs. Optional ops go through
+ * tensor-backend's compose helpers, the same path `MlxArray` uses.
  * Skips (never fails) off darwin/arm64 or without libmlxc.
  */
 import { loadOpCases, runConformance, type TestApi } from "@johnhenry/tensor-backend/conformance";

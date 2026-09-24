@@ -443,7 +443,8 @@ go.
 - **Deno native (tensor-wasm `NativeKernels`).** It is unaffected. A Deno
   MLX path would need a `Deno.dlopen` adapter in backend-mlx, upstream
   (about 60 lines per laya-js's binding decision doc). Until then
-  tensor-mlx is excluded from JSR.
+  tensor-mlx is excluded from JSR. *(Done: backend-mlx 0.3.0 ships the loader, and
+  tensor-mlx 0.2 runs under Deno 2 and publishes to JSR; #147.)*
 
 ## 10. The prototype (#125): `@johnhenry/math-plus-tensor-mlx`
 
@@ -476,6 +477,11 @@ go.
   (`JSR_EXCLUDED_DIRS`, now checked by the manifest-drift test).
 - **Status.** Experimental. Its README lists its limitations: no
   autograd, no compile, only the contract's op set, darwin/arm64 only.
+- **Since the decision (tensor-mlx 0.2, #147).** It is on
+  `backend-mlx@^0.3.0` and `tensor-backend@^0.2.0`. `fromTensor`/`fromHost`
+  are async (Q2). `MlxArray` gained the general-numerics ops (Q7) through
+  tensor-backend's compose helpers. It runs on Deno 2 and is published to
+  JSR (Q4). There are 213 tests on Node, Bun and Deno, with 0 skipped.
 
 ## 11. Open questions for the decider
 
