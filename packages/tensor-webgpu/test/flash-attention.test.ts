@@ -67,8 +67,8 @@ interface Case {
   /** Use the adapter's max workgroup memory (fast D=64 needs it) instead of the 16 KiB default. */
   raisedLimits: boolean;
   skipMaskedTiles?: boolean;
-  /** Expected kernel (backend-webgpu: fast for head dim 32/64, generic otherwise; "none" = the composed path on a device below 32 KiB of workgroup memory). */
-  expectKernel: "fast" | "generic" | "none";
+  /** Expected kernel (backend-webgpu 0.3.1: fast for head dim 32/64 when its workgroup memory fits the device limit, generic otherwise). */
+  expectKernel: "fast" | "generic";
 }
 
 function makeCase(
@@ -263,20 +263,39 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
     }, 13),
   );
   cases.push(
-    makeCase("composed fallback D=64 (default 16 KiB limit) key padding", 3, 33, 90, 64, {
-      expectKernel: "none",
+    // backend-webgpu 0.3.1 sizes sdpa to maxComputeWorkgroupStorageSize: on the WebGPU default (16 KiB)
+    // the ~20 KiB fast D=64 kernel doesn't fit and the generic kernel's tiles shrink to fit (0.3.0 overflowed
+    // the limit, and this package composed attention from matmul/softmax on such devices instead).
+    makeCase("fused on the default 16 KiB limit: D=64 key padding (generic, tiles shrunk)", 3, 33, 90, 64, {
+      expectKernel: "generic",
       raisedLimits: false,
       mask: padding(3, 90, [90, 50, 17]),
       maskShape: [3, 1, 90],
     }, 16),
   );
   cases.push(
-    makeCase("composed fallback D=128 (default limit) causal", 2, 40, 40, 128, {
-      expectKernel: "none",
+    makeCase("fused on the default 16 KiB limit: D=128 causal (generic)", 2, 40, 40, 128, {
+      expectKernel: "generic",
       raisedLimits: false,
       mask: causal(40, 40),
       maskShape: [40, 40],
     }, 19),
+  );
+  cases.push(
+    makeCase("fused on the default 16 KiB limit: D=256 per-element mask with a fully masked row (generic)", 2, 20, 50, 256, {
+      expectKernel: "generic",
+      raisedLimits: false,
+      mask: randomMask(2, 20, 50, 77),
+      maskShape: [2, 20, 50],
+    }, 28),
+  );
+  cases.push(
+    makeCase("fused on the default 16 KiB limit: D=32 sliding window (fast)", 2, 40, 70, 32, {
+      expectKernel: "fast", // ~11 KiB: fits the default limit
+      raisedLimits: false,
+      mask: slidingWindow(40, 70, 6),
+      maskShape: [40, 70],
+    }, 31),
   );
   cases.push(makeCase("generic D=5 unmasked", 2, 9, 11, 5, { expectKernel: "generic", scale: 0.7 }, 22));
   cases.push(
@@ -292,6 +311,7 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   const got = await runOnGPU(harness, cases);
   cases.forEach((c, i) => {
     assert.equal(got[i]?.kernel, c.expectKernel, `${c.name}: kernel`);
+    if (!c.raisedLimits) assert.equal(got[i]?.limit, 16384, `${c.name}: runs on a device with the WebGPU default workgroup memory`);
     assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c.name);
   });
 });
@@ -329,6 +349,7 @@ test("runAttention: masked key tiles are actually skipped — non-finite V rows 
   const got = await runOnGPU(harness, cases);
   cases.forEach((c, i) => {
     assert.equal(got[i]?.kernel, c.expectKernel, `${c.name}: kernel`);
+    if (!c.raisedLimits) assert.equal(got[i]?.limit, 16384, `${c.name}: runs on a device with the WebGPU default workgroup memory`);
     assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c.name);
   });
 });

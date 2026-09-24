@@ -224,9 +224,11 @@ export class GPUTensor {
    * host round-trip (issue #100). It must hold the data from byte 0
    * (`shapeSize(shape) * 4` bytes for f32, `* 2` rounded up to a multiple of
    * 4 for f16) and carry at least `STORAGE | COPY_SRC`. `.free()` destroys it.
+   * f16 needs a device with `shader-f16` (throws otherwise: backend-webgpu
+   * stores f16 as f32 there).
    */
   static fromBuffer(device: GPUDevice, buffer: GPUBuffer, shape: Shape, dtype: GPUDType = "f32"): GPUTensor {
-    return new GPUTensor(device, wrapBuffer(buffer, shape, dtype), dtype, true);
+    return new GPUTensor(device, wrapBuffer(backendFor(device), buffer, shape, dtype), dtype, true);
   }
 
   /** @internal Wrap a backend-owned result (ownership moves to the `GPUTensor`). */
@@ -285,11 +287,11 @@ export class GPUTensor {
     if (this.#freed) return;
     this.#freed = true;
     const b = backendFor(this.device);
+    // A wrapped buffer (`fromBuffer`) is never pooled by the backend; this API destroys it.
+    b.dispose(this.handle);
     if (this.#external) {
       b.flush();
       this.handle.storage.buffer.destroy();
-    } else {
-      b.dispose(this.handle);
     }
   }
 }

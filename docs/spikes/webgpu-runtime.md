@@ -158,6 +158,43 @@ expected wait is over **15 ms**. `configureGPURuntime(device, { sleepWhileWaitin
 sleepThresholdMs })` overrides either default. Browsers don't busy-poll, so sleeping there would
 only add latency.
 
+### Since #146: backend-webgpu's sleep and `sleepThresholdMs: 15`
+
+Since #146 the runtime is `@johnhenry/backend-webgpu`'s, which ported this sleep with a 3 ms
+threshold. tensor-webgpu 0.2.0 turned sleeping off because 3 ms put the 2-6 ms GEMM and
+attention readbacks on the slow path. backend-webgpu 0.3.1 added the `sleepThresholdMs`
+option, and backends created by tensor-webgpu now set it to 15 ms, the pre-#146 value. Whether
+sleeping is on at all is backend-webgpu's default: on under Dawn, off for `navigator.gpu`.
+
+**Measured** (`packages/tensor-webgpu/scripts/measure-readback-sleep.ts`, 2026-09-24): Apple M2
+(Mac14,15, 8 cores, 24 GiB), macOS 27, on AC, no thermal or performance warning recorded,
+load average 7-10 (a shared machine). One Dawn backend, three settings alternated inside each
+cell with the order reversed every other cell, 5 s cooldown before every measurement, one
+warmup, windows of at most 1 s. Each call runs the op on GPU-resident inputs and awaits
+`backend.read` of the result. Median wall / process CPU per call, in ms:
+
+| cell | poll (0.2.0) | sleep > 15 ms (new) | sleep > 3 ms (backend default) |
+|---|---:|---:|---:|
+| Node: linear 1024³ | 2.21-4.93 / 1.0-2.0 | 2.36-2.43 / 0.9 | 5.25-6.04 / 1.4-2.1 |
+| Node: matmul 1024³ (tiled) | 2.90-3.97 / 1.0-1.5 | 3.77-4.51 / 1.5 | 5.34-5.37 / 1.2 |
+| Node: sdpa B16·L512·D64 | 2.64-2.72 / 1.0 | 2.08-2.91 / 0.8-1.0 | 7.20-7.58 / 1.9-2.1 |
+| Node: sdpa, ±64 window | 1.67-2.23 / 0.7-0.9 | 1.92-2.59 / 0.9 | 3.67-3.69 / 1.0 |
+| Node: linear 2048³ | 9.86-10.16 / 3.9-4.1 | 10.35-12.21 / 3.7-4.1 | 11.31-14.40 / 2.6-3.3 |
+| Node: 4 × linear 2048³ | 33.72-33.99 / 13.3-13.5 | 34.46-34.76 / **3.9-4.4** | 34.04-35.23 / 3.5-6.7 |
+| Bun: linear 1024³ | 2.50 / 2.7 | 2.44 / 3.0 | 3.67 / 2.7 |
+| Bun: matmul 1024³ (tiled) | 3.92 / 4.4 | 4.14 / 4.5 | 4.35 / 1.9 |
+| Bun: sdpa B16·L512·D64 | 2.94 / 3.1 | 2.44 / 2.7 | 3.23 / 2.8 |
+| Bun: sdpa, ±64 window | 2.14 / 2.4 | 2.61 / 2.7 | 3.57 / 2.5 |
+| Bun: linear 2048³ | 9.68 / 10.2 | 10.45 / 10.3 | 10.03 / 3.9 |
+| Bun: 4 × linear 2048³ | 33.51 / 34.6 | 34.02 / **11.0** | 34.81 / 13.1 |
+
+Node ranges span two runs; Bun is one run. Below 15 ms, "sleep > 15 ms" runs the same code as
+polling (the expected wait is under the threshold, so the runtime never sleeps). Its
+differences from "poll" in those rows go both ways and stay within the run-to-run spread of
+"poll" itself, which comes from the machine's load. The 3 ms threshold is slower on every
+2-7 ms readback (up to 2.7× on sdpa under Node). On the ~34 ms readback, sleeping cuts CPU per
+call 3.1-3.4× (Node 13.4 → 4 ms, Bun 34.6 → 11 ms) for +2-3% wall time.
+
 ## 5. The `writeBuffer` byteOffset bug
 
 `test/bun/write-buffer-offset.bun.ts` reproduces the bug. For a `Float32Array` view at byte

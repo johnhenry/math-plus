@@ -44,6 +44,6 @@ export {
 } from "./gemm.ts";
 export { registerGemmAdapter, gemmCapabilities, subgroupMatrixUsable, type GemmCapabilities } from "./gemm-caps.ts";
 export { runQKT, runSoftmax, runWeightedSum, runAttention, type AttentionOptions } from "./attention.ts";
-export { compileIRToWGSL, compileIRToKernel, type ElementwiseWGSL } from "./fusion-wgsl.ts";
+export { compileIRToWGSL, compileIRToElementwise, compileIRToKernel, type ElementwiseExpr, type ElementwiseWGSL } from "./fusion-wgsl.ts";
 export { runElementwiseWGSL } from "./elementwise.ts";
 export { configureGPURuntime, startProfiling, stopProfiling, type GPURuntimeOptions, type KernelTiming } from "./profiling.ts";

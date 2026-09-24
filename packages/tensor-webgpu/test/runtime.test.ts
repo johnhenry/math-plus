@@ -101,25 +101,74 @@ test("fused kernel: 300 dispatches over views at distinct offsets before one rea
   assert.equal(r.bad, 0);
 });
 
-test("configureGPURuntime / readback sleep: off by default (backend-webgpu's 3 ms threshold costs latency on typical readbacks); the deprecated knob sets the backend's flag", async (t) => {
+test("GPUTensor.fromBuffer: a caller's buffer is viewed without a copy (backend-webgpu's wrapBuffer), feeds ops, is never pooled, and free() destroys it", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
-  const r = await harness.run<{ defaultOn: boolean; off: boolean; on: boolean }>(
+  const r = await harness.run<{ read: number[]; gemm: number[]; pooledDelta: number; mapFailed: boolean; f16: string }>(
     `
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter.requestDevice();
     const rt = backendFor(device).rt;
-    const defaultOn = rt.sleepWhileWaiting;
-    configureGPURuntime(device, { sleepWhileWaiting: false });
-    const off = rt.sleepWhileWaiting;
-    configureGPURuntime(device, { sleepWhileWaiting: true });
-    return { defaultOn, off, on: rt.sleepWhileWaiting };
+    const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(buf, 0, new Float32Array([1, 2, 3, 4]));
+    const a = GPUTensor.fromBuffer(device, buf, [2, 2]);
+    const read = [...(await a.toFloat32Array())];
+    const id = GPUTensor.fromFloat32Array(device, new Float32Array([1, 0, 0, 1]), [2, 2]);
+    const prod = await runGemm(device, a, id);
+    const gemm = [...(await prod.toFloat32Array())];
+    const pooled0 = rt.stats.pooledBytes;
+    a.free();
+    const pooledDelta = rt.stats.pooledBytes - pooled0;
+    // Destroyed: a copy out of it is a validation error.
+    const probe = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    device.pushErrorScope("validation");
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(buf, 0, probe, 0, 16);
+    device.queue.submit([enc.finish()]);
+    const mapFailed = (await device.popErrorScope()) !== null;
+    let f16 = "ok";
+    if (!device.features.has("shader-f16")) {
+      try { GPUTensor.fromBuffer(device, buf, [4], "f16"); } catch (e) { f16 = e.message; }
+    }
+    for (const x of [id, prod]) x.free();
+    return { read, gemm, pooledDelta, mapFailed, f16 };
     `,
     bundle(),
   );
-  assert.equal(r.defaultOn, false, "default off for backends this package creates (bridge.ts SLEEP_WHILE_WAITING_DEFAULT)");
+  assert.deepEqual(r.read, [1, 2, 3, 4]);
+  assert.deepEqual(r.gemm, [1, 2, 3, 4], "the wrapped buffer feeds backend ops (A · I)");
+  assert.equal(r.pooledDelta, 0, "a caller's buffer never enters the runtime's pool");
+  assert.ok(r.mapFailed, "free() destroyed the caller's buffer");
+  assert.ok(r.f16 === "ok" || /shader-f16/.test(r.f16), r.f16);
+});
+
+test("configureGPURuntime / readback sleep: a 15 ms threshold by default (backend-webgpu's 3 ms one costs latency on typical 2–6 ms readbacks), sleeping on under Dawn and off in browsers as backend-webgpu decides; the deprecated knob sets both", async (t) => {
+  const harness = await getHarness();
+  if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
+  const r = await harness.run<{ defaults: [boolean, number][]; off: boolean; on: boolean; threshold: number }>(
+    `
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const rt = backendFor(device).rt;
+    // Both ways this package creates a backend: backendFor (sync, deprecated API) and createWebGpuDevice.
+    const gpu = await createWebGpuDevice({ device: await (await navigator.gpu.requestAdapter()).requestDevice() });
+    const defaults = [[rt.sleepWhileWaiting, rt.sleepThresholdMs], [gpu.backend.rt.sleepWhileWaiting, gpu.backend.rt.sleepThresholdMs]];
+    configureGPURuntime(device, { sleepWhileWaiting: false });
+    const off = rt.sleepWhileWaiting;
+    configureGPURuntime(device, { sleepWhileWaiting: true, sleepThresholdMs: 40 });
+    return { defaults, off, on: rt.sleepWhileWaiting, threshold: rt.sleepThresholdMs };
+    `,
+    bundle(),
+  );
+  // In the Dawn harness the page's navigator.gpu is a parameter, not globalThis.navigator.gpu, so the backend sees Dawn.
+  const sleeps = harness.kind === "dawn";
+  for (const [on, ms] of r.defaults) {
+    assert.equal(on, sleeps, "sleeping follows backend-webgpu's default (on under Dawn, off for navigator.gpu)");
+    assert.equal(ms, 15, "bridge.ts SLEEP_THRESHOLD_MS_DEFAULT");
+  }
   assert.equal(r.off, false);
   assert.equal(r.on, true);
+  assert.equal(r.threshold, 40);
 });
 
 test("timestamp profiler (deprecated startProfiling/stopProfiling): GPU time per backend kernel with counts; throws without timestamp-query", async (t) => {

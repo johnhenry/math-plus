@@ -13,7 +13,7 @@ import { makeTest } from "../../../test/harness.ts";
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Traced, type BinaryOp, type CmpOp, type UnaryOp } from "@johnhenry/math-plus-tensor-compile";
 import { ERF_F32_PARAMS, ERF_SERIES_CUTOFF } from "@johnhenry/math-plus-tensor-core";
-import { compileIRToWGSL } from "../src/fusion-wgsl.ts";
+import { compileIRToElementwise, compileIRToWGSL } from "../src/fusion-wgsl.ts";
 
 const ALL_UNARY: readonly UnaryOp[] = [
   "neg", "relu", "sigmoid", "gelu", "exp", "log", "sqrt", "sin", "cos", "tan",
@@ -120,4 +120,18 @@ test("compileIRToWGSL: the WGSL erf is lowered from tensor-core's canonical erf 
   assert.ok(code.includes(`if (ax < ${ERF_SERIES_CUTOFF}.0)`), "series/CF cutoff not taken from ERF_SERIES_CUTOFF");
   // The Abramowitz & Stegun 7.1.26 coefficients it replaced must be gone.
   assert.doesNotMatch(code, /0\.3275911|1\.061405429/);
+});
+
+test("compileIRToElementwise: the same lowering as an expression over x0, x1, … for backend-webgpu's elementwise hook, with the erf helpers only when needed; out-of-range inputs are refused", () => {
+  const traced = Traced.input(0).mul(Traced.input(2)).add(1).gelu();
+  const { expr, helpers } = compileIRToElementwise(traced.node, 3);
+  assert.match(expr, /x0/);
+  assert.match(expr, /x2/);
+  assert.doesNotMatch(expr, /input\d|\bin\d|gid/, "no buffer indexing: the backend generates the loads (and the broadcasting)");
+  assert.match(helpers, /fn math_plus_gelu/);
+  // The expression is compileIRToWGSL's, with inputs renamed.
+  const wgsl = compileIRToWGSL(traced.node, 3).code;
+  assert.ok(wgsl.includes(`output[gid.x] = ${expr.replace(/\bx(\d+)\b/g, "input$1[gid.x]")};`));
+  assert.equal(compileIRToElementwise(Traced.input(0).neg().node, 1).helpers, "");
+  assert.throws(() => compileIRToElementwise(Traced.input(1).node, 1), /references input 1/);
 });

@@ -66,13 +66,25 @@ resolves to a string explaining why, or `null`.
 
 Options are backend-webgpu's `createWebGpuBackend` options
 (`preferF16`, `powerPreference`, `subgroupMatrix`, `profiling`,
-`maxBatch`, `maxPooledBytes`, `gemm`, `gemmTuning`, `sleepWhileWaiting`),
-plus:
+`maxBatch`, `maxPooledBytes`, `gemm`, `gemmTuning`, `sleepWhileWaiting`,
+`sleepThresholdMs`), plus:
 
 - `device?: GPUDevice`. Use a device you already have, such as
   `detectWebGPU().device`. If the device already has a backend, the facade
   shares it (see [One runtime per device](#one-runtime-per-device)).
   `destroy()` never destroys a device you passed in.
+- `adapter?: GPUAdapter`. With `device`, the adapter it came from, so
+  subgroup-matrix GEMM can be detected. Not needed for a device from
+  `detectWebGPU()`, whose adapter is remembered.
+
+**Readback sleep.** Under Dawn, backend-webgpu sleeps before a readback
+instead of letting Dawn busy-poll `mapAsync` (a full core under Bun), when
+the expected wait is longer than `sleepThresholdMs`. Backends created here
+default that threshold to **15 ms** (backend-webgpu's own default is 3 ms):
+readbacks of a few milliseconds keep polling at full speed, and long waits
+use about 3× less CPU for about 2% more latency (measured in
+[`docs/spikes/webgpu-runtime.md`](../../docs/spikes/webgpu-runtime.md#since-146-backend-webgpus-sleep-and-sleepthresholdms-15)).
+Browsers don't busy-poll, so there is no sleep for `navigator.gpu`.
 
 `WebGpuDevice`:
 
@@ -103,13 +115,16 @@ dispatch. The expression is an `IRNode`, or a `Traced` built with
 `(...tensors) => tensor`.
 
 - The lowering is `compileIRToWGSL`'s (every `UnaryOp`, `BinaryOp` and
-  `CmpOp`, `select`, and the canonical f32 erf and exact GELU). It is
-  compiled, cached and batched by backend-webgpu's runtime.
-  `compileIRToKernel(node, n)` returns that kernel description.
-- Inputs must be f32 and all the same shape. Views with an element offset
-  are fine. Cast other dtypes first, and broadcast with backend ops first.
-- The result is an f32 tensor of that shape, tracked by the enclosing
-  `scope`.
+  `CmpOp`, `select`, and the canonical f32 erf and exact GELU).
+  `compileIRToElementwise(node, n)` returns it as the expression and helper
+  functions that backend-webgpu's `elementwise` hook runs. The backend
+  compiles, caches and batches the kernel on its runtime.
+- Inputs broadcast against each other with NumPy's rules, as in
+  tensor-compile's CPU `forward`: `[B, N]` with `[N]`, `[B, 1]` or `[1]`,
+  both sides at once, up to rank 8. Views with an element offset are fine.
+  Inputs must be f32; cast other dtypes first.
+- The result is an f32 tensor of the broadcast shape, tracked by the
+  enclosing `scope`.
 
 ### One runtime per device
 
@@ -176,10 +191,13 @@ Behaviour changes in the shims:
     fast kernel (head dim 32/64) always skips masked key tiles; its generic
     kernel never does.
   - Fully masked query rows still produce 0.
-  - On a device with less than 32 KiB of workgroup memory (the default
-    limit is 16 KiB), attention is composed from matmul and softmax,
-    because backend-webgpu@0.3's kernels don't check the limit.
-    `detectWebGPU()` and `createWebGpuDevice()` raise the limit.
+  - It is fused on every device. backend-webgpu 0.3.1 fits its kernels to
+    the device's workgroup-memory limit, so on the 16 KiB default head
+    dim 64 uses the generic kernel with smaller tiles.
+    `detectWebGPU()` and `createWebGpuDevice()` raise the limit to the
+    adapter's, which lets head dim 64 use the fast kernel. (0.2.0 composed
+    attention from matmul and softmax below 32 KiB, because
+    backend-webgpu 0.3.0 did not check the limit.)
 - **Removed** (they were the duplicated kernels and runtime):
   - GEMM: `planGemm`, `selectGemmKernel`, `GEMM_CONFIG`, and the WGSL
     generators `tiledGemmWGSL`, `skinnyGemmWGSL`, `subgroupMatrixGemmWGSL`.
@@ -188,13 +206,12 @@ Behaviour changes in the shims:
   - Runtime helpers: `acquireBuffer`, `releaseBuffer`, `dispatchKernel`,
     `getKernel`, `parseWGSLBindings`, `writeBytes`, `readBackBytes`, …
   - `gpuRuntimeStats`: use `backend.rt.stats`.
-  - `sleepThresholdMs`.
-- **Readback sleep is off by default.** backend-webgpu@0.3 sleeps before
-  any readback expected to take over 3 ms, instead of letting Dawn
-  busy-poll. On this package's 2–6 ms GEMM and attention readbacks that
-  measured 15–60% more latency, so backends created here turn it off. Turn
-  it on with `configureGPURuntime(device, { sleepWhileWaiting: true })` or
-  `createWebGpuDevice({ sleepWhileWaiting: true })`.
+- **Readback sleep** follows backend-webgpu's default (on under Dawn) with
+  a 15 ms threshold (see [Readback sleep](#api)). 0.2.0 turned it off,
+  because backend-webgpu 0.3.0's fixed 3 ms threshold slowed 2–6 ms
+  readbacks by 15–60%. `configureGPURuntime(device, { sleepWhileWaiting,
+  sleepThresholdMs })` sets either (`sleepThresholdMs` was removed in 0.2.0
+  and is back).
 
 ## Limitations
 
@@ -203,12 +220,19 @@ Behaviour changes in the shims:
   array API for the device packages is future work. It waits on tensor-mlx
   moving to the async-upload contract (tensor-backend 0.2), because
   number operands need a synchronous constant op.
-- **Fusion does not broadcast**, and it is f32-only.
-- Fusion and the shims use members that backend-webgpu@0.3 makes public
-  but does not document (`backend.rt.kernel` / `dispatch` / `acquire`,
-  and the `WebGpuTensor` and `WebGpuBackend` constructors), all confined
-  to `src/bridge.ts`. Documented hooks are proposed in laya-js
-  ([johnhenry/laya-js#10](https://github.com/johnhenry/laya-js/pull/10)).
+- **Fusion is f32-only**, like tensor-compile's forward pass. Cast other
+  dtypes first. (backend-webgpu's `elementwise` hook could load f16, bf16,
+  i32 and bool inputs as f32, but no test covers that yet.) It lowers the
+  forward value only, not gradients.
+- `src/bridge.ts` uses backend-webgpu 0.3.1's documented hooks
+  (`createWebGpuBackend({ device, adapter })`, `empty`, `wrapBuffer`,
+  `elementwise`, `Runtime`), with one exception. `backendFor(device)`
+  must be synchronous for the deprecated API, so it calls the
+  `WebGpuBackend` constructor, which is typed as public but not
+  documented. That call goes away with the deprecated surface.
+- `GPUTensor.fromBuffer(device, buffer, shape, "f16")` needs a device with
+  `shader-f16`. Without it, backend-webgpu stores f16 as f32, so a buffer
+  of binary16 bits cannot be wrapped. `fromFloat16Bits` still works.
 - The deprecated shims are 2-D (GEMM) and 3-D (attention), and f32 except
   for GEMM.
 - Subgroup matrices need Dawn's experimental
@@ -223,7 +247,7 @@ Behaviour changes in the shims:
 
 ## Tests
 
-`npm test` and `npm run test:bun` run the same 62 tests under Node and
+`npm test` and `npm run test:bun` run the same 65 tests under Node and
 Bun. GPU tests run on a real adapter, either Dawn in-process or headless
 Chrome over CDP (`$MATH_PLUS_WEBGPU_HARNESS=dawn|chrome`; the default is
 Dawn, falling back to Chrome). They skip, never fail, where neither exists.
@@ -234,13 +258,15 @@ Dawn, falling back to Chrome). They skip, never fail, where neither exists.
   - transfers of every dtype, including views
   - refusal of implicit conversions
   - backend ops against tensor-core on the CPU
-  - `fuse`/`compile` against tensor-compile's CPU `forward`
+  - `fuse`/`compile` against tensor-compile's CPU `forward`, including
+    broadcasting (lower ranks, size-1 axes on both sides, offset views, an
+    input the expression ignores)
   - scope tracking
   - interop with `GPUTensor`
 - **GEMM**: every kernel family × {f32, f16} × both B layouts, against a
   NumPy oracle (`scripts/gemm_oracle.py`).
-- **Fused attention**: every mask shape, including fully masked rows and
-  the composed fallback, against a NumPy oracle
+- **Fused attention**: every mask shape, including fully masked rows, on
+  raised and default (16 KiB) workgroup-memory limits, against a NumPy oracle
   (`scripts/attention_oracle.py`).
 - **Fusion cross-checks** against the CPU interpreter, including the fuzzer
   (issue #58) and an `Interval` precision oracle (issue #36).
@@ -248,7 +274,9 @@ Dawn, falling back to Chrome). They skip, never fail, where neither exists.
   - one backend per device
   - cache hits through the shims
   - the fused kernel's per-dispatch uniforms
-  - the deprecated runtime knobs
+  - the readback-sleep defaults and the deprecated runtime knobs
+  - `GPUTensor.fromBuffer` over a caller's buffer (never pooled; `free()`
+    destroys it)
 - The Bun **`writeBuffer` byteOffset** repro (`test/bun/`).
 
 ## Provenance

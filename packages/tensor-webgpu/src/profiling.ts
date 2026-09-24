@@ -3,7 +3,8 @@
  * window (issue #146). They act on the device's `@johnhenry/backend-webgpu`
  * runtime (bridge.ts `backendFor`); new code uses
  * `createWebGpuDevice().backend.rt` directly (`startProfiling()`,
- * `stopProfiling()`, `sleepWhileWaiting`, `stats`, `trim()`).
+ * `stopProfiling()`, `sleepWhileWaiting`, `sleepThresholdMs`, `stats`,
+ * `trim()`).
  */
 import { backendFor } from "./bridge.ts";
 
@@ -15,20 +16,23 @@ export interface KernelTiming {
   count: number;
 }
 
-/** @deprecated Use `backend.rt.sleepWhileWaiting` on `createWebGpuDevice().backend`. */
+/** @deprecated Use `backend.rt.sleepWhileWaiting` / `sleepThresholdMs` on `createWebGpuDevice().backend`. */
 export interface GPURuntimeOptions {
-  /** Sleep for most of the expected GPU time before a readback instead of letting Dawn busy-poll `mapAsync`. Default: off (see bridge.ts `SLEEP_WHILE_WAITING_DEFAULT`; before #146 it was on under Dawn for waits over 15 ms). */
+  /** Sleep for most of the expected GPU time before a readback instead of letting Dawn busy-poll `mapAsync`. Default: backend-webgpu's (on under Dawn, off for navigator.gpu). */
   sleepWhileWaiting?: boolean;
+  /** Only sleep when the expected wait exceeds this many milliseconds. Default 15 (bridge.ts `SLEEP_THRESHOLD_MS_DEFAULT`; backend-webgpu's own default is 3). */
+  sleepThresholdMs?: number;
 }
 
 /**
  * Set runtime options for `device`'s backend.
  *
- * @deprecated See the module doc. (`sleepThresholdMs` is gone: backend-webgpu
- * sleeps only for expected waits over 3 ms.)
+ * @deprecated See the module doc.
  */
 export function configureGPURuntime(device: GPUDevice, options: GPURuntimeOptions): void {
-  if (options.sleepWhileWaiting !== undefined) backendFor(device).rt.sleepWhileWaiting = options.sleepWhileWaiting;
+  const rt = backendFor(device).rt;
+  if (options.sleepWhileWaiting !== undefined) rt.sleepWhileWaiting = options.sleepWhileWaiting;
+  if (options.sleepThresholdMs !== undefined) rt.sleepThresholdMs = options.sleepThresholdMs;
 }
 
 /**

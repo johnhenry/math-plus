@@ -1,41 +1,32 @@
 /**
  * Dispatch side of the IR -> WGSL fusion (issue #12 / #11's IR), on
- * `@johnhenry/backend-webgpu`'s runtime since issue #146: the fused shader
- * from fusion-wgsl.ts's `compileIRToKernel` is compiled, cached and
- * batched by the same runtime that runs every other op on the device, so a
- * fused expression can consume and produce backend tensors without a host
- * round-trip (see `WebGpuDevice.fuse` in facade.ts).
+ * `@johnhenry/backend-webgpu`'s runtime since issue #146: the traced
+ * expression is lowered by fusion-wgsl.ts's `compileIRToElementwise` and
+ * run by the backend's `elementwise` hook (0.3.1), so it is compiled,
+ * cached and batched by the same runtime that runs every other op on the
+ * device, broadcasts its inputs like every other elementwise op, and
+ * consumes and produces backend tensors without a host round trip (see
+ * `WebGpuDevice.fuse` in facade.ts).
  */
 import type { WebGpuBackend, WebGpuTensor } from "@johnhenry/backend-webgpu";
 import type { IRNode } from "@johnhenry/math-plus-tensor-compile";
-import { allocate, backendFor, dispatchCustom, flatGrid, uploadSync } from "./bridge.ts";
-import { compileIRToKernel, FUSED_WORKGROUP_SIZE } from "./fusion-wgsl.ts";
-
-function numel(shape: readonly number[]): number {
-  return shape.reduce((a, b) => a * b, 1);
-}
+import { backendFor, readRaw, uploadSync } from "./bridge.ts";
+import { compileIRToElementwise } from "./fusion-wgsl.ts";
 
 /**
- * One fused dispatch of `node` over `inputs` (f32, all with the same
- * element count; views with an element offset are fine). Returns a new
- * untracked f32 tensor of `shape` (caller disposes).
+ * One fused dispatch of `node` over `inputs` (f32; shapes broadcast
+ * NumPy-style against each other; views with an element offset are fine).
+ * Returns a new f32 tensor of the broadcast shape, tracked by the enclosing
+ * backend `scope` (otherwise the caller disposes it).
  */
-export function encodeFused(b: WebGpuBackend, node: IRNode, inputs: readonly WebGpuTensor[], shape: readonly number[]): WebGpuTensor {
-  const n = numel(shape);
+export function encodeFused(b: WebGpuBackend, node: IRNode, inputs: readonly WebGpuTensor[]): WebGpuTensor {
+  if (!inputs.length) throw new RangeError("fused elementwise: needs at least one input");
   for (const x of inputs) {
     if (x.dtype !== "f32") throw new TypeError(`fused elementwise: f32 inputs only (got ${x.dtype}); cast first`);
     if (x.disposed) throw new Error("fused elementwise: input used after dispose");
-    if (numel(x.shape) !== n) {
-      throw new RangeError(`fused elementwise: every input needs ${n} elements (the output's), got [${x.shape}] (broadcast first)`);
-    }
   }
-  const out = allocate(b, shape, "f32");
-  if (n === 0) return out;
-  const src = compileIRToKernel(node, inputs.length);
-  const params: Record<string, number> = { n };
-  inputs.forEach((x, j) => (params[`o${j}`] = x.offset));
-  dispatchCustom(b, src.key, () => src, [...inputs.map((x) => x.storage.buffer), out.storage.buffer], params, flatGrid(Math.ceil(n / FUSED_WORKGROUP_SIZE)));
-  return out;
+  const { expr, helpers } = compileIRToElementwise(node, inputs.length);
+  return b.elementwise(expr, inputs, { helpers });
 }
 
 /**
@@ -47,7 +38,8 @@ export function encodeFused(b: WebGpuBackend, node: IRNode, inputs: readonly Web
  *
  * @deprecated Kept through the deprecation window. New code:
  * `createWebGpuDevice()` and `gpu.fuse(node, tensors)` /
- * `gpu.compile(n, fn)`, which keep inputs and result on the GPU.
+ * `gpu.compile(n, fn)`, which keep inputs and result on the GPU and
+ * broadcast.
  */
 export async function runElementwiseWGSL(
   device: GPUDevice,
@@ -60,14 +52,14 @@ export async function runElementwiseWGSL(
       `runElementwiseWGSL: all inputs and the output must share elementCount ${elementCount} (broadcast first)`,
     );
   }
-  compileIRToKernel(node, inputs.length); // surface IR errors before touching the GPU
+  compileIRToElementwise(node, inputs.length); // surface IR errors before touching the GPU
   if (elementCount === 0) return new Float32Array(0);
   const b = backendFor(device);
   const ins = inputs.map((d) => uploadSync(b, d, [elementCount], "f32"));
   let out: WebGpuTensor | undefined;
   try {
-    out = encodeFused(b, node, ins, [elementCount]);
-    return new Float32Array(await b.rt.readBytes(out.storage.buffer, 0, elementCount * 4));
+    out = encodeFused(b, node, ins);
+    return new Float32Array(await readRaw(b, out));
   } finally {
     for (const x of ins) b.dispose(x);
     if (out) b.dispose(out);
