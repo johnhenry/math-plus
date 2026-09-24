@@ -18,6 +18,8 @@ export interface TestFns {
   /** Groups tests by name prefix ("outer > inner > test"); `fn` must register synchronously. */
   describe: (name: string, fn: () => void) => void;
   it: (name: string, fn: Body) => void;
+  /** Runs once before the file's tests (the harness's file-level `before`). */
+  beforeAll: (fn: Body) => void;
   /** `it`, or a skipped test carrying `reason` when `reason` is set (skip, never fail). */
   itUnless: (reason: string | null, name: string, fn: Body) => void;
 }
@@ -35,6 +37,7 @@ export function testFns(h: Harness): TestFns {
       }
     },
     it: (name, fn) => h.test(full(name), () => fn()),
+    beforeAll: (fn) => h.before(fn),
     itUnless: (reason, name, fn) => h.test(full(name), reason ? { skip: reason } : {}, () => fn()),
   };
 }
@@ -66,13 +69,27 @@ export interface OracleJob {
   args?: Record<string, unknown>;
 }
 
-function toNpy(h: HostTensor): Uint8Array {
+function toTensor(h: HostTensor): Tensor {
   if (h.dtype === "f16" || h.dtype === "bf16") throw new Error("oracle inputs are f32/i32/bool");
-  return Tensor.fromTypedArray(h.data as Float32Array | Int32Array | Uint8Array, h.shape, { dtype: h.dtype }).toNpy();
+  return Tensor.fromTypedArray(h.data as Float32Array | Int32Array | Uint8Array, h.shape, { dtype: h.dtype });
 }
 
-/** Runs every job in ONE Python process; returns NumPy's results (as tensor-core Tensors) in order. */
+/** Runs every backend job through scripts/numpy_oracle.py in ONE Python process; returns NumPy's results in order. */
 export function runOracleBatch(jobs: OracleJob[]): Tensor[] {
+  return runNpyOracle(ORACLE_SCRIPT, jobs.map((j) => ({ op: j.op, inputs: j.inputs.map(toTensor), args: j.args })));
+}
+
+export interface NpyJob {
+  op: string;
+  inputs: Tensor[];
+  args?: Record<string, unknown>;
+}
+
+/**
+ * Runs every job through the batch oracle `script` in ONE Python process
+ * (inputs and outputs exchanged as .npy); returns NumPy's results in order.
+ */
+export function runNpyOracle(script: string, jobs: NpyJob[]): Tensor[] {
   const dir = mkdtempSync(join(tmpdir(), "tensor-cpu-oracle-"));
   try {
     const spec = jobs.map((j, i) => ({
@@ -80,13 +97,13 @@ export function runOracleBatch(jobs: OracleJob[]): Tensor[] {
       args: j.args ?? {},
       inputs: j.inputs.map((t, k) => {
         const p = join(dir, `in-${i}-${k}.npy`);
-        writeFileSync(p, toNpy(t));
+        writeFileSync(p, t.toNpy());
         return p;
       }),
       output: join(dir, `out-${i}.npy`),
     }));
     writeFileSync(join(dir, "jobs.json"), JSON.stringify(spec));
-    execFileSync(PYTHON as string, [ORACLE_SCRIPT, join(dir, "jobs.json")], { stdio: ["ignore", "ignore", "pipe"] });
+    execFileSync(PYTHON as string, [script, join(dir, "jobs.json")], { stdio: ["ignore", "ignore", "pipe"] });
     return spec.map((j) => Tensor.fromNpy(new Uint8Array(readFileSync(j.output))));
   } finally {
     rmSync(dir, { recursive: true, force: true });

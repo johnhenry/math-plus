@@ -16,9 +16,9 @@ explicitly bringing in a sibling package and its own API surface:
 1-D/2-D ops, manual `free()` -- measured 1.78x faster than JS at N=1e6 for
 resident buffers), or
 [`@johnhenry/math-plus-tensor-webgpu`](https://github.com/johnhenry/math-plus/tree/main/packages/tensor-webgpu)
-(WebGPU GEMM/attention primitives, Chromium-only in v1 -- as of writing its
-own measurements say to reach for tensor-wasm instead at every size tested,
-see its "honest threshold" section).
+(a WebGPU device facade over `@johnhenry/backend-webgpu` -- GEMM, fused
+attention and IR->WGSL fusion in browsers, Deno, and Node/Bun via Dawn; its
+GEMM-threshold section says when tensor-wasm is the faster choice).
 
 Architectural rules, stated up front: no Proxy-based indexing; views and
 contiguous tensors are semantically distinct (`permute`/`transpose`/`reshape`

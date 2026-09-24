@@ -13,7 +13,7 @@
  * matmul costs (gemm-threshold-cells.ts has both calls): WASM =
  * `WasmTensor.fromArray` x2 + `matmulInto` + `toFloat32Array` + free
  * (tensor-wasm's SIMD128 GEMM when the runtime has SIMD, #130); WebGPU =
- * the facade on `Float32Array`s: `gpu.fromHost` x2, `gpu.backend.matmul`
+ * the facade on `Float32Array`s: `gpu.backend.fromHost` x2, `gpu.backend.matmul`
  * (A·B) or `gpu.backend.linear` (x·Wᵀ), `gpu.toHost`, dispose — i.e.
  * backend-webgpu's GEMM and runtime. The `kernel` column lists the backend
  * pipelines one call dispatched (`gemm` = tiled, `gemmsg` = subgroup

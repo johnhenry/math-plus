@@ -1,9 +1,10 @@
 /**
  * `createWebGpuDevice()` (issue #146): the device facade over
  * @johnhenry/backend-webgpu — explicit async transfers to and from
- * tensor-core `Tensor`s (every device dtype, views with offsets, refusal of
- * implicit conversions), backend ops on uploaded tensors cross-checked
- * against tensor-core on the CPU, the IR -> WGSL fusion on the backend's
+ * tensor-core `Tensor`s as chainable `WebGpuArray`s (every device dtype,
+ * views with offsets, refusal of implicit conversions), backend ops on
+ * uploaded arrays (via `.handle` / `wrap`) cross-checked against
+ * tensor-core on the CPU, the IR -> WGSL fusion on the backend's
  * runtime (`fuse`/`compile`) cross-checked against tensor-compile's CPU
  * `forward`, scope tracking of fused results, sharing a device from
  * `detectWebGPU()`, `destroy`, and the absence of the API removed in 0.3.0.
@@ -15,6 +16,7 @@ import { compile, Traced } from "@johnhenry/math-plus-tensor-compile";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { readFileSync } from "node:fs";
 import { getGpu } from "@johnhenry/backend-webgpu";
+import { DeviceArray } from "@johnhenry/math-plus-tensor-cpu";
 import * as api from "../src/index.ts";
 import { createWebGpuDevice, detectWebGPU, webGpuUnavailableReason, type WebGpuDevice } from "../src/index.ts";
 import { lookupBackend } from "../src/bridge.ts";
@@ -82,14 +84,32 @@ test("fromTensor/toTensor round-trip every device dtype exactly, including a vie
   }
 });
 
-test("fromTensor refuses implicit conversions: non-contiguous views and non-device dtypes (labelled tensor-webgpu)", { skip: skip ?? false }, async () => {
+test("fromTensor refuses implicit conversions synchronously, before any Promise: non-contiguous views and non-device dtypes (labelled tensor-webgpu)", { skip: skip ?? false }, async () => {
   const gpu = await device();
-  await assert.rejects(gpu.fromTensor(Tensor.zeros([3, 4], { dtype: "f32" }).transpose()), /tensor-webgpu: .*contiguous\(\) first/);
-  await assert.rejects(gpu.fromTensor(Tensor.zeros([2], { dtype: "f64" })), /tensor-webgpu: dtype f64 .*cast\("f32"\)/);
-  await assert.rejects(gpu.fromTensor(Tensor.zeros([2], { dtype: "i64" })), /cast\("i32"\)/);
+  assert.throws(() => gpu.fromTensor(Tensor.zeros([3, 4], { dtype: "f32" }).transpose()), /tensor-webgpu: .*contiguous\(\) first/);
+  assert.throws(() => gpu.fromTensor(Tensor.zeros([2], { dtype: "f64" })), /tensor-webgpu: dtype f64 .*cast\("f32"\)/);
+  assert.throws(() => gpu.fromTensor(Tensor.zeros([2], { dtype: "i64" })), /cast\("i32"\)/);
+  if (!gpu.supports("f16")) assert.throws(() => gpu.fromTensor(Tensor.from([1], { dtype: "f16" })), /does not support f16/);
 });
 
-test("backend ops on uploaded tensors match tensor-core on the CPU (matmul, linear with bias, softmax, layerNorm)", { skip: skip ?? false }, async () => {
+test("fromTensor/fromHost return chainable arrays; the transfer/dispose methods also take raw backend tensors; handle/wrap bridge to gpu.backend", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  const x = await gpu.fromTensor(Tensor.from([1, 4, 9], { dtype: "f32" }));
+  assert.ok(x instanceof DeviceArray);
+  assert.equal(x.device, gpu);
+  assert.deepEqual([...(await x.sqrt().mul(2).toTensor()).data], [2, 4, 6]);
+  const raw = await gpu.backend.fromHost({ dtype: "f32", shape: [3], data: Float32Array.from([1, 2, 3]) });
+  assert.deepEqual([...(await gpu.toTensor(raw)).data], [1, 2, 3], "gpu.toTensor takes a raw backend tensor");
+  const sum = gpu.wrap(gpu.backend.add(x.handle, raw));
+  assert.deepEqual([...(await gpu.toHost(sum)).data], [2, 6, 12], "gpu.toHost takes an array");
+  assert.throws(() => x.add(raw as never), /expected a WebGpuArray/);
+  gpu.dispose(raw);
+  gpu.dispose(sum);
+  assert.equal(sum.disposed, true);
+  x.dispose();
+});
+
+test("array and backend ops on uploaded arrays match tensor-core on the CPU (matmul, linear with bias, softmax, layerNorm)", { skip: skip ?? false }, async () => {
   const gpu = await device();
   const b = gpu.backend;
   const A = Tensor.fromTypedArray(lcg(96 * 64, 1), [96, 64], { dtype: "f32" });
@@ -97,7 +117,7 @@ test("backend ops on uploaded tensors match tensor-core on the CPU (matmul, line
   const W = Tensor.fromTypedArray(lcg(40 * 64, 3), [40, 64], { dtype: "f32" });
   const bias = Tensor.fromTypedArray(lcg(40, 4), [40], { dtype: "f32" });
   const [a, bb, w, bi] = await Promise.all([A, B, W, bias].map((t) => gpu.fromTensor(t)));
-  const outs = gpu.scope(() => ({ ab: b.matmul(a!, bb!), lin: b.linear(a!, w!, bi!), sm: b.softmax(a!, -1), ln: b.layerNorm(a!, null, null, 1e-5) }));
+  const outs = gpu.scope(() => ({ ab: a!.matmul(bb!), lin: gpu.wrap(b.linear(a!.handle, w!.handle, bi!.handle)), sm: a!.softmax(-1), ln: a!.layerNorm(null, null, 1e-5) }));
   const ab = await gpu.toTensor(outs.ab);
   assertClose(ab.data as Float32Array, A.matmul(B).data as Float32Array, 1e-4, "matmul");
   const lin = await gpu.toTensor(outs.lin);
@@ -147,7 +167,7 @@ test("fuse: works on backend views at an element offset; results are tracked by 
   const b = gpu.backend;
   const X = Tensor.fromTypedArray(lcg(4 * 50, 9), [4, 50], { dtype: "f32" });
   const x = await gpu.fromTensor(X);
-  const row2 = b.slice(x, [2, 0], [3, 50]); // contiguous view, offset 100
+  const row2 = gpu.wrap(b.slice(x.handle, [2, 0], [3, 50])); // contiguous view, offset 100
   const twice = new Traced({ kind: "input", index: 0 }).mul(2);
   let inner: ReturnType<typeof gpu.fuse> | undefined;
   const kept = gpu.scope(() => {
@@ -158,7 +178,11 @@ test("fuse: works on backend views at an element offset; results are tracked by 
   assert.equal(kept.disposed, false);
   const got = (await gpu.toTensor(kept)).data as Float32Array;
   assertClose(got, (X.data as Float32Array).slice(100, 150).map((v) => 4 * v), 0, "offset view");
-  assert.throws(() => gpu.fuse(twice.add(new Traced({ kind: "input", index: 1 })), [x, b.slice(x, [0, 0], [3, 50])]), /cannot broadcast/);
+  assert.throws(() => gpu.fuse(twice.add(new Traced({ kind: "input", index: 1 })), [x, gpu.wrap(b.slice(x.handle, [0, 0], [3, 50]))]), /cannot broadcast/);
+  const rawOut = gpu.fuse(twice, [row2.handle]); // raw backend tensors in, a raw tensor out
+  assert.ok(!(rawOut instanceof DeviceArray));
+  assertClose((await gpu.toHost(rawOut)).data as Float32Array, (X.data as Float32Array).slice(100, 150).map((v) => 2 * v), 0, "raw fuse");
+  gpu.dispose(rawOut);
   const i32 = await gpu.fromTensor(Tensor.from([1, 2], { dtype: "i32" }));
   assert.throws(() => gpu.fuse(twice, [i32]), /f32 inputs only/);
   assert.throws(() => gpu.fuse(twice, []), /at least one input/);
@@ -196,7 +220,7 @@ test("fuse/compile broadcast their inputs like tensor-compile's CPU forward (Num
   const R = Tensor.fromTypedArray(lcg(4 * 6, 91), [4, 6], { dtype: "f32" });
   const U = Tensor.fromTypedArray(lcg(3 * 1 * 1, 92), [3, 1, 1], { dtype: "f32" });
   const [m, r, u] = await Promise.all([M, R, U].map((t) => gpu.fromTensor(t)));
-  const row2 = b.slice(r!, [2, 0], [3, 6]); // [1, 6] at offset 12
+  const row2 = gpu.wrap(b.slice(r!.handle, [2, 0], [3, 6])); // [1, 6] at offset 12
   const expr = (a: Traced, c: Traced, _unused: Traced): Traced => a.sub(c).mul(a);
   const want = compile(3, expr).forward(M, R.slice({ start: 2, end: 3 }), U);
   const got = gpu.fuse(expr(Traced.input(0), Traced.input(1), Traced.input(2)), [m!, row2, u!]);
@@ -217,7 +241,7 @@ test("createWebGpuDevice({ device }) on a detectWebGPU() device: one shared back
   assert.equal(gpu.backend.hasSubgroupMatrix, cap.gemm!.subgroupMatrix, "subgroup matrices follow detectWebGPU's adapter check");
   const A = await gpu.fromHost({ dtype: "f32", shape: [8, 16], data: lcg(8 * 16, 5) });
   const B = await gpu.fromHost({ dtype: "f32", shape: [16, 4], data: lcg(16 * 4, 6) });
-  const C = gpu.backend.matmul(A, B);
+  const C = A.matmul(B);
   const want = Tensor.fromTypedArray(lcg(8 * 16, 5), [8, 16], { dtype: "f32" }).matmul(Tensor.fromTypedArray(lcg(16 * 4, 6), [16, 4], { dtype: "f32" }));
   assertClose((await gpu.toHost(C)).data as Float32Array, want.data as Float32Array, 1e-5, "matmul on a shared device");
   for (const t of [A, B, C]) gpu.dispose(t);

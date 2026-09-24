@@ -6,6 +6,12 @@ The CPU reference implementation of the
 example laya-js's ModernBERT encoder) is written against, with MLX and
 WebGPU backends alongside it. Pure TypeScript, eager, f32.
 
+It is also the home of math-plus's side of that contract shared by every
+device package: the tensor-core `Tensor` <-> `HostTensor` bridge and the
+one chainable device-array API (`DeviceArray`), which tensor-mlx's
+`MlxArray` and tensor-webgpu's arrays are, and which `createCpuDevice()`
+gives you on the CPU (see [below](#the-shared-device-array-api-arraydevice--devicearray)).
+
 [RFC 0001 §12 Q3](../../docs/rfcs/0001-device-backends.md) decided that
 math-plus owns this backend (issue
 [#144](https://github.com/johnhenry/math-plus/issues/144)). It is built on
@@ -85,6 +91,72 @@ implicitly). `@johnhenry/math-plus-tensor-mlx` and
 `@johnhenry/math-plus-tensor-webgpu` use these for their explicit
 `fromTensor`/`toTensor` transfers, so the mapping has one implementation.
 Also exported: `DEVICE_DTYPES`, `isDeviceDType`.
+
+### The shared device-array API (`ArrayDevice` / `DeviceArray`)
+
+math-plus has **one** chainable device-array implementation, and it lives
+here, next to the host bridge: `ArrayDevice<B>` wraps any
+`@johnhenry/tensor-backend` `Backend`, and `DeviceArray` is the array type
+its ops return. Every device facade is a thin subclass:
+
+| Facade | Device | Array |
+|---|---|---|
+| this package | `createCpuDevice()` → `CpuDevice` | `CpuArray` (= `DeviceArray<CpuDevice>`) |
+| [`@johnhenry/math-plus-tensor-mlx`](../tensor-mlx) | `createMlxDevice()` → `MlxDevice` | `MlxArray` (a `DeviceArray` subclass that adds nothing) |
+| [`@johnhenry/math-plus-tensor-webgpu`](../tensor-webgpu) | `await createWebGpuDevice()` → `WebGpuDevice` | `WebGpuArray` (= `DeviceArray<WebGpuDevice>`) |
+
+```ts
+import { Tensor } from "@johnhenry/math-plus-tensor-core";
+import { createCpuDevice } from "@johnhenry/math-plus-tensor-cpu";
+
+const cpu = createCpuDevice();                              // no global default device
+const x = await cpu.fromTensor(Tensor.from([1, 2, 3, 4]).reshape([2, 2])); // explicit async upload
+const y = cpu.scope(() => x.matmul(x).add(1).softmax(-1));  // chainable; intermediates freed
+const t = await y.toTensor();                               // explicit async download
+```
+
+Why here: tensor-mlx and tensor-webgpu both already depend on this package
+for the host bridge, the wrapper needs nothing else (only the contract and
+its compose helpers), and it is pure TypeScript. A separate package would
+add a fourth dependency edge for the same ~500 lines.
+
+**Device** (`ArrayDevice`): `fromTensor(t)` / `fromHost(h)` (async
+uploads; validation errors, including a dtype the device does not
+`supports()`, throw synchronously), `wrap(handle)` (adopt a `device.backend`
+result), `scope(fn)`, `eval(...arrays)`, `where(cond, a, b)`,
+`supports(dtype)`, `destroy()`, `name`, and `backend`.
+
+**Array** (`DeviceArray`): `shape`, `dtype`, `ndim`, `size`, `device`,
+`disposed`, `handle` (the backend tensor, for `device.backend.*`);
+`toTensor()` / `toHost()` (async), `eval()`, `dispose()`; `add` `sub` `mul`
+`div` `maximum` `minimum` `pow` (array or number); `neg` `abs` `exp` `log`
+`sqrt` `rsqrt` `tanh` `sigmoid` `erf` `relu` `gelu` (exact erf); `equal`
+`notEqual` `less` `lessEqual` `greater` `greaterEqual` (→ bool);
+`logicalAnd` `logicalOr` `logicalNot` (bool only); `sum` `mean` `max`
+`min` `argmax` `argmin` (`(axis?, { keepDims? })`); `cumsum(axis?)`;
+`softmax(axis = -1)`; `matmul`; `layerNorm(weight?, bias?, eps)`;
+`cast(dtype)`; `reshape(shape)`; `transpose(axes?)`.
+
+The rules are the RFC 0001 §12 ones, enforced once for every device: no
+global default device; transfers only through `fromTensor`/`fromHost` and
+`toTensor`/`toHost`, async in both directions; ops refuse tensor-core
+`Tensor`s and arrays of another device; no implicit dtype promotion
+(`cast()` is the only way across dtypes; number operands take the array's
+dtype and are built on the device, never uploaded); lazy inside,
+eager-observable (shape/dtype errors throw at the call site). The optional
+contract ops go through tensor-backend's compose helpers, so any `Backend`
+works: the native kernel when it has one, the default composition
+otherwise.
+
+**The CPU device holds f32, i32 and bool.** Uploading f16/bf16 (or
+casting to them) throws, because the backend would widen them to f32
+silently; cast to f32 explicitly first.
+
+**Not included** (use `device.backend` with `array.handle`, and
+`device.wrap()` the result): slicing and indexing, `concat`/`split`,
+`sort`, the fused transformer ops (`linear`, `rope`, `sdpa`, `embedding`,
+…), quantized weights, and `compile`. Reductions take one axis or all axes.
+There is no autograd on device arrays.
 
 ## Dtypes
 
@@ -189,8 +261,10 @@ npm test -w @johnhenry/math-plus-tensor-cpu        # Node
 npm run test:bun -w @johnhenry/math-plus-tensor-cpu
 ```
 
-- `test/conformance.test.ts` runs tensor-backend's conformance suite: 103
-  MLX/NumPy-generated cases, core plus general numerics. It runs twice:
+- `test/conformance.test.ts` runs tensor-backend 0.3's conformance suite:
+  129 MLX/NumPy-generated cases, core plus general numerics plus 26
+  quantized-weight cases (which run through `compose.ts`'s dequantizing
+  fallback: this backend has no native quantized ops). It runs twice:
   once with every op native, and once with the numerics ops hidden, so the
   `compose.ts` default compositions are checked on this backend too.
 - `test/differential.test.ts` checks the backend against a NumPy float64
@@ -203,3 +277,10 @@ npm run test:bun -w @johnhenry/math-plus-tensor-cpu
   run must show 0 skipped.
 - `test/backend.test.ts` covers widening, scopes, error paths and
   drop-in compatibility with `backend-cpu@0.2.0`.
+- `test/device-array.test.ts` runs **the shared DeviceArray suite**
+  (`test/device-array-suite.ts`) over `createCpuDevice()`. The same suite
+  runs over MLX in tensor-mlx and over WebGPU in tensor-webgpu: every array
+  op against a NumPy oracle (`scripts/device_array_oracle.py`) in each
+  dtype the device supports (f16 within 2e-2, bf16 within 5e-2, i32/bool
+  and casts exact), plus the transfer, dtype, constant, lifetime and
+  `handle`/`wrap` rules.

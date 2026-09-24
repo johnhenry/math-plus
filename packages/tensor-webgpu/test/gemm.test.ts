@@ -170,7 +170,7 @@ const PAGE_CODECS = `
 /**
  * Page-side GEMM through the facade (needs PAGE_CODECS and a `gpu` from
  * createWebGpuDevice). `up(b64, shape, dtype)` uploads f32 or binary16 bytes
- * with `gpu.fromHost`; `gemm(A, B, transB, kernel)` returns a new tensor:
+ * with `gpu.backend.fromHost`; `gemm(A, B, transB, kernel)` returns a new tensor:
  * "auto" is what a caller writes (`linear` for [N,K] B, `matmul` for
  * [K,N] B), "tiled" is `matmul` (portable tiled kernel only), and
  * "skinny" / "subgroup-matrix" force that family for `linear` (B
@@ -180,7 +180,7 @@ const PAGE_CODECS = `
  * (the vec4 Linear path).
  */
 const PAGE_GEMM = `
-  const up = (s, shape, dtype) => gpu.fromHost({ dtype, shape, data: dtype === "f32" ? new Float32Array(dec(s)) : new Float16Array(dec(s)) });
+  const up = (s, shape, dtype) => gpu.backend.fromHost({ dtype, shape, data: dtype === "f32" ? new Float32Array(dec(s)) : new Float16Array(dec(s)) });
   const applicable = (kernel, m, k, transB) =>
     kernel === "auto" || kernel === "tiled" ||
     (kernel === "skinny" && transB && k % 4 === 0 && m <= 64) ||

@@ -275,9 +275,10 @@ numbers.
 
 Pure TypeScript, so nothing is platform-gated:
 
-- `test/conformance.test.ts` — `@johnhenry/tensor-backend`'s shared conformance suite (the core
-  and general-numerics fixtures), once with every op native and once with the numerics ops hidden
-  so `compose.ts`'s default compositions run on this backend. f32 only: the backend widens
+- `test/conformance.test.ts` — `@johnhenry/tensor-backend`'s shared conformance suite (the core,
+  general-numerics and, since tensor-backend 0.3, quantized-weight fixtures; the quantized cases
+  run through `compose.ts`'s dequantizing fallback), once with every op native and once with the
+  numerics ops hidden so `compose.ts`'s default compositions run on this backend. f32 only: the backend widens
   f16/bf16 on upload and reports `supports(...) === false` for them.
 - `test/differential.test.ts` — the fused transformer ops and broadcasting/reduction/dtype corners
   vs a batch NumPy float64 oracle (`packages/tensor-cpu/scripts/numpy_oracle.py`; same
@@ -285,6 +286,21 @@ Pure TypeScript, so nothing is platform-gated:
   must show **0 skipped**).
 - `test/backend.test.ts` — lifetime, error paths, and a drop-in-compatibility check against
   laya-js's `@johnhenry/backend-cpu@0.2.0` (a pinned devDependency).
+- `test/device-array.test.ts` — the shared DeviceArray suite over `createCpuDevice()` (see below).
+
+## The shared DeviceArray suite (CPU, MLX, WebGPU)
+
+The chainable device-array API (`DeviceArray`, `packages/tensor-cpu/src/device-array.ts`) has one
+implementation and one behavioural suite, `packages/tensor-cpu/test/device-array-suite.ts`. Each
+device package runs it over its own device from `test/device-array.test.ts`: tensor-cpu over
+`createCpuDevice()`, tensor-mlx over `createMlxDevice()` (Metal), tensor-webgpu over
+`createWebGpuDevice()` (Dawn). Every array op is compared with a batch NumPy oracle
+(`packages/tensor-cpu/scripts/device_array_oracle.py`, one Python process; same
+`$MATH_PLUS_ORACLE_PYTHON` / `python3` resolution) in each dtype the device `supports()` — f32 at
+tight tolerances, f16 on f16-rounded inputs within 2e-2, bf16 within 5e-2, i32/bool and casts
+exact — plus the transfer, dtype, number-constant, lazy-error, `scope` and `handle`/`wrap` rules.
+Unsupported dtypes are not registered as skipped cases; their refusal is asserted instead. The
+suite skips (never fails) without the device or numpy; a real run must show 0 skipped.
 
 ## MLX device tests (`@johnhenry/math-plus-tensor-mlx`, experimental)
 
@@ -292,10 +308,9 @@ Three suites, all **skip-don't-fail** off darwin/arm64 or when no `libmlxc.dylib
 (`@johnhenry/backend-mlx`'s order: `$LAYA_MLXC_PATH`, the `@johnhenry/backend-mlx-darwin-arm64`
 optional dependency, a local build, Homebrew):
 
-- `test/differential.test.ts` — every op vs a batch NumPy oracle
-  (`packages/tensor-mlx/scripts/numpy_oracle.py`, one Python process for all cases; same
-  `$MATH_PLUS_ORACLE_PYTHON` / `python3` resolution as above). f32 at tight tolerances, f16 on
-  f16-rounded inputs at 2e-2, casts bit-exact vs `astype`.
+- `test/device-array.test.ts` — the shared DeviceArray suite above, on Metal: every op vs the batch
+  NumPy oracle (`packages/tensor-cpu/scripts/device_array_oracle.py`) in f32, f16 and bf16 (and
+  i32/bool), casts bit-exact vs `astype`.
 - `test/conformance.test.ts` — `@johnhenry/tensor-backend`'s shared conformance suite against the
   GPU and CPU MLX devices.
 - `test/bridge.test.ts` — explicit-transfer and lifetime rules; its host-view half runs everywhere.

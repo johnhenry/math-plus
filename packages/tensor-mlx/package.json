@@ -29,10 +29,10 @@
     "test:deno": "deno test -A --node-modules-dir=manual test/"
   },
   "dependencies": {
-    "@johnhenry/backend-mlx": "^0.3.0",
+    "@johnhenry/backend-mlx": "^0.4.0",
     "@johnhenry/math-plus-tensor-core": "^0.2.1",
     "@johnhenry/math-plus-tensor-cpu": "^0.2.1",
-    "@johnhenry/tensor-backend": "^0.2.0"
+    "@johnhenry/tensor-backend": "^0.3.0"
   },
   "repository": {
     "type": "git",

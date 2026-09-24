@@ -68,13 +68,13 @@ export function cellInputs(c: Cell): { a: Float32Array; b: Float32Array; bKN: Fl
 
 /**
  * The WebGPU side, end to end on host arrays, exactly as a caller of the
- * facade writes it: upload both operands (`gpu.fromHost`), `matmul` for
+ * facade writes it: upload both operands (`gpu.backend.fromHost`), `matmul` for
  * A·B or `linear` for x·Wᵀ, read back (`gpu.toHost`), dispose. Source
  * text, so a CDP-driven page runs the identical code.
  */
 export const FACADE_GEMM_SOURCE = `async function facadeGemm(gpu, m, k, n, transB, a, b) {
-  const A = await gpu.fromHost({ dtype: "f32", shape: [m, k], data: a });
-  const B = await gpu.fromHost({ dtype: "f32", shape: transB ? [n, k] : [k, n], data: b });
+  const A = await gpu.backend.fromHost({ dtype: "f32", shape: [m, k], data: a });
+  const B = await gpu.backend.fromHost({ dtype: "f32", shape: transB ? [n, k] : [k, n], data: b });
   const C = transB ? gpu.backend.linear(A, B) : gpu.backend.matmul(A, B);
   try {
     return (await gpu.toHost(C)).data;

@@ -16,16 +16,24 @@ a binding to Apple's mlx-c that uses koffi on Node, `bun:ffi` on Bun and
 `Deno.dlopen` on Deno.
 backend-mlx implements the
 [`@johnhenry/tensor-backend`](https://www.npmjs.com/package/@johnhenry/tensor-backend)
-contract. This package wraps that contract in a math-plus-style,
-method-chaining API.
+contract. The math-plus-style, method-chaining array API on top of it is
+**not implemented here**: it is the one `DeviceArray` API every math-plus
+device shares, from
+[`@johnhenry/math-plus-tensor-cpu`](../tensor-cpu#the-shared-device-array-api-arraydevice--devicearray)
+(the same class runs on the CPU and on WebGPU). `MlxDevice` extends its
+`ArrayDevice`, and `MlxArray` is a `DeviceArray` subclass that adds
+nothing.
 
 ## Install
 
 ```bash
 npm install @johnhenry/math-plus-tensor-mlx @johnhenry/math-plus-tensor-core
 bun add @johnhenry/math-plus-tensor-mlx @johnhenry/math-plus-tensor-core
-deno add jsr:@johnhenry/math-plus-tensor-mlx jsr:@johnhenry/math-plus-tensor-core
+deno add npm:@johnhenry/math-plus-tensor-mlx npm:@johnhenry/math-plus-tensor-core
 ```
+
+The package is configured for JSR (`jsr.json`), but it is not published on
+jsr.io yet; under Deno, use the `npm:` specifiers above.
 
 - **Requires macOS on Apple Silicon (darwin/arm64).** On darwin/arm64, npm
   also installs the optional dependency `@johnhenry/backend-mlx-darwin-arm64`
@@ -80,28 +88,34 @@ y.dispose(); best.dispose(); x.dispose(); w.dispose();
 ## API
 
 **Device.** `createMlxDevice({ device?: "gpu" | "cpu", libPath?, finalizers? })`
-returns an `MlxDevice`.
+returns an `MlxDevice`. Everything except the introspection line below is
+the shared `ArrayDevice` API.
 
 - Transfers in: `await fromTensor(t)` and `await fromHost(hostTensor)`.
   Both return a Promise (since 0.2). Validation errors (non-contiguous
   tensor, unsupported dtype) still throw synchronously.
+- `wrap(handle)` adopts a `device.backend` result as an `MlxArray`, and
+  `supports(dtype)` reports the device dtypes (all five on MLX).
 - Graph control: `eval(...arrays)` evaluates the given arrays; with no
   arguments it synchronizes the stream.
 - Lifetime: `scope(fn)` frees every array created inside `fn` except the
   arrays it returns, directly or one level deep in an array or object.
 - Ops: `where(cond, a, b)`.
-- Introspection: `liveArrays()`, `memory()`, `destroy()`, `name`
-  (`"mlx"`), `kind`, and `info` (which library loaded, `node` or `bun`, and
-  the mlx-c ABI).
+- Introspection (MLX-specific): `liveArrays()`, `memory()`, `kind`, and
+  `info` (which library loaded, `node`, `bun` or `deno`, and the mlx-c
+  ABI). Also `destroy()` and `name` (`"mlx"`).
 - `backend` exposes the raw `@johnhenry/tensor-backend` `Backend`, for
   code written against that contract and for its conformance suite.
 
 `mlxUnavailableReason()` returns a string saying why MLX can't run here,
 or `null` if it can.
 
-**`MlxArray`.**
+**`MlxArray`** (the shared `DeviceArray`; `x instanceof MlxArray` holds
+for every array an `MlxDevice` returns).
 
-- Properties: `shape`, `dtype`, `ndim`, `size`, `device`, `disposed`.
+- Properties: `shape`, `dtype`, `ndim`, `size`, `device`, `disposed`, and
+  `handle` (the backend-mlx tensor, for `device.backend.*` ops this API
+  does not wrap).
 - Transfers out and lifetime: `toTensor()` (async), `toHost()` (async,
   returns a `HostTensor`), `eval()` (returns `this`), `dispose()`
   (idempotent).
@@ -191,24 +205,29 @@ specifiers tsc leaves in `.d.ts` files, and points each `dist/*.js` at its
 declarations with `@ts-self-types` (`scripts/rewrite-dts-extensions.mjs`,
 issue #157). Build first.
 
-- **`test/differential.test.ts`** compares every op against a **NumPy
-  oracle**, `scripts/numpy_oracle.py`, which is resolved as
-  `$MATH_PLUS_ORACLE_PYTHON`, else `python3` (see docs/TESTING.md).
+- **`test/device-array.test.ts`** runs the **shared DeviceArray suite**
+  (tensor-cpu's `test/device-array-suite.ts`, the same suite that runs
+  over the CPU and WebGPU devices) on Metal. It compares every op against
+  a **NumPy oracle**, tensor-cpu's `scripts/device_array_oracle.py`, which
+  is resolved as `$MATH_PLUS_ORACLE_PYTHON`, else `python3` (see
+  docs/TESTING.md), and checks the transfer, dtype, constant and lifetime
+  rules.
   - Float ops run in f32 with tight tolerances, in f16 on f16-rounded
     inputs within 2e-2, and in bf16 on bf16-rounded inputs within 5e-2.
   - Comparisons, logical ops, `argmax`/`argmin` and i32 arithmetic are
     compared exactly, including the result dtype (bool / i32).
   - Casts are compared bit-exact with NumPy's `astype`.
 - **`test/conformance.test.ts`** runs `@johnhenry/tensor-backend`'s shared
-  conformance suite (the core op cases plus the general-numerics cases,
-  in f32, f16 and bf16) against `device.backend` on the GPU and CPU
-  devices.
-- **`test/bridge.test.ts`** covers the transfer and lifetime rules above.
-  Its host-view half runs on every platform.
+  conformance suite (the core op cases, the general-numerics cases and,
+  since tensor-backend 0.3, the quantized-weight cases, in f32, f16 and
+  bf16) against `device.backend` on the GPU and CPU devices.
+- **`test/bridge.test.ts`** covers the `MlxArray`/`MlxDevice` API as this
+  package has always exported it (transfers, lifetime, `liveArrays`,
+  `memory`, the CPU MLX device). Its host-view half runs on every platform.
 
 The suites **skip, never fail**, when MLX is unavailable (not darwin/arm64,
 or no libmlxc) or when numpy is missing. On an Apple Silicon machine with
-numpy, a real run must report **0 skipped** (213 tests on Node, Bun and
+numpy, a real run must report **0 skipped** (233 tests on Node, Bun and
 Deno).
 
 GPU etiquette on shared machines: wrap GPU test runs in the `~/gpu.lock`
@@ -234,7 +253,9 @@ convention, for example
   question.
 - **Reductions take one axis or all axes**, not a list of axes.
 - **No `compile`.** The contract's `compile` exists on `device.backend`,
-  but it is not wrapped for `MlxArray`.
+  but it is not wrapped for `MlxArray`. The same goes for the fused
+  transformer ops (`linear`, `rope`, `sdpa`, …) and quantized weights: call
+  them on `device.backend` with `x.handle` and `device.wrap()` the result.
 - **Every upload and download copies once.** There is no zero-copy wrapping
   of JS memory. Both directions are synchronous under the hood (MLX copies
   at call time), so the Promises from `fromTensor()` and `toTensor()` are
