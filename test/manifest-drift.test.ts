@@ -16,6 +16,8 @@ import { makeTest } from "./harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+// @ts-expect-error -- plain .mjs script without type declarations (importing it does not write files)
+import { PACKAGE_DIRS, buildImports, jsrRange } from "../scripts/sync-jsr-configs.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -157,4 +159,42 @@ test("engines.node is identical in root package.json and every workspace package
     .filter(({ pkg }) => pkg.engines?.node !== rootEngine)
     .map(({ p, pkg }) => `${p.name} (${pkg.engines?.node ?? "none"})`);
   assert.deepEqual(mismatched, [], `engines.node differs from root's "${rootEngine}": ${mismatched.join(", ")}`);
+});
+
+/**
+ * Deno/JSR take ONE comparator per `jsr:`/`npm:` specifier: `^1.2.3`, `~1.2`,
+ * `1.2.3`, `1.x`, `*` (verified with Deno 2.9.7; `a || b`, `>=a <b` and `<b`
+ * fail with "Invalid package specifier ... Unexpected character"). Release run
+ * 35967422091's JSR job failed on `jsr:@johnhenry/math-plus-tensor-core@^0.0.0 || ^0.1.0`
+ * (safetensors, and tensor-autograd's safetensors peer), cascading to every
+ * dependent package.
+ */
+const VALID_SPECIFIER = /^(?:jsr:@[a-z0-9-]+\/[a-z0-9-]+|npm:(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+)@(?:\*|[\^~]?\d+(?:\.(?:\d+|x|\*)){0,2}(?:-[0-9A-Za-z.-]+)?)$/;
+
+test("every committed jsr.json import specifier is one Deno/JSR accept (single comparator, no `||` or spaces)", () => {
+  const bad: string[] = [];
+  for (const dir of PACKAGE_DIRS as string[]) {
+    const jsr = JSON.parse(readFileSync(join(ROOT, dir, "jsr.json"), "utf8")) as { imports?: Record<string, string> };
+    for (const [name, spec] of Object.entries(jsr.imports ?? {})) if (!VALID_SPECIFIER.test(spec)) bad.push(`${dir}: ${name} -> ${spec}`);
+  }
+  assert.deepEqual(bad, [], `invalid JSR import specifiers (run node scripts/sync-jsr-configs.mjs):\n${bad.join("\n")}`);
+});
+
+test("sync-jsr-configs.mjs generates valid specifiers from every package.json (what the release job publishes)", () => {
+  const bad: string[] = [];
+  for (const dir of PACKAGE_DIRS as string[]) {
+    const pkg = JSON.parse(readFileSync(join(ROOT, dir, "package.json"), "utf8"));
+    for (const [name, spec] of Object.entries(buildImports(pkg) as Record<string, string>)) if (!VALID_SPECIFIER.test(spec)) bad.push(`${dir}: ${name} -> ${spec}`);
+  }
+  assert.deepEqual(bad, [], `generator emits invalid JSR import specifiers:\n${bad.join("\n")}`);
+});
+
+test("jsrRange turns npm unions into the highest single comparator and refuses what it cannot express", () => {
+  assert.equal(jsrRange("^0.1.2"), "^0.1.2");
+  assert.equal(jsrRange("^0.0.0 || ^0.1.0"), "^0.1.0");
+  assert.equal(jsrRange("^0.1.0 || ^0.0.0"), "^0.1.0");
+  assert.equal(jsrRange("^0.2.0 || ^0.10.0 || ^0.9.1"), "^0.10.0");
+  assert.equal(jsrRange("21.2.0"), "21.2.0");
+  assert.throws(() => jsrRange(">=1.0.0 <2.0.0"), /single/);
+  assert.throws(() => jsrRange("^1.0.0 || >=3"), /single/);
 });
