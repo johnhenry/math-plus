@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-telemetry",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Shared event schema + sink registry for math-plus (issue #10) — a stable stream any UI can consume later, with a zero-cost no-op default",
   "type": "module",
   "exports": {

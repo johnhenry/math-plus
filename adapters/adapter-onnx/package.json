@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-adapter-onnx",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "ONNX Runtime Web wrapper (issue #18, mode 1 only) — onnx.load(modelSource)/model.run(inputs) marshalling between @johnhenry/math-plus-tensor-core's Tensor and onnxruntime-web's Tensor. Backend selection delegates entirely to ONNX Runtime Web; v1 does not route it through our own device abstraction.",
   "type": "module",
   "exports": {
@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "onnxruntime-web": "^1.27.0",
-    "@johnhenry/math-plus-tensor-core": "^0.2.0"
+    "@johnhenry/math-plus-tensor-core": "^0.2.1"
   },
   "repository": {
     "type": "git",

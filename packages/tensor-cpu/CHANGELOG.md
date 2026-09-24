@@ -1,5 +1,19 @@
 # @johnhenry/math-plus-tensor-cpu
 
+## 0.2.1
+
+### Patch Changes
+
+- d122aef: Published declarations no longer import `./x.ts` (closes #157). tsc's `rewriteRelativeImportExtensions` rewrites `.ts` specifiers to `.js` in emitted JS but not in emitted `.d.ts`, so `dist/*.d.ts` referenced files that aren't in the package, and Deno's type check failed on them. Every package's build now runs `scripts/rewrite-dts-extensions.mjs` after `tsc`:
+
+  - relative `.ts` / `.mts` / `.cts` specifiers in `dist/**/*.d.ts` become `.js` / `.mjs` / `.cjs` (as in laya-js),
+  - each `dist/*.js` with a declaration file starts with `// @ts-self-types="./x.d.ts"` (after the `#!` line of a bin), so Deno finds the types when it loads `dist/` as plain files or from a URL instead of through `npm:`. Source maps are shifted by the inserted line.
+
+  No runtime change. The manifest drift test checks every built `dist/` for both.
+
+- Updated dependencies [d122aef]
+  - @johnhenry/math-plus-tensor-core@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes

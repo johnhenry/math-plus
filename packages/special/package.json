@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-special",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The canonical double-precision erf/erfc/GELU for Math Plus — zero dependencies, shared by tensor-core and frame-arrow",
   "type": "module",
   "exports": {

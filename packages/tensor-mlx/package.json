@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-tensor-mlx",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "EXPERIMENTAL: native Apple Silicon (MLX/Metal) arrays for Math Plus on Node, Bun and Deno, with explicit async transfers to/from tensor-core Tensor — built on @johnhenry/backend-mlx (issue #125, RFC 0001)",
   "keywords": [
     "tensor",
@@ -30,8 +30,8 @@
   },
   "dependencies": {
     "@johnhenry/backend-mlx": "^0.3.0",
-    "@johnhenry/math-plus-tensor-core": "^0.2.0",
-    "@johnhenry/math-plus-tensor-cpu": "^0.2.0",
+    "@johnhenry/math-plus-tensor-core": "^0.2.1",
+    "@johnhenry/math-plus-tensor-cpu": "^0.2.1",
     "@johnhenry/tensor-backend": "^0.2.0"
   },
   "repository": {

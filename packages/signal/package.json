@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-signal",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "convolve/stft/istft/findPeaks/sosFilter/butter/resamplePoly for math-plus (issue #44) — v2/v3 SciPy-equivalent bundle, the signal-processing slice",
   "type": "module",
   "exports": {
@@ -19,9 +19,9 @@
     "test:bun": "bun test ./test/"
   },
   "dependencies": {
-    "@johnhenry/math-plus-fft": "^0.0.3",
-    "@johnhenry/math-plus-scalar-types": "^0.0.2",
-    "@johnhenry/math-plus-tensor-core": "^0.2.0"
+    "@johnhenry/math-plus-fft": "^0.0.4",
+    "@johnhenry/math-plus-scalar-types": "^0.0.3",
+    "@johnhenry/math-plus-tensor-core": "^0.2.1"
   },
   "repository": {
     "type": "git",
