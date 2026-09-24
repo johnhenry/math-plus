@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-tensor-cpu",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "The CPU reference Backend for @johnhenry/tensor-backend (issue #144, RFC 0001 §12 Q3): pure TypeScript, f32 compute on tensor-core's kernels, every optional op native — plus the chainable DeviceArray API every math-plus device (CPU, MLX, WebGPU) shares — part of Math Plus",
   "keywords": [
     "tensor",
