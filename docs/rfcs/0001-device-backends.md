@@ -1,7 +1,7 @@
 ---
 rfc: 0001
 title: "Device/backend abstraction: adopt @johnhenry/tensor-backend as the device contract"
-status: Proposed
+status: Accepted with changes (2026-09-24)
 issue: https://github.com/johnhenry/math-plus/issues/124
 prototype: packages/tensor-mlx (issue #125)
 created: 2026-09-23
@@ -10,11 +10,9 @@ decider: John Henry (repo owner)
 
 # RFC 0001: Device/backend abstraction
 
-**Status: Proposed.** The owner has not decided yet. This document asks for
-that decision; it does not record one. The `packages/tensor-mlx` prototype
-(#125) implements the recommended direction so the decision can rest on
-running code. The package is marked experimental, and if the RFC is
-rejected it can be deleted without touching any other package.
+**Status: Accepted with changes (2026-09-24).** See §12 for the decision and the
+answers to §11. The one change from the recommendation: uploads become async
+(Q2), in line with PLAN.md non-goal 5.
 
 ## 1. Summary
 
@@ -504,6 +502,36 @@ go.
 
 ## 12. Decision
 
-*(To be filled in by the owner: Accepted / Accepted with changes /
-Rejected, the date, and the answers to §11. If rejected, delete
-`packages/tensor-mlx` and its registrations.)*
+**Accepted with changes**, 2026-09-24, by the owner. The recommendation (Option A,
+§7) stands: math-plus adopts `@johnhenry/tensor-backend` as its device
+contract, with tensor-core's `Tensor` as the host type and devices passed explicitly.
+One change from the recommendation: uploads are async (Q2).
+
+Answers to §11:
+
+1. **Evaluation model: accepted.** Devices may be lazy internally, as long as
+   errors surface at the call site and results look eager to the caller.
+   `compile()` stays opt-in. PLAN.md non-goal 6 is amended to "eager-observable".
+2. **Upload: async.** `fromHost`/`fromTensor` return a Promise, like `read`. This
+   follows PLAN.md non-goal 5 ("device transfer is explicit and
+   async-visible"), so a transfer is never silently synchronous in either
+   direction. It is a breaking change to the tensor-backend contract and all
+   of its backends; it ships as a minor version bump while the packages are 0.x.
+3. **CPU reference: math-plus owns it.** math-plus ships the CPU `Backend`,
+   built on tensor-core's kernels, so GEMM and friends live only in tensor-core.
+   laya-js's `@johnhenry/backend-cpu` becomes a thin re-export, then is deprecated.
+4. **Deno: build the adapter.** A `Deno.dlopen` loader goes into
+   `@johnhenry/backend-mlx`, next to `bun:ffi` and koffi. After that,
+   tensor-mlx is published to JSR.
+5. **CI: add a macOS arm64 leg.** It starts non-blocking and becomes
+   required once stable, modelled on laya-js's `mlx-macos` job.
+6. **WebGPU: path (a).** `@johnhenry/backend-webgpu` becomes the single WebGPU
+   runtime. math-plus ships a `tensor-webgpu` device facade, like tensor-mlx,
+   and moves its IR→WGSL fusion onto it. `toWebGPU()` and `gpu.toTensor()`
+   keep working through a deprecation window.
+7. **Contract growth: in tensor-backend.** A "general numerics" section
+   (comparisons, `sqrt`, `argmax`, `erf`, …) is added to the one contract as
+   optional ops with default compositions in `compose.ts`, plus conformance
+   cases. There is no second contract.
+
+The implementation work is tracked in the follow-up issues linked from #124.
