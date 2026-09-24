@@ -1,8 +1,10 @@
 /**
- * Fused (flash) attention, `runAttention` (issue #126): unmasked and masked
- * (sliding window, key padding, causal, arbitrary per-element), both
- * kernels (`fast` for head dim 32/64, `generic` for any head dim), with and
- * without masked-key-tile skipping — on a real adapter (test/helpers.ts),
+ * Fused (flash) attention, `runAttention` (issue #126) — since issue #146
+ * backend-webgpu's `sdpa` behind the deprecated shim: unmasked and masked
+ * (sliding window, key padding, causal, arbitrary per-element, a fully
+ * masked row), both kernels (`fast` for head dim 32/64, `generic` for other
+ * head dims, observed from the dispatched pipeline), with masked-key-tile
+ * skipping — on a real adapter (test/helpers.ts),
  * checked against a NumPy float64 oracle (scripts/attention_oracle.py),
  * skip-don't-fail when either is unavailable (docs/TESTING.md).
  *
@@ -17,8 +19,6 @@ import path from "node:path";
 import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
-import { planAttention } from "../src/attention.ts";
-import { fastAttentionBytes, genericAttentionBytes, genericAttentionConfig } from "../src/attention-kernels.ts";
 import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
 
 after(closeHarness);
@@ -67,8 +67,8 @@ interface Case {
   /** Use the adapter's max workgroup memory (fast D=64 needs it) instead of the 16 KiB default. */
   raisedLimits: boolean;
   skipMaskedTiles?: boolean;
-  /** Expected kernel after planning. */
-  expectKernel: "fast" | "generic";
+  /** Expected kernel (backend-webgpu: fast for head dim 32/64, generic otherwise; "none" = the composed path on a device below 32 KiB of workgroup memory). */
+  expectKernel: "fast" | "generic" | "none";
 }
 
 function makeCase(
@@ -150,7 +150,7 @@ function runOracle(cases: readonly Case[]): Float64Array[] {
   });
 }
 
-/** Runs every case on one device in the harness; returns each output as f32 (NaN-preserving, via base64) plus the planned kernel. */
+/** Runs every case on one device in the harness; returns each output as f32 (NaN-preserving, via base64) plus the attention kernel backend-webgpu dispatched. */
 async function runOnGPU(
   harness: Exclude<Awaited<ReturnType<typeof getHarness>>, { unavailable: true }>,
   cases: readonly Case[],
@@ -174,6 +174,12 @@ async function runOnGPU(
   const results = await harness.run<{ out: string; kernel: string; limit: number }[]>(
     `
     const cases = ${JSON.stringify(payload)};
+    // Record which attention pipeline each call dispatches (backend-webgpu keys: "sdpafast:…" / "sdpa:…").
+    const watch = (device) => {
+      const rt = backendFor(device).rt;
+      if (!rt.__keys) { rt.__keys = []; const orig = rt.dispatch.bind(rt); rt.dispatch = (k, ...rest) => { rt.__keys.push(k.key); return orig(k, ...rest); }; }
+      return rt.__keys;
+    };
     const dec = (s) => new Float32Array(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)).buffer);
     const enc = (f) => { const u = new Uint8Array(f.buffer, f.byteOffset, f.byteLength); let s = ""; for (let i = 0; i < u.length; i += 8192) s += String.fromCharCode(...u.subarray(i, i + 8192)); return btoa(s); };
     const adapter = await navigator.gpu.requestAdapter();
@@ -187,13 +193,15 @@ async function runOnGPU(
       const v = GPUTensor.fromFloat32Array(device, dec(c.v), [c.batch, c.seqK, c.dim]);
       const mask = c.mask ? GPUTensor.fromFloat32Array(device, dec(c.mask), c.maskShape) : undefined;
       const opts = { scale: c.scale, mask, kernel: c.kernel, skipMaskedTiles: c.skipMaskedTiles };
-      const plan = planAttention(c.batch, c.seqQ, c.dim, !!mask, device.limits.maxComputeWorkgroupStorageSize, opts);
+      const keys = watch(device);
+      keys.length = 0;
       device.pushErrorScope("validation");
       const o = await runAttention(device, q, k, v, opts);
       const data = await o.toFloat32Array();
       const err = await device.popErrorScope();
       if (err) throw new Error("validation error: " + err.message);
-      out.push({ out: enc(data), kernel: plan.kernel, limit: device.limits.maxComputeWorkgroupStorageSize });
+      const kernel = keys.some((k) => k.startsWith("sdpafast:")) ? "fast" : keys.some((k) => k.startsWith("sdpa:")) ? "generic" : "none";
+      out.push({ out: enc(data), kernel, limit: device.limits.maxComputeWorkgroupStorageSize });
       for (const t of [q, k, v, o, mask]) t?.free();
     }
     return out;
@@ -221,28 +229,7 @@ function assertClose(actual: Float32Array, expected: Float64Array, label: string
   assert.ok(worst <= 1e-4, `${label}: max |err| ${worst} at ${at} (got ${actual[at]}, expected ${expected[at]})`);
 }
 
-test("planAttention: fast kernel for head dim 32/64 when its workgroup memory fits, generic otherwise; generic tiles shrink to the limit", () => {
-  const DEFAULT = 16384;
-  assert.equal(planAttention(1, 10, 32, false, DEFAULT).kernel, "fast");
-  assert.ok(fastAttentionBytes(64, true) > DEFAULT, "fast D=64 needs raised limits");
-  assert.equal(planAttention(1, 10, 64, true, DEFAULT).kernel, "generic");
-  assert.equal(planAttention(1, 10, 64, true, 32768).kernel, "fast");
-  assert.equal(planAttention(1, 10, 48, false, 32768).kernel, "generic");
-  assert.throws(() => planAttention(1, 10, 48, false, 32768, { kernel: "fast" }), /fast kernel/);
-  assert.equal(planAttention(3, 70, 32, false, DEFAULT).groups.join(), "3,3");
-  for (const D of [4, 64, 128, 256]) {
-    const cfg = genericAttentionConfig(D, DEFAULT, true);
-    assert.ok(cfg && genericAttentionBytes(D, cfg, true) <= DEFAULT, `D=${D} fits the default limit`);
-  }
-  assert.equal(genericAttentionConfig(128, DEFAULT, false)?.BQ, 8);
-  // Skipping is a code-generation choice: the masked kernels with and without it differ.
-  assert.notEqual(
-    planAttention(1, 10, 32, true, DEFAULT, { skipMaskedTiles: true }).code,
-    planAttention(1, 10, 32, true, DEFAULT, { skipMaskedTiles: false }).code,
-  );
-});
-
-test("runAttention: unmasked and masked (sliding window, padding, causal, per-element), both kernels, tile skipping on and off, match NumPy", async (t) => {
+test("runAttention: unmasked and masked (sliding window, padding, causal, per-element, fully masked row), both kernels, match NumPy", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
   if (!PYTHON) return t.skip(NO_ORACLE);
@@ -250,17 +237,17 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   const cases: Case[] = [];
   cases.push(makeCase("fast D=64 unmasked", 2, 37, 45, 64, { expectKernel: "fast" }, 1));
   cases.push(makeCase("fast D=32 unmasked, odd scale", 1, 5, 3, 32, { expectKernel: "fast", scale: 0.7 }, 4));
+  cases.push(
+    makeCase("fast D=32 sliding window", 2, 40, 70, 32, {
+      expectKernel: "fast",
+      mask: slidingWindow(40, 70, 6),
+      maskShape: [40, 70],
+    }, 7),
+  );
   for (const skip of [true, false]) {
+    // skipMaskedTiles is deprecated and ignored (backend-webgpu always skips): both values must still work.
     cases.push(
-      makeCase(`fast D=32 sliding window skip=${skip}`, 2, 40, 70, 32, {
-        expectKernel: "fast",
-        mask: slidingWindow(40, 70, 6),
-        maskShape: [40, 70],
-        skipMaskedTiles: skip,
-      }, 7),
-    );
-    cases.push(
-      makeCase(`generic D=48 per-element mask with a fully masked row skip=${skip}`, 2, 20, 50, 48, {
+      makeCase(`generic D=48 per-element mask with a fully masked row skipMaskedTiles=${skip}`, 2, 20, 50, 48, {
         expectKernel: "generic",
         mask: randomMask(2, 20, 50, 99),
         maskShape: [2, 20, 50],
@@ -276,16 +263,16 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
     }, 13),
   );
   cases.push(
-    makeCase("generic D=64 (default 16 KiB limit) key padding", 3, 33, 90, 64, {
-      expectKernel: "generic",
+    makeCase("composed fallback D=64 (default 16 KiB limit) key padding", 3, 33, 90, 64, {
+      expectKernel: "none",
       raisedLimits: false,
       mask: padding(3, 90, [90, 50, 17]),
       maskShape: [3, 1, 90],
     }, 16),
   );
   cases.push(
-    makeCase("generic D=128 (default limit) causal", 2, 40, 40, 128, {
-      expectKernel: "generic",
+    makeCase("composed fallback D=128 (default limit) causal", 2, 40, 40, 128, {
+      expectKernel: "none",
       raisedLimits: false,
       mask: causal(40, 40),
       maskShape: [40, 40],
@@ -293,8 +280,8 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   );
   cases.push(makeCase("generic D=5 unmasked", 2, 9, 11, 5, { expectKernel: "generic", scale: 0.7 }, 22));
   cases.push(
-    makeCase("forced generic D=32 padding [Lk] broadcast to every batch and query", 2, 17, 64, 32, {
-      expectKernel: "generic",
+    makeCase("kernel: \"generic\" (deprecated, ignored) D=32 padding [Lk] broadcast to every batch and query", 2, 17, 64, 32, {
+      expectKernel: "fast",
       kernel: "generic",
       mask: padding(1, 64, [30]),
       maskShape: [64],
@@ -304,34 +291,33 @@ test("runAttention: unmasked and masked (sliding window, padding, causal, per-el
   const expected = runOracle(cases);
   const got = await runOnGPU(harness, cases);
   cases.forEach((c, i) => {
-    // An adapter whose maximum workgroup memory is still 16 KiB (e.g. a software one) can't run fast D=64.
-    const fits = c.kernel !== "auto" || fastAttentionBytes(c.dim, c.mask !== undefined) <= (got[i]?.limit ?? 0);
-    assert.equal(got[i]?.kernel, c.expectKernel === "fast" && !fits ? "generic" : c.expectKernel, `${c.name}: kernel`);
+    assert.equal(got[i]?.kernel, c.expectKernel, `${c.name}: kernel`);
     assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c.name);
   });
 });
 
-test("runAttention: masked key tiles are actually skipped — non-finite V rows in tiles no query can see don't reach the output with skipping on, and do with it off", async (t) => {
+test("runAttention: masked key tiles are actually skipped — non-finite V rows in tiles no query can see don't reach the output (fast kernel, head dim 32 and 64)", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
   if (!PYTHON) return t.skip(NO_ORACLE);
   // Key padding: batch b sees keys [0, len_b). Every key from the next
   // 32-aligned boundary on lives in a tile no query of that batch entry can
   // see; poison those V rows with NaN. A skipped tile is never loaded; a
-  // walked one multiplies its zero weights by NaN.
+  // walked one multiplies its zero weights by NaN. (Turning skipping off —
+  // the old `skipMaskedTiles: false` — no longer exists: backend-webgpu
+  // always skips, and that option is deprecated and ignored.)
   const batch = 2;
   const seqQ = 24;
   const seqK = 128;
-  const dim = 32;
   const lens = [40, 70];
   const cases: Case[] = [];
-  for (const [kernel, skip] of [["fast", true], ["generic", true], ["fast", false], ["generic", false]] as const) {
-    const c = makeCase(`${kernel} skip=${skip}`, batch, seqQ, seqK, dim, {
+  // Only backend-webgpu's fast kernel (head dim 32/64) skips masked tiles; its
+  // generic kernel walks every key tile (a documented limitation).
+  for (const [kernel, dim] of [["fast", 32], ["fast", 64]] as const) {
+    const c = makeCase(`${kernel} D=${dim}`, batch, seqQ, seqK, dim, {
       expectKernel: kernel,
-      kernel,
       mask: padding(batch, seqK, lens),
       maskShape: [batch, 1, seqK],
-      skipMaskedTiles: skip,
     }, 31);
     for (let b = 0; b < batch; b++) {
       const from = Math.ceil((lens[b] as number) / 32) * 32;
@@ -341,10 +327,10 @@ test("runAttention: masked key tiles are actually skipped — non-finite V rows 
   }
   const expected = runOracle(cases);
   const got = await runOnGPU(harness, cases);
-  for (let i = 0; i < 2; i++) assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, (cases[i] as Case).name);
-  for (let i = 2; i < 4; i++) {
-    assert.ok((got[i]?.out as Float32Array).some(Number.isNaN), `${(cases[i] as Case).name}: walking every tile should reach the NaN rows`);
-  }
+  cases.forEach((c, i) => {
+    assert.equal(got[i]?.kernel, c.expectKernel, `${c.name}: kernel`);
+    assertClose(got[i]?.out as Float32Array, expected[i] as Float64Array, c.name);
+  });
 });
 
 test("runAttention: rejects f16 operands, mismatched shapes, and non-broadcastable masks", async (t) => {
@@ -363,6 +349,7 @@ test("runAttention: rejects f16 operands, mismatched shapes, and non-broadcastab
     await attempt(() => runAttention(device, q, k, v, { mask: t([3, 4, 6]) }));
     await attempt(() => runAttention(device, q, k, v, { mask: t([4, 5]) }));
     await attempt(() => runAttention(device, GPUTensor.fromFloat16Bits(device, new Uint16Array(64), [2, 4, 8]), k, v));
+    await attempt(() => runAttention(device, t([1, 4, 48]), t([1, 6, 48]), t([1, 6, 48]), { kernel: "fast" }));
     return msgs;
     `,
     bundle,
@@ -371,4 +358,5 @@ test("runAttention: rejects f16 operands, mismatched shapes, and non-broadcastab
   assert.match(errors[1] as string, /not broadcastable/);
   assert.match(errors[2] as string, /not broadcastable/);
   assert.match(errors[3] as string, /f32 GPUTensors only/);
+  assert.match(errors[4] as string, /fast kernel needs head dim 32 or 64/);
 });

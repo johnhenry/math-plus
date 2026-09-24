@@ -1,5 +1,11 @@
 # WebGPU runtime wins ported from laya-js (2026-09-23)
 
+> **Superseded by issue #146 (2026-09-24).** The ported runtime (`gpu-runtime.ts`) and its
+> measurement script (`scripts/measure-runtime.ts`) were removed: `@johnhenry/math-plus-tensor-webgpu`
+> now runs every op on `@johnhenry/backend-webgpu`'s runtime, which has all six wins below and also
+> batches dispatches into one compute pass per submit (the open item in row 1). The numbers are kept
+> as the record of what the port measured; the scripts named below are in git history (before #146).
+
 Issue #126. laya-js's WebGPU backend (same author) found several wins beyond its GEMM kernels.
 This spike ports the ones that fit `@johnhenry/math-plus-tensor-webgpu` and measures each one on
 this package's own code paths. The laya-js numbers don't carry over directly. laya-js batches

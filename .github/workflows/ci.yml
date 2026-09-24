@@ -197,11 +197,12 @@ jobs:
 
       - run: npm ci
 
-      # Only the two packages the MLX suites import: no Rust/WASM toolchain on
+      # Only the packages the MLX suites import: no Rust/WASM toolchain on
       # this leg (the Linux legs build and test everything).
-      - name: Build (special + tensor-core + tensor-mlx)
-        # tensor-core depends on math-plus-special (the canonical erf), so build it first.
-        run: npm run build -w @johnhenry/math-plus-special -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-tensor-mlx
+      - name: Build (special + tensor-core + tensor-cpu + tensor-mlx)
+        # tensor-core depends on math-plus-special (the canonical erf), so build it first;
+        # tensor-mlx imports the shared Tensor<->HostTensor bridge from tensor-cpu (#146).
+        run: npm run build -w @johnhenry/math-plus-special -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-tensor-cpu -w @johnhenry/math-plus-tensor-mlx
 
       - name: Report the runner and the MLX bundle the tests load
         run: |

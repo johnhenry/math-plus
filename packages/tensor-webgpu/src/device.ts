@@ -1,6 +1,16 @@
 /**
- * WebGPU capability detection + the GPU-resident tensor type (issue #12, v1
- * scope items 4 & 5: "`await x.to('webgpu')` stays explicit and async").
+ * WebGPU capability detection + the legacy GPU-resident tensor type (issue
+ * #12, v1 scope items 4 & 5: "`await x.to('webgpu')` stays explicit and
+ * async").
+ *
+ * DEPRECATED surface (issue #146): `GPUTensor` and `toWebGPU` keep working
+ * through a deprecation window, now as a thin layer over
+ * `@johnhenry/backend-webgpu` (a `GPUTensor` is a `WebGpuTensor` of the
+ * device's backend plus the legacy methods). New code should use
+ * `createWebGpuDevice()` (facade.ts): `await gpu.fromTensor(t)` /
+ * `await gpu.toTensor(x)` and the backend's ops. `detectWebGPU` stays
+ * supported — it is how you get a device with subgroup matrices detected
+ * when you want to own the device yourself.
  *
  * Design decision (documented per the issue's "you decide the exact shape"):
  * this package does NOT monkey-patch `@johnhenry/math-plus-tensor-core`'s `Tensor` class
@@ -28,7 +38,8 @@
  * and elementwise fusion remain f32-only.
  */
 import { Tensor, type Shape } from "@johnhenry/math-plus-tensor-core";
-import { paddedByteLength, readBackBytes, writePadded } from "./gpu-runtime.ts";
+import type { WebGpuTensor } from "@johnhenry/backend-webgpu";
+import { backendFor, readRaw, uploadSync, wrapBuffer } from "./bridge.ts";
 import { registerGemmAdapter, SUBGROUP_MATRIX_FEATURE, type GemmCapabilities } from "./gemm-caps.ts";
 
 /** Storage dtypes a {@link GPUTensor} can hold. */
@@ -74,8 +85,23 @@ export interface DetectWebGPUOptions {
   timestampQuery?: boolean;
 }
 
-/** Adapter limits worth raising from their spec defaults when the hardware allows (large GEMM operands need big storage bindings; the head-dim-64 fused attention kernel needs ~20 KiB of workgroup memory). */
-const RAISED_LIMITS = ["maxStorageBufferBindingSize", "maxBufferSize", "maxComputeWorkgroupStorageSize"] as const;
+/**
+ * Adapter limits raised from their spec defaults when the hardware allows —
+ * the same list `@johnhenry/backend-webgpu` raises on devices it creates
+ * (large GEMM operands need big storage bindings; the head-dim-64 fused
+ * attention kernel needs ~20 KiB of workgroup memory; wide fused
+ * expressions need more than 8 storage buffers).
+ */
+const RAISED_LIMITS = [
+  "maxStorageBufferBindingSize",
+  "maxBufferSize",
+  "maxComputeWorkgroupStorageSize",
+  "maxComputeInvocationsPerWorkgroup",
+  "maxComputeWorkgroupSizeX",
+  "maxComputeWorkgroupSizeY",
+  "maxComputeWorkgroupsPerDimension",
+  "maxStorageBuffersPerShaderStage",
+] as const;
 
 /**
  * Feature-detect WebGPU and, if present, actually request an adapter +
@@ -131,25 +157,41 @@ function shapeSize(shape: Shape): number {
 }
 
 /**
- * A tensor whose data (f32, or f16 bits) lives in a `GPUBuffer` (STORAGE |
- * COPY_SRC | COPY_DST usage) rather than a JS `TypedArray`. Created via
- * {@link toWebGPU}; `.free()` releases the underlying `GPUBuffer` — WebGPU
- * buffers are NOT garbage collected on a predictable schedule, so (like
- * `@johnhenry/math-plus-tensor-wasm`'s `WasmTensor`) this is manual memory
- * management, not GC'd JS storage.
+ * A tensor whose data (f32, or f16 bits) lives on the GPU — since issue
+ * #146 a `WebGpuTensor` of `@johnhenry/backend-webgpu` (see {@link handle}),
+ * held in that runtime's buffer pool. `.free()` returns the buffer to the
+ * pool (or, for {@link fromBuffer}, destroys the caller's buffer) — manual
+ * memory management, like `@johnhenry/math-plus-tensor-wasm`'s `WasmTensor`.
+ *
+ * @deprecated Use `createWebGpuDevice()`: `await gpu.fromTensor(t)` returns
+ * a backend `WebGpuTensor` directly, ops are `gpu.backend.*`, and
+ * `await gpu.toTensor(x)` reads it back. `GPUTensor` stays through the
+ * deprecation window announced in the 0.2.0 changelog.
  */
 export class GPUTensor {
   readonly device: GPUDevice;
-  readonly buffer: GPUBuffer;
   readonly shape: Shape;
   readonly dtype: GPUDType;
+  /**
+   * The backend-webgpu tensor behind this `GPUTensor` — pass it to
+   * `backendFor(device)`'s / `createWebGpuDevice({ device }).backend`'s ops
+   * to migrate incrementally. Owned by this `GPUTensor`: don't dispose it.
+   */
+  readonly handle: WebGpuTensor;
+  readonly #external: boolean;
   #freed = false;
 
-  private constructor(device: GPUDevice, buffer: GPUBuffer, shape: Shape, dtype: GPUDType) {
+  private constructor(device: GPUDevice, handle: WebGpuTensor, dtype: GPUDType, external: boolean) {
     this.device = device;
-    this.buffer = buffer;
-    this.shape = Object.freeze([...shape]);
+    this.handle = handle;
+    this.shape = Object.freeze([...handle.shape]);
     this.dtype = dtype;
+    this.#external = external;
+  }
+
+  /** The `GPUBuffer` holding the data (starting at element 0 of this tensor; pooled buffers may be larger than the data). */
+  get buffer(): GPUBuffer {
+    return this.handle.storage.buffer;
   }
 
   static fromFloat32Array(device: GPUDevice, data: Float32Array, shape: Shape): GPUTensor {
@@ -158,7 +200,7 @@ export class GPUTensor {
         `GPUTensor.fromFloat32Array: shape [${shape}] (${shapeSize(shape)} elements) does not match data length ${data.length}`,
       );
     }
-    return GPUTensor.#upload(device, data, shape, "f32");
+    return new GPUTensor(device, uploadSync(backendFor(device), data, shape, "f32"), "f32", false);
   }
 
   /**
@@ -174,49 +216,40 @@ export class GPUTensor {
         `GPUTensor.fromFloat16Bits: shape [${shape}] (${shapeSize(shape)} elements) does not match data length ${bits.length}`,
       );
     }
-    return GPUTensor.#upload(device, bits, shape, "f16");
-  }
-
-  static #upload(device: GPUDevice, data: Float32Array | Uint16Array, shape: Shape, dtype: GPUDType): GPUTensor {
-    const buffer = device.createBuffer({
-      size: paddedByteLength(data.byteLength),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    });
-    writePadded(device, buffer, data);
-    return new GPUTensor(device, buffer, shape, dtype);
+    return new GPUTensor(device, uploadSync(backendFor(device), bits, shape, "f16"), "f16", false);
   }
 
   /**
-   * Wrap an ALREADY-POPULATED GPU buffer as a `GPUTensor` with no host
-   * round-trip (issue #100) — for op implementations (attention.ts, gemm.ts,
-   * elementwise.ts) that compute directly into a buffer they allocated (e.g.
-   * a compute shader's output) and want the result to stay GPU-resident for
-   * chaining into further dispatches, rather than reading it back to a
-   * `Float32Array` just to re-upload it via {@link fromFloat32Array}. `buffer`
-   * must already be sized for `shape` (`shapeSize(shape) * 4` bytes for f32,
-   * `* 2` rounded up to a multiple of 4 for f16) and
-   * usable both as a dispatch output and, if the caller ever calls
-   * {@link toTensor}/{@link toFloat32Array} on the result or reuses it as an
-   * upload target, as a copy source/destination too — i.e. it should carry at
-   * least `STORAGE`, and typically `COPY_SRC`/`COPY_DST` as well, matching
-   * what {@link fromFloat32Array} itself allocates (`gpu-runtime.ts`'s
-   * `allocateGPUResidentBuffer` returns exactly that combination).
+   * Wrap an ALREADY-POPULATED `GPUBuffer` you own as a `GPUTensor`, with no
+   * host round-trip (issue #100). It must hold the data from byte 0
+   * (`shapeSize(shape) * 4` bytes for f32, `* 2` rounded up to a multiple of
+   * 4 for f16) and carry at least `STORAGE | COPY_SRC`. `.free()` destroys it.
    */
   static fromBuffer(device: GPUDevice, buffer: GPUBuffer, shape: Shape, dtype: GPUDType = "f32"): GPUTensor {
-    return new GPUTensor(device, buffer, shape, dtype);
+    return new GPUTensor(device, wrapBuffer(buffer, shape, dtype), dtype, true);
+  }
+
+  /** @internal Wrap a backend-owned result (ownership moves to the `GPUTensor`). */
+  static _fromHandle(device: GPUDevice, handle: WebGpuTensor): GPUTensor {
+    if (handle.dtype !== "f32" && handle.dtype !== "f16") throw new TypeError(`GPUTensor: unsupported dtype ${handle.dtype}`);
+    return new GPUTensor(device, handle, handle.dtype, false);
+  }
+
+  /** @internal The live backend tensor, for the deprecated op shims. */
+  _live(op: string): WebGpuTensor {
+    if (this.#freed) throw new Error(`${op}: GPUTensor used after free()`);
+    return this.handle;
   }
 
   async #readBytes(): Promise<ArrayBuffer> {
-    if (this.#freed) throw new Error("GPUTensor: use after free()");
-    return readBackBytes(this.device, this.buffer, this.buffer.size);
+    return readRaw(backendFor(this.device), this._live("GPUTensor"));
   }
 
   /**
-   * Read the buffer back into a plain `Float32Array` (host copy — for
-   * `.toTensor()` or inspection/testing). For an f16 tensor this decodes via
-   * the platform's `Float16Array` (Chrome >= 135, Node >= 24, Deno, Bun) and
-   * throws where that's missing rather than shipping a second f16 codec —
-   * use {@link toUint16Array} for the raw bits.
+   * Read the data back into a plain `Float32Array` (host copy). For an f16
+   * tensor this decodes via the platform's `Float16Array` (Chrome >= 135,
+   * Node >= 24, Deno, Bun) and throws where that's missing rather than
+   * shipping a second f16 codec — use {@link toUint16Array} for the raw bits.
    */
   async toFloat32Array(): Promise<Float32Array> {
     if (this.dtype === "f16") {
@@ -236,11 +269,9 @@ export class GPUTensor {
   }
 
   /**
-   * GPU -> CPU: the inverse of {@link toWebGPU}. Always a copy (never aliases
-   * the `GPUBuffer`), and always explicit/async — no implicit CPU<->GPU
-   * copying (this repo's non-goal 5), same as `toWebGPU` itself. An f16
-   * `GPUTensor` comes back as an `"f16"` tensor-core `Tensor` (Uint16Array
-   * bits), not widened to f32.
+   * GPU -> CPU: the inverse of {@link toWebGPU}. Always a copy, and always
+   * explicit/async (non-goal 5). An f16 `GPUTensor` comes back as an
+   * `"f16"` tensor-core `Tensor` (Uint16Array bits), not widened to f32.
    */
   async toTensor(): Promise<Tensor> {
     if (this.dtype === "f16") {
@@ -249,19 +280,27 @@ export class GPUTensor {
     return Tensor.fromTypedArray(await this.toFloat32Array(), this.shape, { dtype: "f32" });
   }
 
+  /** Release the GPU memory. Idempotent. Pending (already encoded) work that reads it is submitted first. */
   free(): void {
     if (this.#freed) return;
-    this.buffer.destroy();
     this.#freed = true;
+    const b = backendFor(this.device);
+    if (this.#external) {
+      b.flush();
+      this.handle.storage.buffer.destroy();
+    } else {
+      b.dispose(this.handle);
+    }
   }
 }
 
 /**
- * CPU -> GPU: the explicit, awaited device transfer the issue calls for
- * (v1 non-goal 5 — no implicit copying). Requires an `"f32"` or `"f16"`
- * tensor and a contiguous one (call `.contiguous()` first on a
- * view/transposed tensor — matches `@johnhenry/math-plus-tensor-wasm`'s
- * `WasmTensor.fromArray` contract).
+ * CPU -> GPU: the explicit, awaited device transfer (v1 non-goal 5 — no
+ * implicit copying). Requires an `"f32"` or `"f16"` tensor and a contiguous
+ * one (call `.contiguous()` first on a view/transposed tensor).
+ *
+ * @deprecated Use `createWebGpuDevice()` and `await gpu.fromTensor(tensor)`
+ * (every device dtype, not just f32/f16).
  */
 export async function toWebGPU(tensor: Tensor, device: GPUDevice): Promise<GPUTensor> {
   if (tensor.dtype !== "f32" && tensor.dtype !== "f16") {

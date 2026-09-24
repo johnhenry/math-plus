@@ -36,6 +36,8 @@ import * as K from "@johnhenry/math-plus-tensor-core/kernels";
 
 /** The canonical scalar erf / erfc / exact GELU the backend uses (from @johnhenry/math-plus-special via tensor-core). */
 export { erf, erfc, geluErf as geluScalar } from "@johnhenry/math-plus-tensor-core";
+/** The tensor-core `Tensor` <-> `HostTensor` bridge every math-plus device package (tensor-mlx, tensor-webgpu) uses; see host.ts. */
+export { DEVICE_DTYPES, hostFromTensor, isDeviceDType, tensorFromHost, type DeviceDType } from "./host.ts";
 
 type CpuDType = "f32" | "i32" | "bool";
 type Data = Float32Array | Int32Array | Uint8Array;

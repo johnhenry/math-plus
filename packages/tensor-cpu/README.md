@@ -75,6 +75,17 @@ Where each op's computation lives:
 All of these come from the `@johnhenry/math-plus-tensor-core/kernels`
 subpath.
 
+### Host bridge (shared by the device packages)
+
+`hostFromTensor(t, label?)` and `tensorFromHost(h)` convert between a
+tensor-core `Tensor` and a tensor-backend `HostTensor` without copying
+element data (f16 is re-viewed as a `Float16Array`; non-contiguous tensors
+and dtypes outside `DEVICE_DTYPES` throw instead of being converted
+implicitly). `@johnhenry/math-plus-tensor-mlx` and
+`@johnhenry/math-plus-tensor-webgpu` use these for their explicit
+`fromTensor`/`toTensor` transfers, so the mapping has one implementation.
+Also exported: `DEVICE_DTYPES`, `isDeviceDType`.
+
 ## Dtypes
 
 - **Storage.** Float tensors are `Float32Array`, `i32` is `Int32Array`, and

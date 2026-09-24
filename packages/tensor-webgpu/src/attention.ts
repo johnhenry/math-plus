@@ -1,112 +1,48 @@
 /**
- * WebGPU attention-adjacent primitives (issue #12, v1 scope item 2): the
- * three ops that make up scaled-dot-product-attention's core —
- * `runQKT` (batched Q @ K^T), `runSoftmax` (numerically stable, last axis),
- * `runWeightedSum` (batched weights @ V) — kept as separate dispatches
- * rather than one fused flash-attention-style kernel, matching the issue's
- * explicit v1 scope ("these three primitives, not a fused kernel").
+ * WebGPU attention entry points (issue #12 primitives, issue #126 fused
+ * attention), since issue #146 running on `@johnhenry/backend-webgpu`:
  *
- * Since issue #126 there is ALSO a fused path, {@link runAttention}: one
- * flash-style dispatch (kernels in attention-kernels.ts, ported from
- * laya-js) with an optional mask and masked-key-tile skipping. The three
- * primitives stay as they were (unmasked, unscaled) for callers that want
- * the intermediates.
+ * - `runQKT` (batched Q·Kᵀ, unscaled), `runSoftmax` (last axis) and
+ *   `runWeightedSum` (batched weights·V) are the backend's `matmul`,
+ *   `softmax` and strided `transpose`.
+ * - `runAttention` is the backend's fused flash `sdpa` (online softmax,
+ *   a head-dim 32/64 fast path that skips masked key tiles, and a generic
+ *   kernel up to head dim 256), with this package's f32 mask convention
+ *   and its "a query row with no visible key produces 0" guarantee kept on
+ *   top (the backend leaves that case undefined). On devices with less
+ *   than 32 KiB of workgroup memory it is composed from matmul/softmax
+ *   instead (see `FUSED_SDPA_MIN_WORKGROUP_BYTES`).
  *
- * Shape convention throughout: `Q`/`K`/`V` are `(batch, seq, dim)` row-major
- * contiguous, f32.
+ * Shape convention (unchanged): `Q`/`K`/`V` are `(batch, seq, dim)`
+ * row-major, f32; fold heads into `batch`. Every result is a GPU-resident
+ * `GPUTensor` the caller owns and must `.free()`; inputs are never freed.
  *
- * GPU residency (issue #100): all three primitives take and return
- * {@link GPUTensor}, not `Float32Array` — chaining `runQKT` -> `runSoftmax` ->
- * `runWeightedSum` (as scaled-dot-product-attention does) used to round-trip
- * every intermediate through the CPU (`Float32Array` out of one call,
- * re-uploaded as a fresh storage buffer by the next), even though nothing
- * outside the GPU ever needed to see those intermediates. Each function now
- * dispatches directly against its inputs' existing `GPUBuffer`s and wraps its
- * output buffer as a `GPUTensor` via `GPUTensor.fromBuffer` (device.ts) — no
- * host copy happens until/unless a caller explicitly calls `.toTensor()`/
- * `.toFloat32Array()` on a result. No wait/fence is needed between chained
- * calls either: every dispatch here goes through `device.queue`, and WebGPU
- * serializes queue submissions in order, so a later dispatch reading a
- * buffer an earlier dispatch wrote is automatically ordered correctly.
- * Callers own every `GPUTensor` they get back and must `.free()` it
- * (including intermediates they don't read back) — this module never frees
- * a caller-supplied input.
+ * @deprecated These `GPUDevice` + `GPUTensor` entry points are kept through
+ * the deprecation window (see the 0.2.0 changelog). New code:
+ * `createWebGpuDevice()` and `gpu.backend.sdpa(q, k, v, mask, scale)` on
+ * `[B, H, L, D]` tensors (bool mask), or `matmul`/`softmax` directly.
  */
+import type { WebGpuBackend, WebGpuTensor } from "@johnhenry/backend-webgpu";
+import { backendFor } from "./bridge.ts";
 import { GPUTensor } from "./device.ts";
-import {
-  fastAttentionBytes,
-  fastAttentionWGSL,
-  FAST_BQ,
-  genericAttentionConfig,
-  genericAttentionWGSL,
-  type AttentionKernel,
-} from "./attention-kernels.ts";
-import { allocateGPUResidentBuffer, bindingOf, dispatchKernel, getKernelChecked, type SizedBuffer } from "./gpu-runtime.ts";
 
-const TILE = 8;
-
-/** Attention kernels are f32-only: reject f16 `GPUTensor`s up front instead of reinterpreting their bits as f32. */
-function f32Binding(op: string, t: GPUTensor): SizedBuffer {
+/** Attention is f32-only through these shims: reject f16 `GPUTensor`s up front. */
+function f32Handle(op: string, t: GPUTensor): WebGpuTensor {
   if (t.dtype !== "f32") throw new TypeError(`${op}: f32 GPUTensors only (got ${t.dtype}); only GEMM supports f16`);
-  return bindingOf(t);
+  return t._live(op);
 }
 
-/**
- * Dispatch a compute shader (3-D workgroup grid) and wrap its output buffer
- * as a `GPUTensor` of `outShape` WITHOUT reading it back. `dims` travels in
- * the runtime's uniform ring (gpu-runtime.ts `dispatchKernel`), and the
- * bind group is cached across calls on the same buffers.
- */
-function dispatch3DResident(
-  device: GPUDevice,
-  label: string,
-  code: string,
-  bindings: readonly SizedBuffer[],
-  dims: readonly [number, number, number, number],
-  outputIndex: number,
-  outShape: readonly number[],
-  x: number,
-  y: number,
-  z: number,
-): GPUTensor {
-  dispatchKernel(device, code, bindings, [x, y, z], { uniform: new Uint32Array(dims), label });
-  return GPUTensor.fromBuffer(device, (bindings[outputIndex] as SizedBuffer).buffer, outShape);
+function numel(shape: readonly number[]): number {
+  return shape.reduce((a, b) => a * b, 1);
 }
-
-const QKT_WGSL = `
-struct Dims { seqQ: u32, seqK: u32, dim: u32, batch: u32 };
-@group(0) @binding(0) var<storage, read> q: array<f32>;
-@group(0) @binding(1) var<storage, read> k: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-@group(0) @binding(3) var<uniform> dims: Dims;
-
-@compute @workgroup_size(${TILE}, ${TILE}, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let col = gid.x; // index into seqK
-  let row = gid.y; // index into seqQ
-  let b = gid.z;   // batch
-  if (col >= dims.seqK || row >= dims.seqQ || b >= dims.batch) {
-    return;
-  }
-  let qBase = (b * dims.seqQ + row) * dims.dim;
-  let kBase = (b * dims.seqK + col) * dims.dim;
-  var acc: f32 = 0.0;
-  for (var d: u32 = 0u; d < dims.dim; d = d + 1u) {
-    acc = acc + q[qBase + d] * k[kBase + d];
-  }
-  out[(b * dims.seqQ + row) * dims.seqK + col] = acc;
-}
-`;
 
 /**
  * `scores[b, i, j] = sum_d Q[b, i, d] * K[b, j, d]` — `Q @ K^T` per batch,
- * unscaled (callers apply `1/sqrt(dim)` themselves, e.g. by pre-scaling `Q`,
- * matching how most reference attention implementations separate the scale
- * from the matmul rather than baking it into the kernel). `q`/`k` must
- * already be `(batch, seqQ|seqK, dim)`-shaped `GPUTensor`s (e.g. via
- * `toWebGPU`); the result is a GPU-resident `(batch, seqQ, seqK)` `GPUTensor`
- * — call `.toTensor()`/`.toFloat32Array()` on it if you need it on the CPU,
- * or pass it straight into `runSoftmax` to stay on-device.
+ * unscaled (callers apply `1/sqrt(dim)` themselves). `q`/`k` must already
+ * be `(batch, seqQ|seqK, dim)`-shaped; the result is a GPU-resident
+ * `(batch, seqQ, seqK)` `GPUTensor`.
+ *
+ * @deprecated See the module doc.
  */
 export async function runQKT(
   device: GPUDevice,
@@ -123,112 +59,34 @@ export async function runQKT(
   if (k.shape.length !== 3 || k.shape[0] !== batch || k.shape[1] !== seqK || k.shape[2] !== dim) {
     throw new RangeError(`runQKT: K shape [${k.shape}] does not match (batch=${batch}, seqK=${seqK}, dim=${dim})`);
   }
-  const bufOut = allocateGPUResidentBuffer(device, batch * seqQ * seqK);
-  return dispatch3DResident(
-    device,
-    "attention:qkt",
-    QKT_WGSL,
-    [f32Binding("runQKT", q), f32Binding("runQKT", k), bufOut],
-    [seqQ, seqK, dim, batch],
-    2,
-    [batch, seqQ, seqK],
-    Math.ceil(seqK / TILE),
-    Math.ceil(seqQ / TILE),
-    batch,
-  );
+  const b = backendFor(device);
+  const qh = f32Handle("runQKT", q);
+  const kh = f32Handle("runQKT", k);
+  return GPUTensor._fromHandle(device, b.scope(() => b.matmul(qh, b.transpose(kh, [0, 2, 1]))));
 }
-
-const SOFTMAX_WGSL = `
-struct Dims { rows: u32, cols: u32, _p0: u32, _p1: u32 };
-@group(0) @binding(0) var<storage, read> x: array<f32>;
-@group(0) @binding(1) var<storage, read_write> out: array<f32>;
-@group(0) @binding(2) var<uniform> dims: Dims;
-
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let row = gid.x;
-  if (row >= dims.rows) {
-    return;
-  }
-  let base = row * dims.cols;
-  var m: f32 = x[base];
-  for (var j: u32 = 1u; j < dims.cols; j = j + 1u) {
-    m = max(m, x[base + j]);
-  }
-  var sum: f32 = 0.0;
-  for (var j: u32 = 0u; j < dims.cols; j = j + 1u) {
-    sum = sum + exp(x[base + j] - m);
-  }
-  for (var j: u32 = 0u; j < dims.cols; j = j + 1u) {
-    out[base + j] = exp(x[base + j] - m) / sum;
-  }
-}
-`;
 
 /**
- * Numerically stable softmax along the LAST axis of a `(rows, cols)`
- * row-major `GPUTensor` (one GPU invocation per row; `cols` is walked
- * serially within the invocation, matching `Tensor.softmax`'s per-row
- * reduction shape — a parallel-reduction version is future work once
- * profiling shows this naive one is the bottleneck, not before). `x`'s shape
- * just needs `rows * cols` elements (e.g. a `(batch, seqQ, seqK)` QKT result
- * viewed as `(batch*seqQ, seqK)` — `rows`/`cols` are taken as given, not
- * inferred from `x.shape`, matching the pre-#100 signature). Returns a
- * GPU-resident `(rows, cols)` `GPUTensor`.
+ * Row-wise numerically stable softmax over a `rows x cols` row-major
+ * `GPUTensor` (`x` just needs `rows * cols` elements — e.g. a
+ * `(batch, seqQ, seqK)` QKᵀ result viewed as `(batch*seqQ, seqK)`).
+ * Returns a GPU-resident `(rows, cols)` `GPUTensor`.
+ *
+ * @deprecated See the module doc.
  */
-export async function runSoftmax(
-  device: GPUDevice,
-  x: GPUTensor,
-  rows: number,
-  cols: number,
-): Promise<GPUTensor> {
-  const size = x.shape.reduce((a, b) => a * b, 1);
+export async function runSoftmax(device: GPUDevice, x: GPUTensor, rows: number, cols: number): Promise<GPUTensor> {
+  const size = numel(x.shape);
   if (size !== rows * cols) throw new RangeError(`runSoftmax: x has ${size} elements, expected rows*cols ${rows * cols}`);
-  const bufOut = allocateGPUResidentBuffer(device, rows * cols);
-  return dispatch3DResident(
-    device,
-    "attention:softmax",
-    SOFTMAX_WGSL,
-    [f32Binding("runSoftmax", x), bufOut],
-    [rows, cols, 0, 0],
-    1,
-    [rows, cols],
-    Math.ceil(rows / 64),
-    1,
-    1,
-  );
+  const b = backendFor(device);
+  const xh = f32Handle("runSoftmax", x);
+  return GPUTensor._fromHandle(device, b.scope(() => b.softmax(b.reshape(xh, [rows, cols]), -1)));
 }
-
-const WEIGHTED_SUM_WGSL = `
-struct Dims { seqQ: u32, seqK: u32, dim: u32, batch: u32 };
-@group(0) @binding(0) var<storage, read> weights: array<f32>;
-@group(0) @binding(1) var<storage, read> v: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
-@group(0) @binding(3) var<uniform> dims: Dims;
-
-@compute @workgroup_size(${TILE}, ${TILE}, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let d = gid.x;   // index into dim
-  let row = gid.y; // index into seqQ
-  let b = gid.z;   // batch
-  if (d >= dims.dim || row >= dims.seqQ || b >= dims.batch) {
-    return;
-  }
-  let wBase = (b * dims.seqQ + row) * dims.seqK;
-  var acc: f32 = 0.0;
-  for (var j: u32 = 0u; j < dims.seqK; j = j + 1u) {
-    acc = acc + weights[wBase + j] * v[(b * dims.seqK + j) * dims.dim + d];
-  }
-  out[(b * dims.seqQ + row) * dims.dim + d] = acc;
-}
-`;
 
 /**
  * `out[b, i, d] = sum_j weights[b, i, j] * V[b, j, d]` — `weights @ V` per
- * batch (the softmax'd attention weights times the value tensor; `weights`
- * is typically `runSoftmax`'s output, but this function takes any
- * `(batch, seqQ, seqK)`-shaped `GPUTensor`). Returns a GPU-resident
- * `(batch, seqQ, dim)` `GPUTensor`.
+ * batch (`weights` needs `batch*seqQ*seqK` elements). Returns a
+ * GPU-resident `(batch, seqQ, dim)` `GPUTensor`.
+ *
+ * @deprecated See the module doc.
  */
 export async function runWeightedSum(
   device: GPUDevice,
@@ -239,26 +97,17 @@ export async function runWeightedSum(
   seqK: number,
   dim: number,
 ): Promise<GPUTensor> {
-  const weightsSize = weights.shape.reduce((a, b) => a * b, 1);
+  const weightsSize = numel(weights.shape);
   if (weightsSize !== batch * seqQ * seqK) {
     throw new RangeError(`runWeightedSum: weights has ${weightsSize} elements, expected batch*seqQ*seqK ${batch * seqQ * seqK}`);
   }
   if (v.shape.length !== 3 || v.shape[0] !== batch || v.shape[1] !== seqK || v.shape[2] !== dim) {
     throw new RangeError(`runWeightedSum: V shape [${v.shape}] does not match (batch=${batch}, seqK=${seqK}, dim=${dim})`);
   }
-  const bufOut = allocateGPUResidentBuffer(device, batch * seqQ * dim);
-  return dispatch3DResident(
-    device,
-    "attention:weighted-sum",
-    WEIGHTED_SUM_WGSL,
-    [f32Binding("runWeightedSum", weights), f32Binding("runWeightedSum", v), bufOut],
-    [seqQ, seqK, dim, batch],
-    2,
-    [batch, seqQ, dim],
-    Math.ceil(dim / TILE),
-    Math.ceil(seqQ / TILE),
-    batch,
-  );
+  const b = backendFor(device);
+  const wh = f32Handle("runWeightedSum", weights);
+  const vh = f32Handle("runWeightedSum", v);
+  return GPUTensor._fromHandle(device, b.scope(() => b.matmul(b.reshape(wh, [batch, seqQ, seqK]), vh)));
 }
 
 // ---- fused (flash) attention ---------------------------------------------------
@@ -275,84 +124,97 @@ export interface AttentionOptions {
    */
   mask?: GPUTensor;
   /**
-   * With a mask, skip key tiles that no query of a workgroup's block may
-   * attend to (see attention-kernels.ts). Default true; `false` exists for
-   * benchmarks and tests.
+   * @deprecated Ignored. backend-webgpu's fast kernel (head dim 32/64)
+   * always skips key tiles no query of a block may attend to; its generic
+   * kernel never does. (Turning skipping off existed for benchmarks.)
    */
   skipMaskedTiles?: boolean;
-  /** Force a kernel (throws if it doesn't fit this head dim / device). Default `"auto"`: `fast` when it fits, else `generic`. */
-  kernel?: AttentionKernel | "auto";
+  /**
+   * @deprecated backend-webgpu picks the kernel: `"fast"` for head dim 32/64,
+   * `"generic"` otherwise. Forcing `"fast"` on another head dim still
+   * throws; forcing `"generic"` is ignored.
+   */
+  kernel?: "fast" | "generic" | "auto";
 }
 
-export interface AttentionPlan {
-  kernel: AttentionKernel;
-  /** WGSL source (also the pipeline-cache key). */
-  code: string;
-  /** Workgroup grid `[x, y]` (query blocks, batch). */
-  groups: [number, number];
-}
-
-/**
- * Pick the attention kernel and build its shader (pure; exported for tests).
- * `workgroupStorageLimit` is the device's `maxComputeWorkgroupStorageSize`
- * (16 KiB unless raised): the fast kernel for head dim 64 needs ~20 KiB, and
- * the generic kernel's tile size shrinks until it fits.
- */
-export function planAttention(
-  batch: number,
-  seqQ: number,
-  dim: number,
-  masked: boolean,
-  workgroupStorageLimit: number,
-  opts: Pick<AttentionOptions, "kernel" | "skipMaskedTiles"> = {},
-): AttentionPlan {
-  const variant = { D: dim, masked, skipMaskedTiles: opts.skipMaskedTiles ?? true };
-  const fastFits = (dim === 32 || dim === 64) && fastAttentionBytes(dim, masked) <= workgroupStorageLimit;
-  const want = opts.kernel ?? "auto";
-  if (want === "fast" || (want === "auto" && fastFits)) {
-    if (!fastFits) {
-      throw new RangeError(
-        `planAttention: the fast kernel needs head dim 32 or 64 and ${fastAttentionBytes(dim === 64 ? 64 : 32, masked)} bytes of workgroup memory (dim ${dim}, limit ${workgroupStorageLimit})`,
-      );
-    }
-    return { kernel: "fast", code: fastAttentionWGSL(variant), groups: [Math.ceil(seqQ / FAST_BQ), batch] };
-  }
-  const cfg = genericAttentionConfig(dim, workgroupStorageLimit, masked);
-  if (!cfg) throw new RangeError(`planAttention: head dim ${dim} does not fit ${workgroupStorageLimit} bytes of workgroup memory`);
-  return { kernel: "generic", code: genericAttentionWGSL(variant, cfg), groups: [Math.ceil(seqQ / cfg.BQ), batch] };
-}
-
-/** Element strides of `shape` broadcast against `target` (right-aligned; size-1 axes get stride 0). */
-function broadcastStrides(op: string, shape: readonly number[], target: readonly number[]): number[] {
+/** Element strides of `shape` broadcast against `target` (right-aligned; size-1 axes get stride 0) — validates the mask shape. */
+function checkMaskShape(op: string, shape: readonly number[], target: readonly number[]): void {
   if (shape.length < 1 || shape.length > target.length) {
     throw new RangeError(`${op}: mask shape [${shape}] must have 1..${target.length} axes, broadcastable to [${target}]`);
   }
   const full = [...Array<number>(target.length - shape.length).fill(1), ...shape];
-  const strides = new Array<number>(full.length).fill(0);
-  let s = 1;
-  for (let i = full.length - 1; i >= 0; i--) {
-    const n = full[i] as number;
-    if (n !== target[i] && n !== 1) {
-      throw new RangeError(`${op}: mask shape [${shape}] is not broadcastable to [${target}]`);
+  full.forEach((n, i) => {
+    if (n !== target[i] && n !== 1) throw new RangeError(`${op}: mask shape [${shape}] is not broadcastable to [${target}]`);
+  });
+}
+
+/**
+ * Workgroup memory backend-webgpu@0.3's `sdpa` kernels may need: up to
+ * ~20 KiB (fast, head dim 64) and ~25 KiB (generic, head dims 32–256), and
+ * 0.3 does not check the device limit. Devices below this (the WebGPU
+ * default is 16 KiB; `detectWebGPU()` and `createWebGpuDevice()` raise it to
+ * the adapter's maximum) take the composed path instead. The limit-aware
+ * kernel choice is proposed upstream (johnhenry/laya-js#10).
+ */
+const FUSED_SDPA_MIN_WORKGROUP_BYTES = 32768;
+
+/**
+ * Attention on the backend: `q` `[B, Lq, D]`, `k`/`v` `[B, Lk, D]` (f32),
+ * `mask` f32 broadcastable to `[B, Lq, Lk]` (nonzero = attend) or null.
+ * Returns a new untracked `[B, Lq, D]` tensor (caller disposes). Query rows
+ * with no visible key are 0. Fused (`sdpa`) when the device has the
+ * workgroup memory for it; otherwise composed from `matmul`, `softmax` and
+ * `where`, which materializes the `[B, Lq, Lk]` scores.
+ */
+export function encodeAttention(
+  b: WebGpuBackend,
+  q: WebGpuTensor,
+  k: WebGpuTensor,
+  v: WebGpuTensor,
+  mask: WebGpuTensor | null,
+  scale: number,
+): WebGpuTensor {
+  const [batch, seqQ, dim] = q.shape as [number, number, number];
+  const seqK = k.shape[1] as number;
+  const fused = (b.device.limits.maxComputeWorkgroupStorageSize ?? 16384) >= FUSED_SDPA_MIN_WORKGROUP_BYTES;
+  return b.scope(() => {
+    // The mask right-aligned to (batch, seqQ, seqK), as bool.
+    const m3 = mask ? ([...Array<number>(3 - mask.shape.length).fill(1), ...mask.shape] as [number, number, number]) : null;
+    const mask3 = mask && m3 ? b.reshape(mask, m3) : null;
+    const visible = mask3 ? b.cast(mask3, "bool") : null;
+    let out: WebGpuTensor;
+    if (fused) {
+      const q4 = b.reshape(q, [batch, 1, seqQ, dim]);
+      const k4 = b.reshape(k, [batch, 1, seqK, dim]);
+      const v4 = b.reshape(v, [batch, 1, seqK, dim]);
+      const m4 = visible && m3 ? b.reshape(visible, [m3[0], 1, m3[1], m3[2]]) : null;
+      out = b.reshape(b.sdpa(q4, k4, v4, m4, scale), [batch, seqQ, dim]);
+    } else {
+      let logits = b.scale(b.matmul(q, b.transpose(k, [0, 2, 1])), scale);
+      if (visible) {
+        const ones = b.cast(b.logicalOr(visible, b.logicalNot(visible)), "f32");
+        logits = b.where(visible, logits, b.scale(ones, -1e30));
+      }
+      out = b.matmul(b.softmax(logits, -1), v);
     }
-    strides[i] = n === 1 ? 0 : s;
-    s *= n;
-  }
-  return strides;
+    if (!mask3) return out;
+    // Rows with no visible key: the fused kernel leaves them undefined (the
+    // composed one averages V); this API promises 0. anyVisible = max|mask|
+    // per (batch, query) row is nonzero iff some key is visible, and its ×0
+    // is a finite zero even where `out` is NaN.
+    const anyVisible = b.max(b.abs(mask3), 2, true);
+    return b.where(b.cast(anyVisible, "bool"), out, b.scale(anyVisible, 0));
+  });
 }
 
 /**
  * Fused scaled-dot-product attention, `softmax(scale · Q·Kᵀ + mask) · V`,
- * in ONE dispatch (flash-style: online softmax over key tiles, no
- * `(seqQ, seqK)` scores tensor in global memory) — the fused counterpart
- * of chaining {@link runQKT} → {@link runSoftmax} → {@link runWeightedSum},
- * plus mask support. `q` is `(batch, seqQ, dim)`, `k`/`v` are
- * `(batch, seqK, dim)`, all f32; fold heads into `batch`. Returns a
- * GPU-resident `(batch, seqQ, dim)` f32 `GPUTensor`.
+ * flash-style (no `(seqQ, seqK)` scores tensor in global memory). `q` is
+ * `(batch, seqQ, dim)`, `k`/`v` are `(batch, seqK, dim)`, all f32; fold
+ * heads into `batch`. Returns a GPU-resident `(batch, seqQ, dim)` f32
+ * `GPUTensor`. Head dims up to 256.
  *
- * With a mask, key tiles no query in a block may see are skipped entirely
- * (sliding-window and padding masks stop paying for the masked part);
- * docs/spikes/webgpu-runtime.md has the measurements.
+ * @deprecated See the module doc.
  */
 export async function runAttention(
   device: GPUDevice,
@@ -369,30 +231,18 @@ export async function runAttention(
   if (k.shape[0] !== batch || k.shape[2] !== dim || v.shape[0] !== batch || v.shape[1] !== seqK || v.shape[2] !== dim) {
     throw new RangeError(`runAttention: shapes do not agree: q [${q.shape}], k [${k.shape}], v [${v.shape}]`);
   }
-  const bindings = [f32Binding("runAttention", q), f32Binding("runAttention", k), f32Binding("runAttention", v)];
-  const mask = opts.mask;
-  let uniform: ArrayBuffer;
-  const scale = opts.scale ?? 1 / Math.sqrt(dim);
-  if (mask) {
-    bindings.push(f32Binding("runAttention", mask));
-    const [msb, msq, msk] = broadcastStrides("runAttention", mask.shape, [batch, seqQ, seqK]) as [number, number, number];
-    uniform = new ArrayBuffer(24);
-    new Uint32Array(uniform, 0, 5).set([seqQ, seqK, msb, msq, msk]);
-    new Float32Array(uniform, 20, 1)[0] = scale;
-  } else {
-    uniform = new ArrayBuffer(12);
-    new Uint32Array(uniform, 0, 2).set([seqQ, seqK]);
-    new Float32Array(uniform, 8, 1)[0] = scale;
+  if (opts.kernel === "fast" && dim !== 32 && dim !== 64) {
+    throw new RangeError(`runAttention: the fast kernel needs head dim 32 or 64 (got ${dim})`);
   }
-  const out = allocateGPUResidentBuffer(device, batch * seqQ * dim);
-  if (batch * seqQ * dim > 0) {
-    const limit = device.limits.maxComputeWorkgroupStorageSize ?? 16384;
-    const plan = planAttention(batch, seqQ, dim, mask !== undefined, limit, opts);
-    await getKernelChecked(device, plan.code, `attention:${plan.kernel}`);
-    dispatchKernel(device, plan.code, [...bindings, out], plan.groups, {
-      uniform: new Uint8Array(uniform),
-      label: `attention:${plan.kernel}${mask ? ((opts.skipMaskedTiles ?? true) ? ":masked" : ":masked-noskip") : ""}`,
-    });
+  if (dim > 256) throw new RangeError(`runAttention: head dim ${dim} > 256 is not supported`);
+  const qh = f32Handle("runAttention", q);
+  const kh = f32Handle("runAttention", k);
+  const vh = f32Handle("runAttention", v);
+  let mh: WebGpuTensor | null = null;
+  if (opts.mask) {
+    mh = f32Handle("runAttention", opts.mask);
+    checkMaskShape("runAttention", opts.mask.shape, [batch, seqQ, seqK]);
   }
-  return GPUTensor.fromBuffer(device, out.buffer, [batch, seqQ, dim]);
+  const b = backendFor(device);
+  return GPUTensor._fromHandle(device, encodeAttention(b, qh, kh, vh, mh, opts.scale ?? 1 / Math.sqrt(dim)));
 }

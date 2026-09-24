@@ -28,6 +28,13 @@
  *     no shape to WebGPU that measured slower there, under either Dawn or
  *     Chrome; it leaves some Dawn wins (e.g. 160³ at 1.26x) on WASM,
  *     deliberately taking the more conservative (browser) crossover.
+ *  4. 2026-09-24, issue #146 (same doc, "Re-measured on backend-webgpu"):
+ *     unchanged. GEMM now runs on @johnhenry/backend-webgpu's kernels and
+ *     runtime; re-measured under Dawn, the rule still routes no measured
+ *     shape to a slower WebGPU, while the new path also wins some shapes it
+ *     leaves on WASM (large k on small m·n, e.g. 128x4096x128 at 2.9x).
+ *     Not loosened: headless Chrome was not re-measured, and the rule
+ *     follows the browser crossover.
  *
  * Caveats, loudly: this is ONE machine's number (Apple M2, subgroup-matrix
  * kernel available). A browser without subgroup matrices, a weaker GPU, or a

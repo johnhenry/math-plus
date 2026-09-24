@@ -1,22 +1,25 @@
 /**
- * Node/Bun WebGPU via Dawn — the documented native-addon install step
- * docs/PLAN.md §6.3 calls for ("Node support ships as 'works with a
- * documented native-addon install step', not a first-class guarantee").
+ * Node/Bun WebGPU via Dawn — the `./dawn` subpath.
  *
- * Published as the separate `./dawn` subpath (never re-exported from the
- * package root) so browser bundles of the main entry never see the `webgpu`
- * specifier. `webgpu` (Dawn's official Node binding, prebuilt for darwin
- * universal, linux x64/arm64 and win32 x64/arm64) is an OPTIONAL peer
- * dependency: install it yourself (`npm install webgpu`) to use this.
+ * Since issue #146 the Dawn loader is `@johnhenry/backend-webgpu`'s
+ * (`getGpu`), so the process has one Dawn instance per flag set no matter
+ * which package asked for it. backend-webgpu depends on the `webgpu`
+ * package (Dawn's official Node binding, prebuilt for darwin universal,
+ * linux x64/arm64 and win32 x64/arm64) and hides it from browser bundles
+ * behind its own `#dawn` import condition.
  *
  * ```ts
  * import { detectWebGPU } from "@johnhenry/math-plus-tensor-webgpu";
  * import { requestDawnGPU } from "@johnhenry/math-plus-tensor-webgpu/dawn";
  * const cap = await detectWebGPU({ gpu: (await requestDawnGPU({ unsafe: true }))! });
  * ```
+ *
+ * @deprecated Kept through the deprecation window (see the 0.2.0
+ * changelog). `createWebGpuDevice()` finds the GPU itself (navigator.gpu,
+ * else Dawn); `getGpu({ unsafe })` from `@johnhenry/backend-webgpu` is the
+ * direct replacement.
  */
-
-const instances = new Map<string, Promise<GPU | null>>();
+import { getGpu } from "@johnhenry/backend-webgpu";
 
 export interface DawnOptions {
   /**
@@ -30,36 +33,15 @@ export interface DawnOptions {
 }
 
 /**
- * Returns Dawn's `GPU` entry point, or `null` when the `webgpu` package
- * isn't installed or its native addon can't load on this platform (never
- * throws — callers skip/fall back on `null`). Also installs Dawn's WebGPU
- * globals (`GPUBufferUsage`, `GPUMapMode`, …) on `globalThis` when they're
- * missing, since this package's kernels reference them. One instance per
- * option set is created and reused.
+ * Returns a `GPU` entry point, or `null` when the `webgpu` package can't
+ * load on this platform (never throws — callers skip/fall back on `null`).
+ * In Node/Bun that is Dawn, whose WebGPU globals (`GPUBufferUsage`, …) are
+ * installed on `globalThis` when missing; where `navigator.gpu` exists
+ * (Deno, browsers) it is returned instead. One Dawn instance per option set
+ * is created and reused.
+ *
+ * @deprecated See the module doc.
  */
 export function requestDawnGPU(options: DawnOptions = {}): Promise<GPU | null> {
-  const flags = options.unsafe ? ["enable-dawn-features=allow_unsafe_apis"] : [];
-  const key = flags.join(" ");
-  let p = instances.get(key);
-  if (!p) {
-    p = loadDawn(flags);
-    instances.set(key, p);
-  }
-  return p;
-}
-
-async function loadDawn(flags: string[]): Promise<GPU | null> {
-  // A variable specifier keeps TypeScript (and bundlers) from resolving
-  // "webgpu" statically — it's an optional peer, absent in most installs.
-  const specifier = "webgpu";
-  try {
-    const mod = (await import(specifier)) as { create(flags: string[]): GPU; globals: Record<string, unknown> };
-    const g = globalThis as Record<string, unknown>;
-    for (const [name, value] of Object.entries(mod.globals)) {
-      if (g[name] === undefined) g[name] = value;
-    }
-    return mod.create(flags);
-  } catch {
-    return null;
-  }
+  return getGpu({ unsafe: options.unsafe ?? false });
 }

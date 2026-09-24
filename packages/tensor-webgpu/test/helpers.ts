@@ -63,7 +63,7 @@
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,142 +114,147 @@ function hasXvfb(): boolean {
 /** macOS Chrome needs no X display: it runs `--headless=new` against Metal directly. */
 const IS_MAC = process.platform === "darwin";
 
-// ---- tiny TS->JS browser bundler -------------------------------------------
+// ---- TS->JS browser bundler ------------------------------------------------
 //
-// Concatenates a small closed set of this repo's dependency-free TS modules
-// (this package's own kernels + @johnhenry/math-plus-tensor-core + @johnhenry/math-plus-tensor-compile,
-// none of which import any node: builtin — verified by inspection, see
-// docs/spikes/webgpu-baseline.md) into one flat, import/export-free script
-// injectable via CDP Runtime.evaluate. Not a general bundler: relative
-// imports are resolved via simple DFS + memoization, and the two workspace
-// siblings are resolved via a fixed map rather than full node_modules
-// resolution, since this package depends on exactly those two.
+// Bundles this package's `src/*.ts` entry files and their whole dependency
+// closure — workspace siblings (tensor-core, tensor-compile, tensor-cpu,
+// special) and `@johnhenry/backend-webgpu` + `@johnhenry/tensor-backend`,
+// which ship their TypeScript sources under a `source` export condition —
+// into ONE import/export-free script injectable via CDP `Runtime.evaluate`
+// (or run in-process by the Dawn harness). Every module is transpiled to
+// CommonJS and wrapped in its own function scope with a tiny `require`, so
+// modules can't collide on top-level names (the flat concatenation this
+// replaces could, once backend-webgpu joined the closure). The entries'
+// exports are then declared as top-level `const`s, so test bodies call
+// `runGemm(...)`, `GPUTensor.fromFloat32Array(...)` etc. directly.
+//
+// Resolution (not a general bundler; enough for this closure): relative
+// specifiers as written (`./x.ts`); package `imports` (`#dawn`) and
+// `exports` entries by the `browser` condition, then `source`, else a
+// `./dist/X.js` target mapped back to `./src/X.ts`; packages are found by
+// walking up `node_modules` from the importing file (so backend-webgpu gets
+// its own nested tensor-backend). `import type` is erased by the transpiler.
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_ENTRY: Record<string, string> = {
-  "@johnhenry/math-plus-tensor-core": path.resolve(HERE, "../../tensor-core/src/index.ts"),
-  "@johnhenry/math-plus-tensor-compile": path.resolve(HERE, "../../tensor-compile/src/index.ts"),
-  // tensor-core re-exports the canonical erf/GELU from this zero-dependency leaf.
-  "@johnhenry/math-plus-special": path.resolve(HERE, "../../special/src/index.ts"),
-};
 
-const IMPORT_FROM_RE = /^[ \t]*import\s[\s\S]*?from\s*["'][^"']+["'];?[ \t]*$/gm;
-const REEXPORT_FROM_RE = /^[ \t]*export\s*\{[\s\S]*?\}\s*from\s*["'][^"']+["'];?[ \t]*$/gm;
-const EXPORT_KEYWORD_RE = /^([ \t]*)export\s+(function|const|class|async function|let|var)\b/gm;
-
-/**
- * Dependency specifiers to actually recurse into for bundling — deliberately
- * skips `import type { ... } from "spec"` lines (whole-line type-only
- * imports, which is the only form this package's source uses to import from
- * `@johnhenry/math-plus-tensor-compile`): those are fully erased by the transpiler and
- * never needed at runtime, so following them would pull in dependencies
- * (e.g. `@johnhenry/math-plus-tensor-compile`'s own `@johnhenry/math-plus-tensor-autograd` dependency,
- * used only by its `asVariableOp`, which this bundler has no need to load)
- * that this "one shared IR, second backend" package's low-level kernels
- * genuinely don't need.
- *
- * Only scans REAL import/re-export-from lines (reusing `IMPORT_FROM_RE`/
- * `REEXPORT_FROM_RE`, the same patterns `cleanModuleSyntax` strips), not a
- * bare `from\s*["'][^"']+["']/` scan over the whole file — that looser
- * pattern used to false-positive on doc-comment prose containing the
- * substring `from "..."` (found via device.ts's module doc, which discusses
- * `detectWebGPU`'s `reason` string and literally contains the text `from
- * "API not present ... at all"` split across two comment lines; `[^"']+`
- * happily spans the intervening newline and lands on some later unrelated
- * `"`), which bundleForBrowser then tried to resolve as a real dependency
- * specifier and threw on.
- */
-function extractSpecifiers(source: string): string[] {
-  const specs: string[] = [];
-  const withoutTypeOnlyImports = source.replace(/^[ \t]*import\s+type\b[\s\S]*?from\s*["'][^"']+["'];?[ \t]*$/gm, "");
-  const importLines = withoutTypeOnlyImports.match(IMPORT_FROM_RE) ?? [];
-  const reexportLines = withoutTypeOnlyImports.match(REEXPORT_FROM_RE) ?? [];
-  for (const line of [...importLines, ...reexportLines]) {
-    const m = /from\s*["']([^"']+)["']/.exec(line);
-    if (m) specs.push(m[1] as string);
-  }
-  return specs;
+interface PackageJson {
+  exports?: Record<string, unknown> | string;
+  imports?: Record<string, unknown>;
 }
 
-function transpileOne(absPath: string): string {
-  const source = readFileSync(absPath, "utf8");
-  const { outputText } = ts.transpileModule(source, {
+function pickTarget(entry: unknown): string | undefined {
+  if (typeof entry === "string") return entry;
+  if (!entry || typeof entry !== "object") return undefined;
+  const e = entry as Record<string, unknown>;
+  for (const cond of ["browser", "source", "import", "default"]) {
+    if (cond in e) {
+      const t = pickTarget(e[cond]);
+      if (t) return t;
+    }
+  }
+  return undefined;
+}
+
+function toSource(pkgDir: string, target: string): string {
+  const direct = path.resolve(pkgDir, target);
+  if (target.endsWith(".ts")) return direct;
+  const m = /^\.\/dist\/(.+)\.js$/.exec(target);
+  if (m) return path.resolve(pkgDir, "src", `${m[1]}.ts`);
+  throw new Error(`bundleForBrowser: cannot map ${target} in ${pkgDir} to a TypeScript source`);
+}
+
+function findPackageDir(name: string, fromFile: string): string {
+  let dir = path.dirname(fromFile);
+  for (;;) {
+    const candidate = path.join(dir, "node_modules", name);
+    if (existsSync(path.join(candidate, "package.json"))) return realpathSync(candidate);
+    const parent = path.dirname(dir);
+    if (parent === dir) throw new Error(`bundleForBrowser: cannot find package ${name} from ${fromFile}`);
+    dir = parent;
+  }
+}
+
+function owningPackageDir(file: string): string {
+  let dir = path.dirname(file);
+  while (!existsSync(path.join(dir, "package.json"))) dir = path.dirname(dir);
+  return dir;
+}
+
+function resolveSpecifier(spec: string, fromFile: string): string {
+  if (spec.startsWith("./") || spec.startsWith("../")) return path.resolve(path.dirname(fromFile), spec);
+  if (spec.startsWith("#")) {
+    const dir = owningPackageDir(fromFile);
+    const pkg = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as PackageJson;
+    const target = pickTarget(pkg.imports?.[spec]);
+    if (!target) throw new Error(`bundleForBrowser: no "imports" entry for ${spec} in ${dir}`);
+    return toSource(dir, target);
+  }
+  const parts = spec.split("/");
+  const name = spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
+  const sub = `.${spec.slice(name.length)}`;
+  const dir = findPackageDir(name, fromFile);
+  const pkg = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as PackageJson;
+  const exp = pkg.exports;
+  const entry = typeof exp === "string" ? (sub === "." ? exp : undefined) : exp?.[sub];
+  const target = pickTarget(entry);
+  if (!target) throw new Error(`bundleForBrowser: ${name} does not export "${sub}"`);
+  return toSource(dir, target);
+}
+
+const REQUIRE_RE = /\brequire\(\s*"([^"]+)"\s*\)/g;
+
+function transpileCjs(absPath: string): string {
+  return ts.transpileModule(readFileSync(absPath, "utf8"), {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-      verbatimModuleSyntax: true,
+      module: ts.ModuleKind.CommonJS,
       isolatedModules: true,
+      esModuleInterop: false,
     },
     fileName: absPath,
-  });
-  return outputText;
+  }).outputText;
 }
 
 /**
- * An import statement's braced specifier list is dropped entirely by
- * `cleanModuleSyntax` (the imported names are expected to already exist as
- * top-level declarations once the dependency module's own `export` keywords
- * are stripped and it's concatenated into the same flat scope) — EXCEPT for
- * an aliased specifier (`orig as alias`, e.g. tensor-core/index.ts's `seed as
- * rngSeed`): the dependency module only ever declares `orig`, so the
- * importing module's later references to `alias` would be a silent
- * `ReferenceError` once the import line is deleted. This emits an explicit
- * `const alias = orig;` rebinding for exactly those specifiers so aliasing
- * survives the flatten (by this point `ts.transpileModule` has already
- * elided any purely-type-only specifiers, so every remaining name here is a
- * real runtime value).
+ * Bundle `entryFiles` (absolute paths to this package's own `src/*.ts`) plus
+ * their transitive dependency closure into one script (see the section doc)
+ * that declares the exports of every bundled module of THIS package (the
+ * entries and the `src/` modules they import — as the flat bundle it
+ * replaces did) as top-level `const`s. Memoized per entry list.
  */
-function aliasBindingsFor(importStatement: string): string {
-  const braced = /\{([\s\S]*)\}/.exec(importStatement);
-  if (!braced) return "";
-  const bindings: string[] = [];
-  for (const rawItem of (braced[1] as string).split(",")) {
-    const item = rawItem.trim();
-    if (!item) continue;
-    const asMatch = /^(\S+)\s+as\s+(\S+)$/.exec(item);
-    if (asMatch) bindings.push(`const ${asMatch[2]} = ${asMatch[1]};`);
-  }
-  return bindings.join("\n");
-}
-
-function cleanModuleSyntax(js: string): string {
-  return js
-    .replace(REEXPORT_FROM_RE, "")
-    .replace(IMPORT_FROM_RE, (m) => aliasBindingsFor(m))
-    .replace(EXPORT_KEYWORD_RE, "$1$2");
-}
-
-function resolveSpecifier(spec: string, fromFile: string): string | undefined {
-  if (spec.startsWith("./") || spec.startsWith("../")) {
-    return path.resolve(path.dirname(fromFile), spec);
-  }
-  return WORKSPACE_ENTRY[spec];
-}
-
-/** Bundle `entryFiles` (absolute paths to this package's own `src/*.ts`) plus their transitive dependency closure into one flat script, dependencies emitted before dependents. */
+const bundles = new Map<string, string>();
 export function bundleForBrowser(entryFiles: readonly string[]): string {
-  const visited = new Set<string>();
-  const chunks: string[] = [];
-
-  function visit(absPath: string): void {
-    if (visited.has(absPath)) return;
-    visited.add(absPath);
-    const raw = readFileSync(absPath, "utf8");
-    for (const spec of extractSpecifiers(raw)) {
-      const dep = resolveSpecifier(spec, absPath);
-      if (dep) visit(dep);
-      // Unresolvable bare specifiers would be a real bug (a new dependency
-      // this bundler doesn't know about) — fail loudly rather than silently
-      // emitting a broken bundle.
-      else if (!spec.startsWith("./") && !spec.startsWith("../")) {
-        throw new Error(`bundleForBrowser: no WORKSPACE_ENTRY mapping for "${spec}" (imported by ${absPath})`);
-      }
-    }
-    chunks.push(`// ---- ${path.relative(HERE, absPath)} ----\n${cleanModuleSyntax(transpileOne(absPath))}`);
+  const memoKey = entryFiles.join("\n");
+  const hit = bundles.get(memoKey);
+  if (hit) return hit;
+  const ids = new Map<string, number>();
+  const modules: string[] = [];
+  function visit(absPath: string): number {
+    const known = ids.get(absPath);
+    if (known !== undefined) return known;
+    const id = ids.size;
+    ids.set(absPath, id);
+    modules.push("");
+    const code = transpileCjs(absPath).replace(REQUIRE_RE, (_m, spec: string) => `__req(${visit(resolveSpecifier(spec, absPath))})`);
+    modules[id] = `// ${path.relative(path.resolve(HERE, "../../.."), absPath)}\nfunction (exports, __req) {\n${code}\n}`;
+    return id;
   }
-
-  for (const f of entryFiles) visit(f);
-  return chunks.join("\n\n");
+  entryFiles.forEach(visit);
+  const own = [...ids].filter(([file]) => file.startsWith(SRC + path.sep)).map(([, id]) => id);
+  const runtime = `const __mpBundle = (() => {
+const __defs = [\n${modules.join(",\n")}\n];
+const __cache = new Map();
+function __req(id) {
+  let m = __cache.get(id);
+  if (!m) { m = {}; __cache.set(id, m); __defs[id](m, __req); }
+  return m;
+}
+return Object.assign({}, ${own.map((e) => `__req(${e})`).join(", ")});
+})();`;
+  const names = Object.keys(new Function(`${runtime}\nreturn __mpBundle;`)() as Record<string, unknown>).filter((k) => k !== "__esModule");
+  const bundle = `${runtime}\nconst { ${names.join(", ")} } = __mpBundle;`;
+  bundles.set(memoKey, bundle);
+  return bundle;
 }
 
 export const SRC = path.resolve(HERE, "../src");
