@@ -1,29 +1,24 @@
 # Releasing
 
-Same deployment substrate as [`johnhenry/math`](https://github.com/johnhenry/math)
-(GitHub Actions + an `NPM_TOKEN` repository secret), driven by
+Published from GitHub Actions using **npm trusted publishing** (OIDC), driven by
 [Changesets](https://github.com/changesets/changesets) because this repo publishes many
-independently versioned packages instead of one.
+independently versioned packages instead of one. There is no `NPM_TOKEN` secret: npm trusts
+this repository's `.github/workflows/release.yml` directly, and every publish carries a
+provenance attestation.
 
-## Prerequisite: the NPM_TOKEN secret
+## Prerequisite: each package trusts the release workflow
 
-The release workflow is inert until the secret exists:
+Every published package was linked once (2026-09-24) with:
 
 ```bash
-gh secret set NPM_TOKEN --repo johnhenry/math-plus   # prompts; paste a granular automation token
-gh secret list --repo johnhenry/math-plus            # verify
+npm trust github @johnhenry/math-plus-<name> --file release.yml --repo johnhenry/math-plus --allow-publish
 ```
 
-Mint the token at npmjs.com → Access Tokens → **Granular access token**, with *Read and write*
-permission for the `@johnhenry/math-plus-*` packages (or all packages under the `@johnhenry` scope).
-Automation-type tokens bypass 2FA, which CI requires.
-
-> **⚠️ Adding the secret arms the workflow.** The next push to `main` with no pending changesets
-> publishes every non-private workspace package at its current version — today that means
-> `@johnhenry/math-plus-tensor-core`, `@johnhenry/math-plus-tensor-wasm`, and
-> `@johnhenry/math-plus-scalar-types` at `0.0.1`. That is
-> either a useful way to reserve the names on npm or premature, depending on your intent. To hold
-> off, add `"private": true` to a package's `package.json` until it's ready to ship.
+`npm trust` must run from a 2FA-enabled account session (`npm login --auth-type=web`); granular
+tokens that bypass 2FA are refused. **A brand-new package** can't be trusted before it exists on
+npm: publish its first version by hand (`npm publish --access public` from a 2FA session), then run
+`npm trust` for it; later releases then flow through CI. The workflow needs npm >= 11.5.1 (it
+upgrades npm itself) and `id-token: write` (already set).
 
 ## Normal flow
 

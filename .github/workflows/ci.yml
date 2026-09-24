@@ -69,34 +69,34 @@ jobs:
       # withCompute oracle tests (test/half-compute.test.ts). safetensors:
       # the reference reader/writer @johnhenry/math-plus-safetensors' oracle
       # tests compare against (they skipped in CI without it).
-      - run: pip install numpy pyarrow pandas ml_dtypes safetensors
+      # scipy: @johnhenry/math-plus-signal's scipy.signal oracle and
+      # tensor-core's scipy.special erf/GELU oracle (26 tests skipped in CI
+      # without it). torch (CPU-only wheel, the small one): the PyTorch
+      # parity oracles in tensor-autograd and safetensors (55 skipped).
+      - run: |
+          pip install numpy pyarrow pandas ml_dtypes safetensors scipy
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Verify the oracles are importable (differential/round-trip tests must not skip)
-        run: python3 -c "import numpy, pyarrow, pandas, ml_dtypes, safetensors.numpy; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__, 'pandas', pandas.__version__, 'ml_dtypes', ml_dtypes.__version__, 'safetensors', safetensors.__version__)"
+        run: python3 -c "import numpy, pyarrow, pandas, ml_dtypes, safetensors.numpy, scipy.signal, scipy.special, torch; print('numpy', numpy.__version__, 'pyarrow', pyarrow.__version__, 'pandas', pandas.__version__, 'ml_dtypes', ml_dtypes.__version__, 'safetensors', safetensors.__version__, 'scipy', scipy.__version__, 'torch', torch.__version__)"
 
-      # Headless-WebGPU oracle for @johnhenry/math-plus-tensor-webgpu's GPU-correctness
-      # tests (docs/TESTING.md "Headless WebGPU oracle"). Chrome-for-Testing
-      # (not the runner image's preinstalled browser) for a pinned, reliable
-      # version; Xvfb because headless WebGPU needs a real (virtual) display,
-      # not `--headless=new` alone — same reasoning as ~/.local/bin/gl-report
-      # on the trycooy dev machine. `--enable-unsafe-swiftshader` (in
-      # test/helpers.ts's Chrome flags) is meant to unblock Dawn's software
-      # adapter on a GPU-less runner like this one, verified locally by
-      # forcing the same flag combination on a machine WITH a real GPU
-      # (docs/spikes/webgpu-baseline.md) — not yet confirmed on an actual
-      # GitHub Actions runner. If these tests skip here instead of running,
-      # check the first CI run's log for the actual `requestAdapter()`
-      # failure reason before assuming the package itself is broken.
-      - name: Set up Chrome for headless WebGPU tests (@johnhenry/math-plus-tensor-webgpu)
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
+      # Real WebGPU for @johnhenry/math-plus-tensor-webgpu's GPU-correctness
+      # tests: Dawn in-process (the `webgpu` npm package, test/helpers.ts's
+      # `dawn` harness) over Mesa's lavapipe software Vulkan. The runner has
+      # no GPU; with lavapipe installed, Dawn's plain requestAdapter()
+      # returns the llvmpipe CPU adapter and every WebGPU test runs (no
+      # subgroup matrices there, so the one Apple-only kernel test skips).
+      # This replaced the headless-Chrome + Xvfb + SwiftShader setup, which
+      # never worked on these runners: Chrome never exposed its CDP endpoint,
+      # so all 33 WebGPU tests skipped. MATH_PLUS_WEBGPU_HARNESS=dawn (set on
+      # the test steps) keeps the harness from spending three Chrome launch
+      # timeouts looking for a browser that isn't installed.
+      - name: Install software Vulkan (lavapipe) for Dawn
+        run: sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools && (vulkaninfo --summary || true)
 
-      - name: Install Xvfb
-        run: sudo apt-get install -y xvfb
-
+      # Both legs: the node leg's write-buffer test spawns `bun` for its
+      # Bun-only repro (it skipped here with "no `bun` on PATH").
       - name: Set up Bun
-        if: matrix.runtime == 'bun'
         uses: oven-sh/setup-bun@v2
         with:
           # Pinned to the version the harness was verified against (1.2.17
@@ -114,7 +114,14 @@ jobs:
 
       - name: Unit + differential tests
         if: matrix.runtime == 'node'
-        run: npm test
+        env:
+          MATH_PLUS_WEBGPU_HARNESS: dawn
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
+          echo "### Skipped tests (node)" >> "$GITHUB_STEP_SUMMARY"
+          echo "total: $(grep -c '^﹣' test.log || true)" >> "$GITHUB_STEP_SUMMARY"
+          grep '^﹣' test.log | sed -E 's/.*# //' | sort | uniq -c | sort -rn | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
 
       # Fails on any failing test AND on any suite where Bun ran fewer files
       # than exist (the multi-file bug's signature). Runtime `t.skip()`s are
@@ -122,6 +129,8 @@ jobs:
       # 1.2 cannot mark a running test skipped.
       - name: Unit + differential tests (Bun)
         if: matrix.runtime == 'bun'
+        env:
+          MATH_PLUS_WEBGPU_HARNESS: dawn
         run: |
           npm run typecheck --workspaces --if-present
           npm run test:bun
@@ -144,3 +153,94 @@ jobs:
       - name: interop-python conformance tests
         if: matrix.runtime == 'node'
         run: python3 -m pytest packages/interop-python/tests/ -v
+
+  # tensor-mlx's MLX suites (conformance + NumPy differential + bridge) on
+  # real Apple Silicon Metal (#145, decided in RFC 0001 §12 Q5). The Linux
+  # legs above skip every MLX test (skip-don't-fail off darwin/arm64), so this
+  # is the only CI coverage of the native path. Non-blocking to start (make
+  # it required once it has been stable); it still goes red, rather than
+  # passing silently, if any MLX test skips.
+  #
+  # MLX is obtained the way laya-js's `mlx-macos` job does it: Apple's `mlx`
+  # wheel for THIS runner's macOS (pip picks mlx-metal's macosx_15_0 build
+  # here), plus mlx-c compiled against it by laya-js's own build-mlxc.sh,
+  # loaded through $LAYA_MLXC_PATH (which @johnhenry/backend-mlx resolves
+  # before its optional platform package). NOT the published
+  # @johnhenry/backend-mlx-darwin-arm64@0.1.0 prebuilt that `npm ci`
+  # installs: that bundle carries a macOS 26+ mlx.metallib, and on this
+  # macOS 15 runner every MLX device creation failed with "could not create
+  # gpu stream: vector" (this job's first run).
+  mlx-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    continue-on-error: true
+    name: mlx (macos-15 arm64, Metal)
+    env:
+      MLX_VERSION: "0.32.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      # laya-js (same author) at a pinned commit, for its build-mlxc.sh
+      # (mlx-c d4afaec + MLX 0.32.2, the versions @johnhenry/backend-mlx 0.1.x expects).
+      - uses: actions/checkout@v4
+        with:
+          repository: johnhenry/laya-js
+          ref: d17674da0739cfb9324270f0c5e6aa366a1e319a
+          path: laya-js
+          sparse-checkout: packages/backend-mlx/scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.17
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # numpy: the differential suite's oracle (packages/tensor-mlx/scripts/numpy_oracle.py).
+      - run: pip install numpy "mlx==${MLX_VERSION}"
+
+      - name: Build mlx-c against this runner's MLX wheel
+        run: |
+          MLXC_OUT="$RUNNER_TEMP/mlxc" bash laya-js/packages/backend-mlx/scripts/build-mlxc.sh
+          echo "LAYA_MLXC_PATH=$RUNNER_TEMP/mlxc" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      # Only the two packages the MLX suites import: no Rust/WASM toolchain on
+      # this leg (the Linux legs build and test everything).
+      - name: Build (tensor-core + tensor-mlx)
+        run: npm run build -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-tensor-mlx
+
+      - name: Report the runner and the MLX bundle the tests load
+        run: |
+          uname -m; sw_vers
+          cat "$LAYA_MLXC_PATH/VERSION"; ls -la "$LAYA_MLXC_PATH"
+
+      - name: tensor-mlx tests (Node, then Bun) on Metal -- must not skip
+        run: |
+          rc=0
+          npm test -w @johnhenry/math-plus-tensor-mlx > mlx-node.log 2>&1 || rc=1
+          npm run test:bun -w @johnhenry/math-plus-tensor-mlx > mlx-bun.log 2>&1 || rc=1
+          cat mlx-node.log mlx-bun.log
+          node_pass=$(grep -E "^ℹ pass " mlx-node.log | awk '{print $3}')
+          node_skip=$(grep -E "^ℹ skipped " mlx-node.log | awk '{print $3}')
+          bun_pass=$(grep -E "^ *[0-9]+ pass" mlx-bun.log | awk '{print $1}')
+          bun_skip=$(grep -E "^ *[0-9]+ skip" mlx-bun.log | awk '{print $1}')
+          bun_rt_skip=$(grep -c "\[skip\]" mlx-bun.log || true)
+          {
+            echo "### tensor-mlx on macos-15 (Metal)"
+            echo "| runtime | pass | skipped |"
+            echo "|---|---|---|"
+            echo "| node | ${node_pass:-?} | ${node_skip:-?} |"
+            echo "| bun | ${bun_pass:-?} | ${bun_skip:-0} (+${bun_rt_skip} runtime [skip]) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "${node_skip:-1}" != "0" ] || [ -n "$bun_skip" -a "${bun_skip:-0}" != "0" ] || [ "$bun_rt_skip" != "0" ]; then
+            echo "::error::MLX suites skipped on the macOS runner (the Metal path was not exercised)"; exit 1
+          fi
+          exit $rc

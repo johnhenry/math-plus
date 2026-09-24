@@ -138,20 +138,25 @@ device limit). Ported from laya-js; checked against a NumPy oracle.
 
 ## The honest threshold
 
-`GEMM_ELEMENT_THRESHOLD` is `128 * 128`: `chooseGemmBackend(m, n)` returns
-`"webgpu"` once the output has at least 16,384 elements. That's measured,
-end to end (upload + compute + readback), against tensor-wasm's
-`matmulInto` on an **Apple M2**: WebGPU wins at every size from n = 128 in
-headless Chrome 153 and default-flag Chromium 152, and from n = 96 under
-Dawn; below that a ~0.3-0.5 ms per-call floor loses to WASM. Resident
-2048³ f32 reaches ≈1.76 TFLOP/s with subgroup matrices. Full numbers:
+`chooseGemmBackend(m, n, k)` returns `"webgpu"` when the output has at least
+`GEMM_ELEMENT_THRESHOLD` = 192² = 36,864 elements **and** the product does at
+least `GEMM_WORK_THRESHOLD` = 2²² ≈ 4.2 M multiply-adds (`k` is optional; without
+it only the element test applies). That's measured end to end (upload +
+compute + readback) against tensor-wasm's SIMD128 `matmulInto` on an
+**Apple M2**, with the thermal-aware method in `docs/BENCHMARKING.md`: square
+matmuls cross over at n = 192 in headless Chrome and n = 160 under Dawn, and k
+matters on both sides of that line — small-k products at 192² still lose, and
+large-k products on ≤ 128² outputs still lose in Chrome, to a ~0.3-0.5 ms
+per-call floor. Resident 2048³ f32 reaches ≈1.76 TFLOP/s with subgroup
+matrices. Full numbers:
 [`docs/spikes/webgpu-tiled-gemm.md`](../../docs/spikes/webgpu-tiled-gemm.md).
 
 History: v1's naive kernel never crossed over (`Infinity`,
 [`docs/spikes/webgpu-baseline.md`](../../docs/spikes/webgpu-baseline.md),
-Intel iGPU via ANGLE-GL). **That machine hasn't been re-measured with the
+Intel iGPU via ANGLE-GL); the tiled kernels first crossed at m·n = 128²
+against the old scalar WASM GEMM. **That machine hasn't been re-measured with the
 new kernels, nor has any discrete GPU** — the threshold is one machine's
-number, ignores k and residency, and weaker/software adapters will cross
+number, ignores residency, and weaker/software adapters will cross
 later or never. Re-run `scripts/measure-gemm-threshold.ts` before trusting
 it on your hardware. A test pins the value so recalibration stays deliberate.
 
@@ -170,7 +175,7 @@ it on your hardware. A test pins the value so recalibration stays deliberate.
 | `fastAttentionWGSL` / `genericAttentionWGSL` / `genericAttentionConfig` | The attention WGSL generators |
 | `runQKT` / `runSoftmax` / `runWeightedSum` | SDPA primitives, `GPUTensor` in/out, chained via queue ordering (no fences needed) |
 | `compileIRToWGSL` / `runElementwiseWGSL` | tensor-compile IR → WGSL shader source; upload/dispatch/readback runner |
-| `chooseGemmBackend` / `GEMM_ELEMENT_THRESHOLD` | The measured (non-)crossover, see above |
+| `chooseGemmBackend` / `GEMM_ELEMENT_THRESHOLD` / `GEMM_WORK_THRESHOLD` | The measured (non-)crossover, see above |
 | `gpu-runtime` helpers | Buffer pool (`acquireBuffer`/`releaseBuffer`), kernel cache with explicit layouts (`getKernel`, `parseWGSLBindings`), `dispatchKernel` (bind-group cache + uniform ring with dynamic offsets), `writeBytes`, `readBackFloat32`/`readBackBytes`, `workgroupsFor` |
 | `configureGPURuntime` / `gpuRuntimeStats` | Per-device readback policy (`sleepWhileWaiting`, `sleepThresholdMs`); dispatch/cache/readback counters |
 | `startProfiling` / `stopProfiling` | GPU timestamp profiler: `{ kernel, ms, count }[]` per dispatch label (needs `timestamp-query`: `detectWebGPU({ timestampQuery: true })`) |

@@ -1,7 +1,7 @@
 name: Release
 
 # Multi-package sibling of johnhenry/math's single-package publish.yml.
-# Same deployment substrate (GitHub Actions + the NPM_TOKEN secret), but
+# Same deployment substrate (GitHub Actions + npm trusted publishing via OIDC), but
 # driven by Changesets because this repo publishes ~11 independently
 # versioned packages instead of one:
 #
@@ -16,7 +16,7 @@ name: Release
 #
 # FIRST RUN: with no changesets pending, this publishes every non-private
 # package at its CURRENT version (0.0.1 today). See docs/RELEASING.md before
-# adding the NPM_TOKEN secret — that secret is what arms this workflow.
+# relying on it. (Auth is npm trusted publishing: no NPM_TOKEN secret.)
 #
 # Also dual-publishes to JSR (issue #25: npm is the baseline, JSR adds
 # first-class Deno reach) via the `jsr-release` job below. JSR publishing
@@ -44,11 +44,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Secrets can't be referenced in `if:` directly, so surface it as env and
-    # gate the publish step on it — the workflow stays green (and inert) until
-    # the token is configured, rather than failing every push with ENEEDAUTH.
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    # Auth: npm trusted publishing (OIDC). Every package trusts this repo's
+    # release.yml (configured 2026-09-24), so there is no NPM_TOKEN secret;
+    # publishes carry provenance automatically (id-token: write above).
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +57,9 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           cache: npm
+
+      # Trusted publishing (OIDC, no token) needs npm >= 11.5.1.
+      - run: npm install -g npm@^11.5.1
 
       - name: Set up Rust wasm target
         run: |
@@ -72,13 +73,7 @@ jobs:
           npm run build
           npm test
 
-      - name: No NPM_TOKEN — skipping release
-        if: env.NPM_TOKEN == ''
-        run: |
-          echo "::notice title=Release skipped::NPM_TOKEN is not configured, so nothing was versioned or published. See docs/RELEASING.md — adding the secret arms this workflow."
-
       - name: Create version PR or publish
-        if: env.NPM_TOKEN != ''
         uses: changesets/action@v1
         with:
           publish: npm run release
@@ -86,7 +81,6 @@ jobs:
           commit: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   jsr-release:
     runs-on: ubuntu-latest
@@ -100,6 +94,9 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+
+      # Trusted publishing (OIDC, no token) needs npm >= 11.5.1.
+      - run: npm install -g npm@^11.5.1
 
       - name: Set up Rust wasm target
         run: |

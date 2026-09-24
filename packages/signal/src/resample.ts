@@ -66,17 +66,24 @@ export function resamplePoly(signal: Tensor, up: number, down: number): Tensor {
   if (!Number.isInteger(up) || up < 1) throw new RangeError(`resamplePoly: up must be a positive integer, got ${up}`);
   if (!Number.isInteger(down) || down < 1) throw new RangeError(`resamplePoly: down must be a positive integer, got ${down}`);
 
-  // Read-only below (only `.slice()`d into fresh arrays), so no defensive
-  // copy is needed even when `.data` aliases `signal`'s own storage.
-  const x = signal.contiguous().data as Float64Array;
+  // `cast("f64")` rather than reading `signal.contiguous().data` directly:
+  // every output of this package is f64 (README), and the raw storage of an
+  // f32/f16/integer input is not a Float64Array. The identity path below
+  // used to hand `x.slice()` of that raw storage to `fromTypedArray` with
+  // `dtype: "f64"`, so an f32 input came back labeled f64 over a
+  // Float32Array (issue #113). `cast` always returns a fresh contiguous
+  // tensor at offset 0, so it also decodes f16/bf16 bit patterns and
+  // ignores a view's offset into a larger buffer.
+  const x64 = signal.cast("f64");
+  const x = x64.data as Float64Array;
   const g = gcdInt(up, down);
   const u = up / g;
   const d = down / g;
   const nOut = Math.ceil((x.length * up) / down);
 
-  if (u === 1 && d === 1) {
-    return Tensor.fromTypedArray(x.slice(0, nOut), [nOut], { dtype: "f64" });
-  }
+  // Identity (up === down after GCD reduction): nOut === x.length, and the
+  // cast above is already a private f64 copy.
+  if (u === 1 && d === 1) return x64;
 
   const maxRate = Math.max(u, d);
   const halfLen = 10 * maxRate;

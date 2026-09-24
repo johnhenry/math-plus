@@ -86,17 +86,17 @@ They use a fake clock.
   Xvfb**. It used a fixed 5-iteration loop with no cooldown and ran the backends one after the other.
   Treat it as a lower bound for that machine only. Re-run it with this method on real GPUs (Apple
   M-series, a discrete NVIDIA/AMD card) before using it to set `tensor-webgpu` thresholds.
-  `packages/tensor-webgpu/scripts/measure-gemm-threshold.ts` still uses the old loop. Port it to
-  `runGrid` together with the tiled-GEMM work, which owns that script.
+  `packages/tensor-webgpu/scripts/measure-gemm-threshold.ts` now uses `runGrid`; its 2026-09-24
+  re-measurement is in `docs/spikes/webgpu-tiled-gemm.md`.
 - `docs/spikes/wasm-baseline.md` and `docs/spikes/wasm-simd.md` are CPU-bound, short, and
   single-backend-per-run. Throttling affects them less, but a re-measurement should still use the
   helper.
 
 ## Running GPU benchmarks without a browser
 
-Today the GPU path needs headless Chrome under Xvfb (`docs/TESTING.md`, "Headless WebGPU oracle").
-A Dawn/Node path for `@johnhenry/math-plus-tensor-webgpu`, which reaches WebGPU from Node directly,
-is being added by the tensor-webgpu tiled-GEMM PR (issue #127, item 4). That PR owns it. Once it
-lands, GPU benchmarks can call `runGrid` in-process against Dawn, with no browser round trip inside
-the timed window. Until then, a Chrome-harness benchmark must say that its timings include CDP
-round trips.
+`@johnhenry/math-plus-tensor-webgpu` reaches WebGPU from Node through Dawn (`src/dawn.ts`, the
+`webgpu` npm package), so a GPU benchmark can call `runGrid` in-process with no browser round trip
+inside the timed call — `measure-gemm-threshold.ts` does this by default. When a benchmark must run
+in a browser page over CDP, have each call time itself in the page and return `{ selfTimedMs }`
+(see `timeCell`): that value becomes the sample, so the DevTools round trip stays out of it, while
+the window bound still uses the caller's clock.

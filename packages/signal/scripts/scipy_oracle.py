@@ -97,6 +97,15 @@ def main() -> None:
         )
         result = {"frequencies": f.tolist(), "psd": pxx.tolist()}
 
+    elif op == "resample_poly":
+        # Identity-path oracle only (issue #113): resample_poly(x, n, n) must
+        # return x's values unchanged. The non-identity paths use a Hamming
+        # FIR rather than scipy's Kaiser default (resample.ts), so they are
+        # checked by reconstruction quality, not against this op.
+        x = np.array(job["x"], dtype=np.dtype(job.get("dtype", "float64")))
+        y = signal.resample_poly(x, job["up"], job["down"])
+        result = {"y": y.astype(np.float64).tolist(), "dtype": str(y.dtype)}
+
     elif op == "windowed_frame_fft":
         # A primitive, version-stable oracle for our own stft's exact
         # algorithm (windowed-frame -> full FFT, no extra normalization) --
