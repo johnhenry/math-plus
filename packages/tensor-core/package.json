@@ -1,12 +1,16 @@
 {
   "name": "@johnhenry/math-plus-tensor-core",
   "version": "0.1.2",
-  "description": "Typed n-dimensional arrays for JS/TS: dtypes, strides/views, broadcasting, .npy I/O — part of Math Plus",
+  "description": "Typed n-dimensional arrays for JS/TS: dtypes, strides/views, broadcasting, .npy I/O \u2014 part of Math Plus",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./kernels": {
+      "types": "./dist/public-kernels.d.ts",
+      "default": "./dist/public-kernels.js"
     }
   },
   "files": [

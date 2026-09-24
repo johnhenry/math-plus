@@ -18,7 +18,10 @@ import {
   type DType,
 } from "./dtype.ts";
 import {
+  argExtremumAxis,
   binaryFlat,
+  cumsumAxis,
+  stridedCopy,
   binaryScalarLeft,
   binaryScalarRight,
   CMP_EQ,
@@ -675,6 +678,13 @@ export class Tensor {
       );
     }
     const data = allocate(this.dtype, this.size);
+    if (!isBigIntDType(this.dtype)) {
+      // Strided view: row-at-a-time copy (issue #144) instead of the
+      // per-element generator walk below. A plain copy, so exact for every
+      // Number-valued dtype, f16/bf16 bit patterns included.
+      stridedCopy(this.data as NumArray, this.offset, this.shape, this.strides, data as NumArray);
+      return new Tensor(data, this.shape, contiguousStrides(this.shape), this.dtype, 0);
+    }
     const source = this.data;
     let i = 0;
     for (const elementOffset of this.elementOffsets()) {
@@ -2156,6 +2166,13 @@ export class Tensor {
     const reduceDim = this.shape[ax] as number;
     if (reduceDim === 0) throw new RangeError(`${label} of an empty axis`);
     const outShape = this.shape.filter((_, i) => i !== ax);
+    if (!big && this.isContiguous) {
+      // Fast path (issue #144): same strict-comparison semantics as the loop below.
+      const fast = Tensor.zeros(outShape, { dtype: "i32" });
+      const [outer, dim, inner] = splitAround(this.shape, ax);
+      argExtremumAxis(this.data as NumArray, this.offset, outer, dim, inner, fast.data as Int32Array, wantMax);
+      return fast;
+    }
     const reduceStride = this.strides[ax] as number;
     const out = Tensor.zeros(outShape, { dtype: this.dtype });
     const leadStrides = this.strides.filter((_, i) => i !== ax);
@@ -2225,6 +2242,13 @@ export class Tensor {
     const reduceDim = this.shape[ax] as number;
     if (reduceDim === 0) throw new RangeError(`${label} of an empty axis`);
     const outShape = this.shape.filter((_, i) => i !== ax);
+    if (!big && this.isContiguous) {
+      // Fast path (issue #144): same strict-comparison semantics as the loop below.
+      const fast = Tensor.zeros(outShape, { dtype: "i32" });
+      const [outer, dim, inner] = splitAround(this.shape, ax);
+      argExtremumAxis(this.data as NumArray, this.offset, outer, dim, inner, fast.data as Int32Array, wantMax);
+      return fast;
+    }
     const reduceStride = this.strides[ax] as number;
     const out = Tensor.zeros(outShape, { dtype: "i32" });
     const leadStrides = this.strides.filter((_, i) => i !== ax);
@@ -2336,6 +2360,12 @@ export class Tensor {
     const ax = axis === undefined ? 0 : source.#normalizeAxis(axis);
     const big = isBigIntDType(source.dtype);
     const out = Tensor.zeros(source.shape, { dtype: source.dtype });
+    if (!big && op === "add" && source.isContiguous) {
+      // Fast path (issue #144): same f64 running sum, rounded only on store.
+      const [outer, dim, inner] = splitAround(source.shape, ax);
+      cumsumAxis(source.data as NumArray, source.offset, outer, dim, inner, out.data as NumArray);
+      return out;
+    }
 
     const scanDim = source.shape[ax] as number;
     const scanStrideIn = source.strides[ax] as number;
