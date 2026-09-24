@@ -1,11 +1,11 @@
 {
   "name": "@johnhenry/math-plus-frame-arrow",
-  "version": "0.0.0",
+  "version": "0.0.3",
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
-    "@johnhenry/math-plus-special": "jsr:@johnhenry/math-plus-special@^0.0.0",
+    "@johnhenry/math-plus-special": "jsr:@johnhenry/math-plus-special@^0.1.0",
     "apache-arrow": "npm:apache-arrow@21.2.0",
-    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0 || ^0.1.0"
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0 || ^0.1.0 || ^0.2.0"
   }
 }

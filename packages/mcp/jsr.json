@@ -1,13 +1,13 @@
 {
   "name": "@johnhenry/math-plus-mcp",
-  "version": "0.0.0",
+  "version": "0.0.3",
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
     "@modelcontextprotocol/sdk": "npm:@modelcontextprotocol/sdk@^1.30.0",
     "zod": "npm:zod@^3.25.0",
-    "@johnhenry/math-plus-adapter-math": "jsr:@johnhenry/math-plus-adapter-math@^0.0.0",
+    "@johnhenry/math-plus-adapter-math": "jsr:@johnhenry/math-plus-adapter-math@^0.0.3",
     "@johnhenry/math": "jsr:@johnhenry/math@^0.0.1",
-    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0"
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.1.2"
   }
 }

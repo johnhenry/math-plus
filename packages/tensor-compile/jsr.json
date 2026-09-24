@@ -1,10 +1,10 @@
 {
   "name": "@johnhenry/math-plus-tensor-compile",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "license": "MIT",
   "exports": "./src/index.ts",
   "imports": {
-    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.0.0",
-    "@johnhenry/math-plus-tensor-autograd": "jsr:@johnhenry/math-plus-tensor-autograd@^0.0.0"
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.1.1",
+    "@johnhenry/math-plus-tensor-autograd": "jsr:@johnhenry/math-plus-tensor-autograd@^0.1.1"
   }
 }
