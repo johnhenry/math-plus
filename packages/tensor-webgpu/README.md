@@ -21,8 +21,8 @@ shape as [`@johnhenry/math-plus-tensor-mlx`](../tensor-mlx):
 What this package adds on top is **elementwise fusion**: a
 `@johnhenry/math-plus-tensor-compile` expression becomes one WGSL dispatch
 on the same runtime. It also keeps the measured WASM-vs-WebGPU GEMM
-threshold, and the pre-0.2 `GPUDevice` + `GPUTensor` API as deprecated
-shims.
+threshold. The pre-0.2 `GPUDevice` + `GPUTensor` API was removed in 0.3.0
+(see [Removed in 0.3.0](#removed-in-030)).
 
 Browsers use `navigator.gpu`. Deno uses its built-in WebGPU. Node ≥ 24 and
 Bun ≥ 1.2 use Dawn, through the `webgpu` package that backend-webgpu
@@ -131,87 +131,54 @@ dispatch. The expression is an `IRNode`, or a `Traced` built with
 Each `GPUDevice` gets exactly one `WebGpuBackend`. Dispatches are batched
 into a compute pass that is submitted later, so two runtimes on one device
 could reorder each other's work. `createWebGpuDevice()` registers the
-backend it creates. `backendFor(device)` returns a device's backend,
-creating one if needed; the deprecated functions use it. A second backend
-for the same device is refused.
+backend it creates, and `createWebGpuDevice({ device })` for a device that
+already has one shares it. A second backend for the same device is refused.
 
 ### GEMM threshold
 
 `chooseGemmBackend(m, n, k?)` returns `"webgpu"` when the output has at
-least `GEMM_ELEMENT_THRESHOLD` = 192² elements **and** the product does at
-least `GEMM_WORK_THRESHOLD` = 2²² multiply-adds; otherwise it returns
-`"wasm"`. This was measured end to end (upload, compute and readback of
-host arrays) against tensor-wasm's SIMD128 GEMM on an Apple M2.
+least `GEMM_ELEMENT_THRESHOLD` = 256² elements **and** the product does at
+least `GEMM_WORK_THRESHOLD` = 2²⁴ multiply-adds; otherwise it returns
+`"wasm"`. It prices a host-array call end to end (upload, `matmul` or
+`linear`, readback) against tensor-wasm's SIMD128 GEMM, on an Apple M2.
 
-It was re-measured under Dawn on backend-webgpu's GEMM for 0.2.0 (see
-[`docs/spikes/webgpu-tiled-gemm.md`](../../docs/spikes/webgpu-tiled-gemm.md)).
-The rule still sends no measured shape to WebGPU that runs slower there.
-The new path also wins some shapes the rule leaves on WASM (large k on
-small outputs). The rule is unchanged because headless Chrome was not
-re-measured, and it deliberately follows the more conservative browser
-crossover.
+For 0.3.0 it was re-measured on 43 shapes in three environments: Dawn,
+headless Chrome, and a real, visible Chromium without subgroup matrices
+(see [`docs/spikes/webgpu-tiled-gemm.md`](../../docs/spikes/webgpu-tiled-gemm.md#re-measured-in-three-environments-tensor-webgpu-030-2026-09-24)).
+Dawn wins from 160³, but both browsers lose at 192³, and the visible
+browser also loses a few shapes the previous rule (`m·n >= 192²` and
+`m·n·k >= 2²²`) sent to WebGPU. The new rule sends no measured shape to a
+slower WebGPU in any of the three. It leaves some wins on WASM, such as
+Dawn's from 160³ and large-k products like 192x4096x192.
 
-This is one machine's number, and it ignores residency. Re-run
-`scripts/measure-gemm-threshold.ts` on your own hardware.
+This is one machine's number, and it ignores residency: operands already
+on the GPU make WebGPU cheaper at every size. Re-run
+`scripts/measure-gemm-threshold.ts` (Dawn or headless Chrome) and
+`scripts/gemm-threshold-page/serve.ts` (any browser) on your own hardware.
 
-## Migrating from 0.1 (deprecated API)
+## Removed in 0.3.0
 
-The 0.1 surface still works. It now runs on backend-webgpu's runtime and
-is **deprecated**: it will be removed in the first minor release after
-laya-js ships the runtime hooks (see the CHANGELOG).
+The pre-0.2 `GPUDevice` + `GPUTensor` API, deprecated in 0.2.0, is gone.
+Its replacements, all on a `gpu` from `createWebGpuDevice()`:
 
-| 0.1 | Use instead |
+| Removed | Use instead |
 |---|---|
-| `detectWebGPU()` + `GPUDevice` | `createWebGpuDevice()`. `detectWebGPU` stays supported if you want to own the device; then pass `createWebGpuDevice({ device })` |
-| `toWebGPU(t, device)`, `GPUTensor.from*` | `await gpu.fromTensor(t)` / `gpu.fromHost(h)` |
-| `gpuTensor.toTensor()` / `toFloat32Array()` | `await gpu.toTensor(x)` / `gpu.toHost(x)` |
-| `gpuTensor.free()` | `gpu.dispose(x)` or `gpu.scope(...)` |
-| `runGemm(device, a, b, { transB })` | `gpu.backend.matmul(a, b)` / `gpu.backend.linear(x, w, bias?)` |
-| `runGemmWGSL` / `runGemmF16WGSL` | upload, `matmul`/`linear`, `toHost` |
-| `runAttention(device, q, k, v, { mask, scale })` | `gpu.backend.sdpa(q, k, v, mask, scale)` on `[B, H, L, D]` tensors with a **bool** mask |
-| `runQKT` / `runSoftmax` / `runWeightedSum` | `matmul` + `transpose` / `softmax` / `matmul` |
+| `toWebGPU(t, device)`, `GPUTensor.fromFloat32Array` / `fromFloat16Bits` | `await gpu.fromTensor(t)` / `await gpu.fromHost(h)` |
+| `GPUTensor.fromBuffer(device, buffer, shape)` | `gpu.backend.wrapBuffer(buffer, shape, dtype)` |
+| `gpuTensor.toTensor()` / `toFloat32Array()` / `toUint16Array()` | `await gpu.toTensor(x)` / `await gpu.toHost(x)` |
+| `gpuTensor.free()` | `gpu.dispose(x)`, or `gpu.scope(fn)` |
+| `runGemm(device, a, b, { transB })`, `runGemmWGSL`, `runGemmF16WGSL` | `gpu.backend.matmul(a, b)` / `gpu.backend.linear(x, w, bias?)` (x·Wᵀ). Where subgroup matrices apply (Dawn or `--enable-unsafe-webgpu` on Apple GPUs) and M > 64, `linear(a, transpose(b, [1, 0]))` is faster than `matmul` for A·B: `matmul` only has the tiled kernel |
+| `runAttention(device, q, k, v, { mask, scale })` | `gpu.backend.sdpa(q, k, v, mask, scale)` on `[B, H, L, D]` tensors with a **bool** mask. Fully masked query rows are undefined (the shim returned 0) |
+| `runQKT` / `runSoftmax` / `runWeightedSum` | `matmul(q, transpose(k, …))` / `softmax(x, -1)` / `matmul(w, v)` |
 | `runElementwiseWGSL(device, node, arrays, n)` | `gpu.fuse(node, tensors)` / `gpu.compile(n, fn)` |
-| `startProfiling` / `stopProfiling` / `configureGPURuntime` | `gpu.backend.rt.startProfiling()` / `stopProfiling()` / `rt.sleepWhileWaiting` |
-| `requestDawnGPU` (`./dawn`) | nothing: `createWebGpuDevice()` finds Dawn itself (or `getGpu({ unsafe })` from backend-webgpu) |
+| `startProfiling` / `stopProfiling` / `configureGPURuntime` | `gpu.backend.rt.startProfiling()` / `stopProfiling()` / `rt.sleepWhileWaiting`, `rt.sleepThresholdMs` |
+| `backendFor(device)` | `(await createWebGpuDevice({ device })).backend` |
+| `requestDawnGPU` (the `./dawn` subpath) | nothing: `createWebGpuDevice()` finds Dawn itself; `getGpu({ unsafe })` from backend-webgpu for a raw `GPU` |
+| `gemmKernelApplicable`, `GemmOptions.kernel`, `AttentionOptions` | nothing: backend-webgpu picks kernels (its `gemmTuning` table forces a Linear kernel per shape) |
 
-`GPUTensor.handle` is the backend tensor behind a `GPUTensor`, so you can
-migrate one call at a time:
-`createWebGpuDevice({ device }).backend.matmul(a.handle, b.handle)`.
-
-Behaviour changes in the shims:
-
-- **GEMM** runs on backend-webgpu's kernels. `kernel: "skinny" |
-  "subgroup-matrix" | "tiled"` still forces a kernel family, through the
-  backend's per-shape tuning table. The preconditions changed slightly:
-  skinny needs M ≤ 64, and subgroup-matrix no longer needs N % 4 for A·B.
-  For A·B, when subgroup matrices apply, B is transposed once so the faster
-  `linear` path is used.
-- **`runAttention`**:
-  - `skipMaskedTiles` and `kernel: "generic"` are ignored. The backend's
-    fast kernel (head dim 32/64) always skips masked key tiles; its generic
-    kernel never does.
-  - Fully masked query rows still produce 0.
-  - It is fused on every device. backend-webgpu 0.3.1 fits its kernels to
-    the device's workgroup-memory limit, so on the 16 KiB default head
-    dim 64 uses the generic kernel with smaller tiles.
-    `detectWebGPU()` and `createWebGpuDevice()` raise the limit to the
-    adapter's, which lets head dim 64 use the fast kernel. (0.2.0 composed
-    attention from matmul and softmax below 32 KiB, because
-    backend-webgpu 0.3.0 did not check the limit.)
-- **Removed** (they were the duplicated kernels and runtime):
-  - GEMM: `planGemm`, `selectGemmKernel`, `GEMM_CONFIG`, and the WGSL
-    generators `tiledGemmWGSL`, `skinnyGemmWGSL`, `subgroupMatrixGemmWGSL`.
-  - Attention: `planAttention`, `fastAttentionWGSL`,
-    `genericAttentionWGSL`, `genericAttentionConfig`.
-  - Runtime helpers: `acquireBuffer`, `releaseBuffer`, `dispatchKernel`,
-    `getKernel`, `parseWGSLBindings`, `writeBytes`, `readBackBytes`, …
-  - `gpuRuntimeStats`: use `backend.rt.stats`.
-- **Readback sleep** follows backend-webgpu's default (on under Dawn) with
-  a 15 ms threshold (see [Readback sleep](#api)). 0.2.0 turned it off,
-  because backend-webgpu 0.3.0's fixed 3 ms threshold slowed 2–6 ms
-  readbacks by 15–60%. `configureGPURuntime(device, { sleepWhileWaiting,
-  sleepThresholdMs })` sets either (`sleepThresholdMs` was removed in 0.2.0
-  and is back).
+`detectWebGPU`, `registerGemmAdapter`, `gemmCapabilities`,
+`subgroupMatrixUsable`, `chooseGemmBackend` and the threshold constants
+stay.
 
 ## Limitations
 
@@ -224,17 +191,8 @@ Behaviour changes in the shims:
   dtypes first. (backend-webgpu's `elementwise` hook could load f16, bf16,
   i32 and bool inputs as f32, but no test covers that yet.) It lowers the
   forward value only, not gradients.
-- `src/bridge.ts` uses backend-webgpu 0.3.1's documented hooks
-  (`createWebGpuBackend({ device, adapter })`, `empty`, `wrapBuffer`,
-  `elementwise`, `Runtime`), with one exception. `backendFor(device)`
-  must be synchronous for the deprecated API, so it calls the
-  `WebGpuBackend` constructor, which is typed as public but not
-  documented. That call goes away with the deprecated surface.
-- `GPUTensor.fromBuffer(device, buffer, shape, "f16")` needs a device with
-  `shader-f16`. Without it, backend-webgpu stores f16 as f32, so a buffer
-  of binary16 bits cannot be wrapped. `fromFloat16Bits` still works.
-- The deprecated shims are 2-D (GEMM) and 3-D (attention), and f32 except
-  for GEMM.
+- This package uses only backend-webgpu's documented API
+  (`createWebGpuBackend({ device, adapter })` and the `elementwise` hook).
 - Subgroup matrices need Dawn's experimental
   `chromium-experimental-subgroup-matrix`. In practice that means Apple
   GPUs, with `allow_unsafe_apis` (which `createWebGpuDevice()` sets under
@@ -247,7 +205,7 @@ Behaviour changes in the shims:
 
 ## Tests
 
-`npm test` and `npm run test:bun` run the same 65 tests under Node and
+`npm test` and `npm run test:bun` run the same 54 tests under Node and
 Bun. GPU tests run on a real adapter, either Dawn in-process or headless
 Chrome over CDP (`$MATH_PLUS_WEBGPU_HARNESS=dawn|chrome`; the default is
 Dawn, falling back to Chrome). They skip, never fail, where neither exists.
@@ -262,21 +220,24 @@ Dawn, falling back to Chrome). They skip, never fail, where neither exists.
     broadcasting (lower ranks, size-1 axes on both sides, offset views, an
     input the expression ignores)
   - scope tracking
-  - interop with `GPUTensor`
-- **GEMM**: every kernel family × {f32, f16} × both B layouts, against a
-  NumPy oracle (`scripts/gemm_oracle.py`).
-- **Fused attention**: every mask shape, including fully masked rows, on
+  - sharing a `detectWebGPU()` device, and `destroy`
+  - the API removed in 0.3.0 stays removed
+- **GEMM** through `gpu.backend.matmul` / `linear`: every kernel family
+  (forced through the backend's `gemmTuning` table) × {f32, f16} × both B
+  layouts, and GPU-resident chains, against a NumPy oracle
+  (`scripts/gemm_oracle.py`).
+- **Fused attention** through `gpu.backend.sdpa`: every mask shape, on
   raised and default (16 KiB) workgroup-memory limits, against a NumPy oracle
-  (`scripts/attention_oracle.py`).
+  (`scripts/attention_oracle.py`). Fully masked query rows are excluded:
+  the contract leaves them undefined.
 - **Fusion cross-checks** against the CPU interpreter, including the fuzzer
   (issue #58) and an `Interval` precision oracle (issue #36).
 - **Runtime behaviour**:
   - one backend per device
-  - cache hits through the shims
+  - pipeline, bind-group and buffer-pool hits, and GPU-resident chains
+    that create no readback buffer until the caller reads
   - the fused kernel's per-dispatch uniforms
-  - the readback-sleep defaults and the deprecated runtime knobs
-  - `GPUTensor.fromBuffer` over a caller's buffer (never pooled; `free()`
-    destroys it)
+  - the readback-sleep defaults, and the profiler through `backend.rt`
 - The Bun **`writeBuffer` byteOffset** repro (`test/bun/`).
 
 ## Provenance

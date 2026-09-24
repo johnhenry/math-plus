@@ -2,7 +2,7 @@
  * Randomized differential fuzzing through the REAL GPU (issue #58): the same
  * seeded IR-graph generator as tensor-compile's CPU fuzzer (imported from
  * ../../tensor-compile/test/fuzz-generator.ts — shared, not duplicated) runs
- * random programs through `compileIRToWGSL` + `runElementwiseWGSL` on a live
+ * random programs through `compileIRToWGSL`'s lowering + `createWebGpuDevice().fuse` on a live
  * GPUAdapter and compares against `evalWithGrad` on the CPU. Unlike the CPU
  * fuzzer's value leg (where both sides share the interpreter), WGSL codegen +
  * GPU f32 execution is a genuinely independent third implementation of the
@@ -38,7 +38,7 @@ import {
   usesAnyInput,
   type GenSpec,
 } from "../../tensor-compile/test/fuzz-generator.ts";
-import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
+import { bundleForBrowser, closeHarness, FUSE_HOST, getHarness, SRC } from "./helpers.ts";
 
 const CASES = Number(process.env.MATH_PLUS_WGSL_FUZZ_CASES ?? 25);
 const BASE_SEED = Number(process.env.MATH_PLUS_WGSL_FUZZ_SEED ?? 20260813);
@@ -106,17 +106,15 @@ test(`WGSL fuzz: ${CASES} random IR programs agree between real-GPU WGSL and the
   }
   assert.ok(cases.length >= CASES * 0.6, `only built ${cases.length}/${CASES} cases (${discarded} discarded) — generator/guard drift`);
 
-  const bundle = bundleForBrowser([path.join(SRC, "elementwise.ts")]);
+  const bundle = bundleForBrowser([path.join(SRC, "facade.ts")]);
   const runBatch = async (batch: Array<{ node: IRNode; inputs: number[][] }>): Promise<number[][]> =>
     await harness.run<number[][]>(
-      `
-      const adapter = await navigator.gpu.requestAdapter();
-      const device = await adapter.requestDevice();
+      `${FUSE_HOST}
       const cases = ${JSON.stringify(batch)};
       const results = [];
       for (const c of cases) {
         const inputs = c.inputs.map((a) => new Float32Array(a));
-        const out = await runElementwiseWGSL(device, c.node, inputs, ${ELEMENTS});
+        const out = await fuseHost(c.node, inputs);
         results.push(Array.from(out));
       }
       return results;

@@ -185,7 +185,8 @@ Infinity` is, if anything, more clearly right until the WGSL kernel is tiled too
 
 (Later, 2026-09-24: the WGSL kernel was tiled, and the crossover was re-measured against this SIMD
 GEMM — [`webgpu-tiled-gemm.md`](webgpu-tiled-gemm.md#re-measured-against-the-simd-wasm-gemm-2026-09-24).
-It moved from m·n = 128² to m·n >= 192² plus a k-aware work floor.)
+It moved from m·n = 128² to m·n >= 192² plus a k-aware work floor, and for tensor-webgpu 0.3.0,
+measured in Dawn and two browsers, to m·n >= 256² and m·n·k >= 2²⁴.)
 
 ### Reproduction
 

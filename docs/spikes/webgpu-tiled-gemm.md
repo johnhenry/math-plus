@@ -1,4 +1,4 @@
-# WebGPU tiled GEMM: measured crossover (2026-09-23, re-measured 2026-09-24)
+# WebGPU tiled GEMM: measured crossover (2026-09-23, re-measured 2026-09-24 and for 0.3.0)
 
 Follow-up to [`webgpu-baseline.md`](webgpu-baseline.md), which found that v1's naive
 one-thread-per-output GEMM never beat `@johnhenry/math-plus-tensor-wasm` and pinned
@@ -8,15 +8,214 @@ f16 storage with f32 accumulation. **Result: on an Apple M2, WebGPU wins end to 
 square size from n = 128 (n = 96 under Dawn), and `GEMM_ELEMENT_THRESHOLD` is now
 `128 * 128`.** That number is from one machine; see [Caveats](#caveats).
 
-> **Since #146** GEMM runs on `@johnhenry/backend-webgpu`; the threshold was re-checked there
-> and left unchanged — see [Re-measured on backend-webgpu](#re-measured-on-backend-webgpu-issue-146-2026-09-24).
->
-> **Current threshold (2026-09-24):** `chooseGemmBackend(m, n, k)` picks WebGPU when
-> `m·n >= 192²` **and** `m·n·k >= 2²²`, re-measured against tensor-wasm's SIMD128 GEMM (#130)
-> with the thermal-aware method — see
-> [Re-measured against the SIMD WASM GEMM](#re-measured-against-the-simd-wasm-gemm-2026-09-24).
-> The 2026-09-23 sections below it are kept as the record of the `128 * 128` threshold they
-> produced against the old scalar WASM kernel.
+> **Current threshold (tensor-webgpu 0.3.0):** `chooseGemmBackend(m, n, k)` picks WebGPU when
+> `m·n >= 256²` **and** `m·n·k >= 2²⁴`, measured through the device facade in Dawn, headless
+> Chrome and a real, visible Chromium — see
+> [Re-measured in three environments](#re-measured-in-three-environments-tensor-webgpu-030-2026-09-24).
+> The sections after it are the record of the earlier rules: `m·n >= 192²` and `m·n·k >= 2²²`
+> (SIMD WASM, #130; re-checked under Dawn only after #146), and `128 * 128` against the old
+> scalar WASM kernel.
+
+## Re-measured in three environments (tensor-webgpu 0.3.0, 2026-09-24)
+
+0.3.0 removed the `runGemm*` shims, so a caller now writes `gpu.backend.matmul(a, b)` for A·B
+and `gpu.backend.linear(x, w)` for x·Wᵀ. That changes the A·B path: the shim sent A·B through
+one transpose of B into backend-webgpu's subgroup-matrix `linear` when it applied (the
+`copy+gemmsg` rows above); `matmul` has only the portable tiled kernel (`gemm`), in every
+environment. The previous rule also followed a headless-Chrome crossover that was measured
+before #146 and never re-measured on backend-webgpu, and no real browser had been measured at
+all. So all three environments were measured on the same 43 shapes, through the facade.
+
+### Setup
+
+| | |
+|---|---|
+| Machine | MacBook Air M2 (`Mac14,15`, 8 CPU cores, 10-core GPU, 24 GiB), macOS 27.0 (26A428), **on AC**, fanless. `pmset -g therm`: no thermal or performance warning recorded before or after the runs. Load average 5.5-11 during the runs (other agents shared the CPU; the GPU was held under `~/gpu.lock` for all three) |
+| Method | `scripts/bench/thermal.ts` `runGrid` in all three: 5 s cooldown before every (shape, backend) cell, 1 untimed warmup, timing window <= 1 s (3-30 samples), **median**; WASM and WebGPU alternated inside each cell (order swapped every other cell) |
+| What is timed | End to end per call (`scripts/gemm-threshold-cells.ts`, one copy for all three). WASM: `WasmTensor.fromArray` x2 + `matmulInto` (SIMD128) + `toFloat32Array` + free. WebGPU: `gpu.fromHost` x2, `gpu.backend.matmul` (A·B) or `gpu.backend.linear` (x·Wᵀ), `gpu.toHost`, dispose |
+| (c) Dawn | `webgpu@0.6.1` in the Node 24.9 process, `allow_unsafe_apis` (subgroup matrices on), `createWebGpuDevice({ device })` on a `detectWebGPU()` device; no harness in the timed call. `node scripts/measure-gemm-threshold.ts` |
+| (a) headless Chrome | Google Chrome 153 (`--headless=new --use-angle=metal --enable-unsafe-webgpu`, so subgroup matrices on) via `test/helpers.ts`'s CDP harness; each call timed in the page (`{ selfTimedMs }`), clock coarsened to 0.1 ms (not cross-origin isolated). WASM runs in Node. `MATH_PLUS_WEBGPU_HARNESS=chrome node scripts/measure-gemm-threshold.ts` |
+| (b) visible Chromium | The Chromium 152 browser pane of the Claude desktop app (`Chrome/152.0.7977.130`), visible and in the foreground, default flags: **no subgroup matrices**. `scripts/gemm-threshold-page/serve.ts` serves the page cross-origin isolated (5 µs clock); **both** WASM and WebGPU run in the page. Results read back from the page's `window.__gemm` |
+
+Kernels: A·B is `gemm` (tiled) everywhere. Linear rows are `gemmskinny` (M <= 64); 256x1024x3072ᵀ is
+`gemmsg` under Dawn and headless Chrome, `gemmdirect` in the visible browser.
+
+### Results (ms, median; ratio = WASM / WebGPU, bold = WebGPU faster; ✗ = routed to a slower WebGPU)
+
+#### (c) Dawn
+
+| m x k x n | m·n | m·n·k | kernel | WASM | WebGPU | WASM/WebGPU | old rule | new rule |
+|---|---:|---:|---|---:|---:|---:|---|---|
+| 8x8x8 | 64 | 512 | gemm | 0.020 | 0.268 | 0.07x | wasm | wasm |
+| 16x16x16 | 256 | 4096 | gemm | 0.051 | 0.277 | 0.18x | wasm | wasm |
+| 32x32x32 | 1024 | 33 K | gemm | 0.056 | 0.431 | 0.13x | wasm | wasm |
+| 48x48x48 | 2304 | 111 K | gemm | 0.086 | 0.457 | 0.19x | wasm | wasm |
+| 64x64x64 | 4096 | 262 K | gemm | 0.100 | 0.525 | 0.19x | wasm | wasm |
+| 96x96x96 | 9216 | 885 K | gemm | 0.251 | 0.680 | 0.37x | wasm | wasm |
+| 128x128x128 | 16384 | 2.1 M | gemm | 0.525 | 0.545 | 0.96x | wasm | wasm |
+| 160x160x160 | 25600 | 4.1 M | gemm | 0.859 | 0.482 | **1.78x** | wasm | wasm |
+| 192x192x192 | 36864 | 7.1 M | gemm | 0.981 | 0.459 | **2.14x** | webgpu | wasm |
+| 256x256x256 | 65536 | 16.8 M | gemm | 1.662 | 0.597 | **2.78x** | webgpu | webgpu |
+| 384x384x384 | 147456 | 56.6 M | gemm | 3.651 | 1.133 | **3.22x** | webgpu | webgpu |
+| 512x512x512 | 262144 | 134.2 M | gemm | 7.610 | 1.561 | **4.88x** | webgpu | webgpu |
+| 1024x1024x1024 | 1048576 | 1073.7 M | gemm | 57.613 | 8.737 | **6.59x** | webgpu | webgpu |
+| 2048x2048x2048 | 4194304 | 8589.9 M | gemm | 445.614 | 26.158 | **17.04x** | webgpu | webgpu |
+| 32x16x32 | 1024 | 16 K | gemm | 0.022 | 0.434 | 0.05x | wasm | wasm |
+| 32x64x32 | 1024 | 66 K | gemm | 0.039 | 0.459 | 0.08x | wasm | wasm |
+| 32x256x32 | 1024 | 262 K | gemm | 0.092 | 0.698 | 0.13x | wasm | wasm |
+| 32x1024x32 | 1024 | 1.0 M | gemm | 0.219 | 0.928 | 0.24x | wasm | wasm |
+| 32x4096x32 | 1024 | 4.2 M | gemm | 0.611 | 2.322 | 0.26x | wasm | wasm |
+| 64x16x64 | 4096 | 66 K | gemm | 0.101 | 0.445 | 0.23x | wasm | wasm |
+| 64x256x64 | 4096 | 1.0 M | gemm | 0.179 | 0.596 | 0.30x | wasm | wasm |
+| 64x1024x64 | 4096 | 4.2 M | gemm | 0.288 | 0.856 | 0.34x | wasm | wasm |
+| 64x4096x64 | 4096 | 16.8 M | gemm | 1.354 | 2.550 | 0.53x | wasm | wasm |
+| 96x16x96 | 9216 | 147 K | gemm | 0.053 | 0.270 | 0.20x | wasm | wasm |
+| 96x64x96 | 9216 | 590 K | gemm | 0.080 | 0.301 | 0.27x | wasm | wasm |
+| 96x256x96 | 9216 | 2.4 M | gemm | 0.507 | 0.642 | 0.79x | wasm | wasm |
+| 96x1024x96 | 9216 | 9.4 M | gemm | 1.088 | 1.011 | **1.08x** | wasm | wasm |
+| 96x4096x96 | 9216 | 37.7 M | gemm | 2.514 | 2.476 | **1.02x** | wasm | wasm |
+| 128x16x128 | 16384 | 262 K | gemm | 0.219 | 0.444 | 0.49x | wasm | wasm |
+| 128x64x128 | 16384 | 1.0 M | gemm | 0.423 | 0.509 | 0.83x | wasm | wasm |
+| 128x256x128 | 16384 | 4.2 M | gemm | 0.443 | 0.432 | **1.03x** | wasm | wasm |
+| 128x1024x128 | 16384 | 16.8 M | gemm | 1.424 | 0.984 | **1.45x** | wasm | wasm |
+| 128x4096x128 | 16384 | 67.1 M | gemm | 3.560 | 2.578 | **1.38x** | wasm | wasm |
+| 192x16x192 | 36864 | 590 K | gemm | 0.491 | 0.391 | **1.26x** | wasm | wasm |
+| 192x64x192 | 36864 | 2.4 M | gemm | 0.830 | 0.769 | **1.08x** | wasm | wasm |
+| 192x256x192 | 36864 | 9.4 M | gemm | 1.228 | 0.673 | **1.82x** | webgpu | wasm |
+| 192x1024x192 | 36864 | 37.7 M | gemm | 2.528 | 1.064 | **2.38x** | webgpu | wasm |
+| 192x4096x192 | 36864 | 151.0 M | gemm | 7.704 | 3.336 | **2.31x** | webgpu | wasm |
+| 1x1024x3072ᵀ | 3072 | 3.1 M | gemmskinny | 1.406 | 2.567 | 0.55x | wasm | wasm |
+| 4x1024x3072ᵀ | 12288 | 12.6 M | gemmskinny | 1.932 | 2.146 | 0.90x | wasm | wasm |
+| 16x1024x3072ᵀ | 49152 | 50.3 M | gemmskinny | 3.488 | 2.653 | **1.31x** | webgpu | wasm |
+| 64x1024x3072ᵀ | 196608 | 201.3 M | gemmskinny | 11.390 | 3.466 | **3.29x** | webgpu | webgpu |
+| 256x1024x3072ᵀ | 786432 | 805.3 M | gemmsg | 43.297 | 5.179 | **8.36x** | webgpu | webgpu |
+
+#### (a) Headless Chrome
+
+| m x k x n | m·n | m·n·k | kernel | WASM | WebGPU | WASM/WebGPU | old rule | new rule |
+|---|---:|---:|---|---:|---:|---:|---|---|
+| 8x8x8 | 64 | 512 | gemm | 0.026 | 0.600 | 0.04x | wasm | wasm |
+| 16x16x16 | 256 | 4096 | gemm | 0.058 | 0.400 | 0.14x | wasm | wasm |
+| 32x32x32 | 1024 | 33 K | gemm | 0.059 | 0.400 | 0.15x | wasm | wasm |
+| 48x48x48 | 2304 | 111 K | gemm | 0.081 | 0.500 | 0.16x | wasm | wasm |
+| 64x64x64 | 4096 | 262 K | gemm | 0.098 | 0.700 | 0.14x | wasm | wasm |
+| 96x96x96 | 9216 | 885 K | gemm | 0.090 | 0.700 | 0.13x | wasm | wasm |
+| 128x128x128 | 16384 | 2.1 M | gemm | 0.268 | 0.800 | 0.33x | wasm | wasm |
+| 160x160x160 | 25600 | 4.1 M | gemm | 0.716 | 0.900 | 0.80x | wasm | wasm |
+| 192x192x192 | 36864 | 7.1 M | gemm | 0.972 | 1.100 | 0.88x | webgpu ✗ | wasm |
+| 256x256x256 | 65536 | 16.8 M | gemm | 1.408 | 1.000 | **1.41x** | webgpu | webgpu |
+| 384x384x384 | 147456 | 56.6 M | gemm | 3.541 | 2.400 | **1.48x** | webgpu | webgpu |
+| 512x512x512 | 262144 | 134.2 M | gemm | 7.612 | 2.900 | **2.62x** | webgpu | webgpu |
+| 1024x1024x1024 | 1048576 | 1073.7 M | gemm | 57.478 | 11.500 | **5.00x** | webgpu | webgpu |
+| 2048x2048x2048 | 4194304 | 8589.9 M | gemm | 452.717 | 29.100 | **15.56x** | webgpu | webgpu |
+| 32x16x32 | 1024 | 16 K | gemm | 0.026 | 0.600 | 0.04x | wasm | wasm |
+| 32x64x32 | 1024 | 66 K | gemm | 0.035 | 0.700 | 0.05x | wasm | wasm |
+| 32x256x32 | 1024 | 262 K | gemm | 0.026 | 0.600 | 0.04x | wasm | wasm |
+| 32x1024x32 | 1024 | 1.0 M | gemm | 0.102 | 1.300 | 0.08x | wasm | wasm |
+| 32x4096x32 | 1024 | 4.2 M | gemm | 0.523 | 3.700 | 0.14x | wasm | wasm |
+| 64x16x64 | 4096 | 66 K | gemm | 0.064 | 0.400 | 0.16x | wasm | wasm |
+| 64x256x64 | 4096 | 1.0 M | gemm | 0.152 | 0.600 | 0.25x | wasm | wasm |
+| 64x1024x64 | 4096 | 4.2 M | gemm | 0.590 | 1.600 | 0.37x | wasm | wasm |
+| 64x4096x64 | 4096 | 16.8 M | gemm | 1.320 | 4.500 | 0.29x | wasm | wasm |
+| 96x16x96 | 9216 | 147 K | gemm | 0.141 | 0.500 | 0.28x | wasm | wasm |
+| 96x64x96 | 9216 | 590 K | gemm | 0.263 | 0.400 | 0.66x | wasm | wasm |
+| 96x256x96 | 9216 | 2.4 M | gemm | 0.323 | 0.800 | 0.40x | wasm | wasm |
+| 96x1024x96 | 9216 | 9.4 M | gemm | 0.602 | 1.900 | 0.32x | wasm | wasm |
+| 96x4096x96 | 9216 | 37.7 M | gemm | 2.526 | 5.000 | 0.51x | wasm | wasm |
+| 128x16x128 | 16384 | 262 K | gemm | 0.230 | 0.600 | 0.38x | wasm | wasm |
+| 128x64x128 | 16384 | 1.0 M | gemm | 0.379 | 0.700 | 0.54x | wasm | wasm |
+| 128x256x128 | 16384 | 4.2 M | gemm | 0.656 | 1.000 | 0.66x | wasm | wasm |
+| 128x1024x128 | 16384 | 16.8 M | gemm | 1.594 | 1.300 | **1.23x** | wasm | wasm |
+| 128x4096x128 | 16384 | 67.1 M | gemm | 3.559 | 5.100 | 0.70x | wasm | wasm |
+| 192x16x192 | 36864 | 590 K | gemm | 0.415 | 0.600 | 0.69x | wasm | wasm |
+| 192x64x192 | 36864 | 2.4 M | gemm | 0.746 | 0.600 | **1.24x** | wasm | wasm |
+| 192x256x192 | 36864 | 9.4 M | gemm | 1.204 | 1.200 | **1.00x** | webgpu | wasm |
+| 192x1024x192 | 36864 | 37.7 M | gemm | 2.504 | 2.300 | **1.09x** | webgpu | wasm |
+| 192x4096x192 | 36864 | 151.0 M | gemm | 7.733 | 5.800 | **1.33x** | webgpu | wasm |
+| 1x1024x3072ᵀ | 3072 | 3.1 M | gemmskinny | 1.424 | 3.100 | 0.46x | wasm | wasm |
+| 4x1024x3072ᵀ | 12288 | 12.6 M | gemmskinny | 1.982 | 2.900 | 0.68x | wasm | wasm |
+| 16x1024x3072ᵀ | 49152 | 50.3 M | gemmskinny | 3.472 | 2.900 | **1.20x** | webgpu | wasm |
+| 64x1024x3072ᵀ | 196608 | 201.3 M | gemmskinny | 12.518 | 4.200 | **2.98x** | webgpu | webgpu |
+| 256x1024x3072ᵀ | 786432 | 805.3 M | gemmsg | 43.296 | 7.100 | **6.10x** | webgpu | webgpu |
+
+#### (b) Visible Chromium (browser pane)
+
+| m x k x n | m·n | m·n·k | kernel | WASM | WebGPU | WASM/WebGPU | old rule | new rule |
+|---|---:|---:|---|---:|---:|---:|---|---|
+| 8x8x8 | 64 | 512 | gemm | 0.015 | 0.905 | 0.02x | wasm | wasm |
+| 16x16x16 | 256 | 4096 | gemm | 0.045 | 0.565 | 0.08x | wasm | wasm |
+| 32x32x32 | 1024 | 33 K | gemm | 0.110 | 0.335 | 0.33x | wasm | wasm |
+| 48x48x48 | 2304 | 111 K | gemm | 0.080 | 0.315 | 0.25x | wasm | wasm |
+| 64x64x64 | 4096 | 262 K | gemm | 0.165 | 0.640 | 0.26x | wasm | wasm |
+| 96x96x96 | 9216 | 885 K | gemm | 0.275 | 1.120 | 0.25x | wasm | wasm |
+| 128x128x128 | 16384 | 2.1 M | gemm | 0.555 | 1.140 | 0.49x | wasm | wasm |
+| 160x160x160 | 25600 | 4.1 M | gemm | 0.320 | 0.520 | 0.62x | wasm | wasm |
+| 192x192x192 | 36864 | 7.1 M | gemm | 0.505 | 0.570 | 0.89x | webgpu ✗ | wasm |
+| 256x256x256 | 65536 | 16.8 M | gemm | 1.105 | 0.720 | **1.53x** | webgpu | webgpu |
+| 384x384x384 | 147456 | 56.6 M | gemm | 3.605 | 1.345 | **2.68x** | webgpu | webgpu |
+| 512x512x512 | 262144 | 134.2 M | gemm | 7.695 | 2.285 | **3.37x** | webgpu | webgpu |
+| 1024x1024x1024 | 1048576 | 1073.7 M | gemm | 59.930 | 9.860 | **6.08x** | webgpu | webgpu |
+| 2048x2048x2048 | 4194304 | 8589.9 M | gemm | 453.070 | 28.065 | **16.14x** | webgpu | webgpu |
+| 32x16x32 | 1024 | 16 K | gemm | 0.045 | 0.350 | 0.13x | wasm | wasm |
+| 32x64x32 | 1024 | 66 K | gemm | 0.060 | 0.515 | 0.12x | wasm | wasm |
+| 32x256x32 | 1024 | 262 K | gemm | 0.035 | 1.135 | 0.03x | wasm | wasm |
+| 32x1024x32 | 1024 | 1.0 M | gemm | 0.295 | 1.530 | 0.19x | wasm | wasm |
+| 32x4096x32 | 1024 | 4.2 M | gemm | 0.535 | 3.210 | 0.17x | wasm | wasm |
+| 64x16x64 | 4096 | 66 K | gemm | 0.060 | 0.610 | 0.10x | wasm | wasm |
+| 64x256x64 | 4096 | 1.0 M | gemm | 0.290 | 0.830 | 0.35x | wasm | wasm |
+| 64x1024x64 | 4096 | 4.2 M | gemm | 0.310 | 1.385 | 0.22x | wasm | wasm |
+| 64x4096x64 | 4096 | 16.8 M | gemm | 1.005 | 4.290 | 0.23x | wasm | wasm |
+| 96x16x96 | 9216 | 147 K | gemm | 0.080 | 0.545 | 0.15x | wasm | wasm |
+| 96x64x96 | 9216 | 590 K | gemm | 0.260 | 0.890 | 0.29x | wasm | wasm |
+| 96x256x96 | 9216 | 2.4 M | gemm | 0.585 | 1.270 | 0.46x | wasm | wasm |
+| 96x1024x96 | 9216 | 9.4 M | gemm | 1.040 | 1.185 | 0.88x | wasm | wasm |
+| 96x4096x96 | 9216 | 37.7 M | gemm | 2.230 | 5.000 | 0.45x | wasm | wasm |
+| 128x16x128 | 16384 | 262 K | gemm | 0.160 | 0.505 | 0.32x | wasm | wasm |
+| 128x64x128 | 16384 | 1.0 M | gemm | 0.455 | 0.445 | **1.02x** | wasm | wasm |
+| 128x256x128 | 16384 | 4.2 M | gemm | 0.790 | 1.335 | 0.59x | wasm | wasm |
+| 128x1024x128 | 16384 | 16.8 M | gemm | 1.580 | 1.345 | **1.17x** | wasm | wasm |
+| 128x4096x128 | 16384 | 67.1 M | gemm | 3.665 | 5.750 | 0.64x | wasm | wasm |
+| 192x16x192 | 36864 | 590 K | gemm | 0.500 | 0.915 | 0.55x | wasm | wasm |
+| 192x64x192 | 36864 | 2.4 M | gemm | 0.730 | 1.145 | 0.64x | wasm | wasm |
+| 192x256x192 | 36864 | 9.4 M | gemm | 1.215 | 1.285 | 0.95x | webgpu ✗ | wasm |
+| 192x1024x192 | 36864 | 37.7 M | gemm | 2.540 | 2.650 | 0.96x | webgpu ✗ | wasm |
+| 192x4096x192 | 36864 | 151.0 M | gemm | 7.730 | 6.380 | **1.21x** | webgpu | wasm |
+| 1x1024x3072ᵀ | 3072 | 3.1 M | gemmskinny | 1.620 | 2.930 | 0.55x | wasm | wasm |
+| 4x1024x3072ᵀ | 12288 | 12.6 M | gemmskinny | 2.285 | 3.055 | 0.75x | wasm | wasm |
+| 16x1024x3072ᵀ | 49152 | 50.3 M | gemmskinny | 4.295 | 4.485 | 0.96x | webgpu ✗ | wasm |
+| 64x1024x3072ᵀ | 196608 | 201.3 M | gemmskinny | 11.750 | 4.115 | **2.86x** | webgpu | webgpu |
+| 256x1024x3072ᵀ | 786432 | 805.3 M | gemmdirect | 45.830 | 8.280 | **5.54x** | webgpu | webgpu |
+
+### Reading it
+
+- **Square crossover: n = 160 under Dawn, n = 256 in both browsers.** Dawn has the lowest
+  per-call floor (0.27-0.5 ms on the small cells) and the fastest mid-size calls (192³ in
+  0.46 ms). The browsers pay more per call (small cells: headless 0.4-0.7 ms, visible
+  0.3-0.9 ms) and more at 192³ (1.10 / 0.57 ms), while the visible page's WASM, running in the
+  page's own engine, was the fastest WASM of the three at 160³-192³ (0.32 / 0.51 ms). So 192³
+  loses in both browsers (0.88x / 0.89x).
+- **The previous rule (`m·n >= 192²`, `m·n·k >= 2²²`) now routes five measured shapes to a slower
+  WebGPU:** 192³ in both browsers, and in the visible browser 192x256x192 (0.95x),
+  192x1024x192 (0.96x) and the 16-row Linear 16x1024x3072ᵀ (0.96x). Every one sits at
+  m·n < 256².
+- **New rule: `m·n >= 256²` and `m·n·k >= 2²⁴`.** `256²` is the smallest element threshold that
+  sends no measured shape to a slower WebGPU in any of the three environments (routes 7 of 43:
+  256³-2048³ and the 64- and 256-row Linears; WebGPU 1.41-17x faster there). `2²⁴` = 256³ is the
+  smallest product measured at m·n >= 256², a win in all three. No measured shape has
+  m·n >= 256² with a small k, so the work test is a conservative floor rather than a measured
+  crossover: at m·n = 192², small k lost in both browsers (192x16x192 0.69x / 0.55x), and the
+  rule keeps such products on WASM.
+- **Wins left on WASM** (conservative where the environments disagree): everything Dawn wins below
+  256² (160³ 1.78x, 192³ 2.14x, the m·n = 192² k sweep, 16x1024x3072ᵀ 1.31x, …), and two shapes
+  all three win: 128x1024x128 (1.17-1.45x) and 192x4096x192 (1.21-2.31x). A rule shaped to
+  catch those (a second, large-k clause) would rest on two data points.
+- **A·B vs x·Wᵀ.** The A·B rows are backend-webgpu's tiled `matmul` in every environment, which
+  is why Dawn and headless Chrome (both with subgroup matrices) no longer beat the visible
+  browser on A·B as they did with the shim's `copy+gemmsg`. Where subgroup matrices apply,
+  `linear(a, transpose(b))` is the faster A·B (see the 2026-09-24 table below; the README's
+  "Removed in 0.3.0" says so), but it is not what `matmul` does, and the rule prices `matmul`.
+- The visible run is the noisiest (max/min up to 3x on some cells, shared CPU); its three losing
+  Linear/k-sweep cells are within 5% of a tie. The rule treats a tie as a loss.
 
 ## Re-measured on backend-webgpu (issue #146, 2026-09-24)
 
@@ -273,7 +472,7 @@ measured crossovers (Chrome's), since a browser page is this package's primary t
 - **Tile configs are M2-tuned** (from laya-js's sweeps); they're correct everywhere but may be
   suboptimal on other GPUs.
 - **Subgroup matrices are experimental.** Dawn-only (`chromium-experimental-subgroup-matrix`),
-  needs `allow_unsafe_apis` in Node (`requestDawnGPU({ unsafe: true })`) or
+  needs `allow_unsafe_apis` in Node (backend-webgpu's `getGpu({ unsafe: true })`, which `createWebGpuDevice()` uses) or
   `--enable-unsafe-webgpu` in Chrome; its WGSL builtin syntax has changed across versions (the
   package tries the current template syntax, then the older bool-argument one, then falls back to
   `tiled`). Default-flag Chromium doesn't expose it at all — the Chromium-152 column is that case.

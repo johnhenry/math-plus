@@ -82,7 +82,7 @@ export class WebGpuDevice {
     this.#owns = owns;
   }
 
-  /** The underlying `GPUDevice` (to share with other WebGPU code, or the deprecated `GPUDevice`-taking functions). */
+  /** The underlying `GPUDevice` (to share with other WebGPU code). */
   get device(): GPUDevice {
     return this.backend.device;
   }
@@ -185,7 +185,8 @@ export class WebGpuDevice {
    * Releases the runtime's pooled buffers and pipelines, and the
    * `GPUDevice` if `createWebGpuDevice()` requested it. Tensors must not be
    * used afterwards. A device passed in with `{ device }` is left alive, and
-   * its backend stays registered for the deprecated functions.
+   * its backend stays registered, so a later `createWebGpuDevice({ device })`
+   * shares it.
    */
   destroy(): void {
     if (!this.#owns) {

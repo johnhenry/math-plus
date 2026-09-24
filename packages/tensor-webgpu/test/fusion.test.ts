@@ -3,7 +3,8 @@
  * (built once via `@johnhenry/math-plus-tensor-compile`'s `Traced`, exactly as a real
  * `compile()` call would) through TWO independent backends —
  * `evalWithGrad` on the CPU (tensor-compile's own interpreter) and
- * `compileIRToWGSL` + `runElementwiseWGSL` on a live GPUAdapter — and assert
+ * `compileIRToWGSL`'s lowering run by `createWebGpuDevice().fuse` (backend-webgpu's
+ * `elementwise` hook) on a live GPUAdapter — and assert
  * they agree elementwise. Same "two independently-implemented consumers of
  * one IR must agree" shape as this repo's DualNumber-vs-reverse-mode-tape
  * autograd cross-check (docs/TESTING.md), just with a GPU backend on one
@@ -16,7 +17,7 @@ import { makeTest } from "../../../test/harness.ts";
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { evalWithGrad, Traced, type IRNode } from "@johnhenry/math-plus-tensor-compile";
 import { erf, geluErf, geluTanh } from "@johnhenry/math-plus-tensor-core";
-import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
+import { bundleForBrowser, closeHarness, FUSE_HOST, getHarness, SRC } from "./helpers.ts";
 
 after(closeHarness);
 
@@ -56,15 +57,13 @@ async function crossCheck(
   const elementCount = inputs[0]!.length;
   const expected = cpuForward(node, inputs, elementCount);
 
-  const bundle = bundleForBrowser([path.join(SRC, "elementwise.ts")]);
+  const bundle = bundleForBrowser([path.join(SRC, "facade.ts")]);
   const inputsLiteral = inputs.map((arr) => `new Float32Array(${JSON.stringify(Array.from(arr))})`).join(", ");
   const result = await harness.run<number[]>(
-    `
-    const adapter = await navigator.gpu.requestAdapter();
-    const device = await adapter.requestDevice();
+    `${FUSE_HOST}
     const node = ${JSON.stringify(node)};
     const inputs = [${inputsLiteral}];
-    const out = await runElementwiseWGSL(device, node, inputs, ${elementCount});
+    const out = await fuseHost(node, inputs);
     return Array.from(out);
     `,
     bundle,
@@ -199,14 +198,12 @@ test("fusion: WGSL erf / exact gelu / tanh gelu track the canonical f64 implemen
   const n = 481;
   const xs = new Float32Array(n);
   for (let i = 0; i < n; i++) xs[i] = -6 + (12 * i) / (n - 1); // [-6, 6], includes both series/CF regions and the |x| = 1 seam
-  const bundle = bundleForBrowser([path.join(SRC, "elementwise.ts")]);
+  const bundle = bundleForBrowser([path.join(SRC, "facade.ts")]);
   const run = async (op: "erf" | "gelu" | "gelu_tanh" | "tanh", data: Float32Array): Promise<number[]> =>
     harness.run<number[]>(
-      `
-      const adapter = await navigator.gpu.requestAdapter();
-      const device = await adapter.requestDevice();
+      `${FUSE_HOST}
       const node = { kind: "unary", op: ${JSON.stringify(op)}, arg: { kind: "input", index: 0 } };
-      return Array.from(await runElementwiseWGSL(device, node, [new Float32Array(${JSON.stringify(Array.from(data))})], ${data.length}));
+      return Array.from(await fuseHost(node, [new Float32Array(${JSON.stringify(Array.from(data))})]));
       `,
       bundle,
     );

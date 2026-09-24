@@ -5,15 +5,19 @@
  * implicit conversions), backend ops on uploaded tensors cross-checked
  * against tensor-core on the CPU, the IR -> WGSL fusion on the backend's
  * runtime (`fuse`/`compile`) cross-checked against tensor-compile's CPU
- * `forward`, scope tracking of fused results, interop with the deprecated
- * `GPUTensor` API, and `destroy`. In-process on Dawn (Node and Bun); skips,
- * never fails, without a WebGPU adapter.
+ * `forward`, scope tracking of fused results, sharing a device from
+ * `detectWebGPU()`, `destroy`, and the absence of the API removed in 0.3.0.
+ * In-process on Dawn (Node and Bun); skips, never fails, without a WebGPU
+ * adapter.
  */
 import assert from "node:assert/strict";
 import { compile, Traced } from "@johnhenry/math-plus-tensor-compile";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
-import { backendFor, createWebGpuDevice, detectWebGPU, GPUTensor, runGemm, webGpuUnavailableReason, type WebGpuDevice } from "../src/index.ts";
-import { requestDawnGPU } from "../src/dawn.ts";
+import { readFileSync } from "node:fs";
+import { getGpu } from "@johnhenry/backend-webgpu";
+import * as api from "../src/index.ts";
+import { createWebGpuDevice, detectWebGPU, webGpuUnavailableReason, type WebGpuDevice } from "../src/index.ts";
+import { lookupBackend } from "../src/bridge.ts";
 import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
@@ -47,6 +51,14 @@ test("createWebGpuDevice: a real device with no global default; info and dtype s
   const other = await createWebGpuDevice();
   assert.notEqual(other.device, gpu.device, "each call creates its own device");
   other.destroy();
+});
+
+test("a backend createWebGpuDevice() creates under Dawn sleeps before long readbacks, with the 15 ms threshold (bridge.ts SLEEP_THRESHOLD_MS_DEFAULT)", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  assert.equal(gpu.backend.rt.sleepThresholdMs, 15);
+  // backend-webgpu's default: on under Dawn (this process has no navigator.gpu), off for navigator.gpu.
+  const hasNavigatorGpu = Boolean((globalThis as { navigator?: { gpu?: unknown } }).navigator?.gpu);
+  assert.equal(gpu.backend.rt.sleepWhileWaiting, !hasNavigatorGpu);
 });
 
 test("fromTensor/toTensor round-trip every device dtype exactly, including a view with an offset", { skip: skip ?? false }, async () => {
@@ -194,22 +206,23 @@ test("fuse/compile broadcast their inputs like tensor-compile's CPU forward (Num
   for (const t of [m!, r!, u!, row2, got]) gpu.dispose(t);
 });
 
-test("createWebGpuDevice({ device }) shares the device's backend with the deprecated GPUTensor API (migration path)", { skip: skip ?? false }, async () => {
-  const cap = await detectWebGPU({ gpu: (await requestDawnGPU({ unsafe: true }))! });
+test("createWebGpuDevice({ device }) on a detectWebGPU() device: one shared backend, subgroup matrices follow detectWebGPU's adapter check, and the device survives destroy()", { skip: skip ?? false }, async () => {
+  const cap = await detectWebGPU({ gpu: (await getGpu({ unsafe: true }))! });
   assert.ok(cap.available, cap.reason);
   const dev = cap.device!;
   const gpu = await createWebGpuDevice({ device: dev });
-  assert.equal(gpu.backend, backendFor(dev), "one backend per device");
+  const again = await createWebGpuDevice({ device: dev });
+  assert.equal(again.backend, gpu.backend, "one backend per device");
+  assert.equal(lookupBackend(dev), gpu.backend);
   assert.equal(gpu.backend.hasSubgroupMatrix, cap.gemm!.subgroupMatrix, "subgroup matrices follow detectWebGPU's adapter check");
-  const A = GPUTensor.fromFloat32Array(dev, lcg(8 * 16, 5), [8, 16]);
-  const B = GPUTensor.fromFloat32Array(dev, lcg(16 * 4, 6), [16, 4]);
-  const legacy = await runGemm(dev, A, B);
-  const modern = gpu.backend.matmul(A.handle, B.handle); // GPUTensor.handle feeds backend ops directly
-  assert.deepEqual([...(await gpu.toHost(modern)).data], [...(await legacy.toFloat32Array())]);
-  gpu.dispose(modern);
-  for (const t of [A, B, legacy]) t.free();
+  const A = await gpu.fromHost({ dtype: "f32", shape: [8, 16], data: lcg(8 * 16, 5) });
+  const B = await gpu.fromHost({ dtype: "f32", shape: [16, 4], data: lcg(16 * 4, 6) });
+  const C = gpu.backend.matmul(A, B);
+  const want = Tensor.fromTypedArray(lcg(8 * 16, 5), [8, 16], { dtype: "f32" }).matmul(Tensor.fromTypedArray(lcg(16 * 4, 6), [16, 4], { dtype: "f32" }));
+  assertClose((await gpu.toHost(C)).data as Float32Array, want.data as Float32Array, 1e-5, "matmul on a shared device");
+  for (const t of [A, B, C]) gpu.dispose(t);
   gpu.destroy();
-  assert.equal(backendFor(dev), gpu.backend, "a device passed in keeps its backend after destroy()");
+  assert.equal(lookupBackend(dev), again.backend, "a device passed in keeps its backend after destroy()");
   dev.destroy();
 });
 
@@ -217,7 +230,20 @@ test("destroy() of a device createWebGpuDevice requested releases it and unregis
   const gpu = await createWebGpuDevice();
   const dev = gpu.device;
   const backend = gpu.backend;
-  assert.equal(backendFor(dev), backend);
+  assert.equal(lookupBackend(dev), backend);
   gpu.destroy();
-  assert.notEqual(backendFor(dev), backend, "the destroyed backend is no longer handed out");
+  assert.equal(lookupBackend(dev), undefined, "the destroyed backend is no longer handed out");
+});
+
+test("the API removed in 0.3.0 is gone: no deprecated exports, no ./dawn subpath", () => {
+  const removed = [
+    "toWebGPU", "GPUTensor", "runGemm", "runGemmWGSL", "runGemmF16WGSL", "gemmKernelApplicable",
+    "runAttention", "runQKT", "runSoftmax", "runWeightedSum", "runElementwiseWGSL",
+    "startProfiling", "stopProfiling", "configureGPURuntime", "backendFor", "requestDawnGPU",
+  ];
+  assert.deepEqual(removed.filter((name) => name in api), []);
+  for (const manifest of ["../package.json", "../jsr.json"]) {
+    const exp = (JSON.parse(readFileSync(new URL(manifest, import.meta.url), "utf8")) as { exports: unknown }).exports;
+    assert.ok(typeof exp === "string" || !("./dawn" in (exp as object)), `${manifest} still exports ./dawn`);
+  }
 });

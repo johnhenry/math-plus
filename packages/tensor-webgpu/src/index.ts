@@ -12,8 +12,8 @@
  *
  * The pre-#146 `GPUDevice` + `GPUTensor` API (`toWebGPU`, `runGemm*`,
  * `runAttention`, `runQKT`/`runSoftmax`/`runWeightedSum`,
- * `runElementwiseWGSL`, profiling, the `./dawn` subpath) still works, on
- * the same runtime, and is deprecated: see the README's migration table.
+ * `runElementwiseWGSL`, the profiling functions, `backendFor`, the `./dawn`
+ * subpath) was removed in 0.3.0: see the README's "Removed in 0.3.0".
  */
 export {
   createWebGpuDevice,
@@ -23,27 +23,7 @@ export {
   type WebGpuBackend,
   type WebGpuTensor,
 } from "./facade.ts";
-export { backendFor } from "./bridge.ts";
-export {
-  detectWebGPU,
-  toWebGPU,
-  GPUTensor,
-  type WebGPUCapability,
-  type DetectWebGPUOptions,
-  type GPUDType,
-} from "./device.ts";
+export { detectWebGPU, type WebGPUCapability, type DetectWebGPUOptions } from "./device.ts";
 export { GEMM_ELEMENT_THRESHOLD, GEMM_WORK_THRESHOLD, chooseGemmBackend } from "./threshold.ts";
-export {
-  runGemm,
-  runGemmWGSL,
-  runGemmF16WGSL,
-  gemmKernelApplicable,
-  type GemmDType,
-  type GemmKernel,
-  type GemmOptions,
-} from "./gemm.ts";
 export { registerGemmAdapter, gemmCapabilities, subgroupMatrixUsable, type GemmCapabilities } from "./gemm-caps.ts";
-export { runQKT, runSoftmax, runWeightedSum, runAttention, type AttentionOptions } from "./attention.ts";
 export { compileIRToWGSL, compileIRToElementwise, compileIRToKernel, type ElementwiseExpr, type ElementwiseWGSL } from "./fusion-wgsl.ts";
-export { runElementwiseWGSL } from "./elementwise.ts";
-export { configureGPURuntime, startProfiling, stopProfiling, type GPURuntimeOptions, type KernelTiming } from "./profiling.ts";

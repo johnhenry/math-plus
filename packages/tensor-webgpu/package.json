@@ -7,10 +7,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./dawn": {
-      "types": "./dist/dawn.d.ts",
-      "default": "./dist/dawn.js"
     }
   },
   "files": [

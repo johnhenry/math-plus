@@ -535,6 +535,9 @@ Answers to §11:
    runtime. math-plus ships a `tensor-webgpu` device facade, like tensor-mlx,
    and moves its IR→WGSL fusion onto it. `toWebGPU()` and `gpu.toTensor()`
    keep working through a deprecation window.
+   *Status:* done in tensor-webgpu 0.2 (#146, #159/#160). The deprecation
+   window ended in 0.3.0, which removed `toWebGPU`, `GPUTensor` and the rest
+   of the pre-facade API (see its README's "Removed in 0.3.0").
 7. **Contract growth: in tensor-backend.** A "general numerics" section
    (comparisons, `sqrt`, `argmax`, `erf`, …) is added to the one contract as
    optional ops with default compositions in `compose.ts`, plus conformance
