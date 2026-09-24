@@ -1,5 +1,15 @@
 # @johnhenry/math-plus-adapter-math
 
+## 0.0.4
+
+### Patch Changes
+
+- Updated dependencies [f68063d]
+- Updated dependencies [71fa3f0]
+  - @johnhenry/math-plus-tensor-core@0.2.0
+  - @johnhenry/math-plus-frame-arrow@0.0.4
+  - @johnhenry/math-plus-tensor-compile@0.1.2
+
 ## 0.0.3
 
 ### Patch Changes

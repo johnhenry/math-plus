@@ -1,5 +1,11 @@
 # @johnhenry/math-plus-safetensors
 
+## 0.1.2
+
+### Patch Changes
+
+- 71fa3f0: Widen the optional tensor-core peer range to include `^0.2.0`, so tensor-core's 0.2.0 release doesn't force a major bump on its peer dependents.
+
 ## 0.1.1
 
 ### Patch Changes

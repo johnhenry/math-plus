@@ -1,5 +1,13 @@
 # @johnhenry/math-plus-tensor-webgpu
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [f68063d]
+  - @johnhenry/math-plus-tensor-core@0.2.0
+  - @johnhenry/math-plus-tensor-compile@0.1.2
+
 ## 0.1.2
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @johnhenry/math-plus-fft
 
+## 0.0.3
+
+### Patch Changes
+
+- Updated dependencies [f68063d]
+  - @johnhenry/math-plus-tensor-core@0.2.0
+
 ## 0.0.2
 
 ### Patch Changes

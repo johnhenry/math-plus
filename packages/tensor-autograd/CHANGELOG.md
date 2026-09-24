@@ -1,5 +1,12 @@
 # @johnhenry/math-plus-tensor-autograd
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies [f68063d]
+  - @johnhenry/math-plus-tensor-core@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

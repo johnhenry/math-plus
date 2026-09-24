@@ -1,7 +1,7 @@
 {
   "name": "@johnhenry/math-plus-tensor-core",
-  "version": "0.1.2",
-  "description": "Typed n-dimensional arrays for JS/TS: dtypes, strides/views, broadcasting, .npy I/O \u2014 part of Math Plus",
+  "version": "0.2.0",
+  "description": "Typed n-dimensional arrays for JS/TS: dtypes, strides/views, broadcasting, .npy I/O — part of Math Plus",
   "type": "module",
   "exports": {
     ".": {
