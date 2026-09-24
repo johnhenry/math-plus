@@ -1,0 +1,11 @@
+{
+  "name": "@johnhenry/math-plus-tensor-mlx",
+  "version": "0.1.2",
+  "license": "MIT",
+  "exports": "./src/index.ts",
+  "imports": {
+    "@johnhenry/backend-mlx": "npm:@johnhenry/backend-mlx@^0.3.0",
+    "@johnhenry/math-plus-tensor-core": "jsr:@johnhenry/math-plus-tensor-core@^0.2.0",
+    "@johnhenry/tensor-backend": "npm:@johnhenry/tensor-backend@^0.2.0"
+  }
+}
