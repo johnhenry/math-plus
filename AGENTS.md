@@ -80,6 +80,11 @@ following, not just `npm init`:
   `import { test } from "node:test"`; see docs/TESTING.md "Running under
   Bun" for why). `test/manifest-drift.test.ts` enforces both.
 - `engines.node` identical to the root's (currently `>=24.0.0`).
+- `"build": "tsc -p tsconfig.json && node ../../scripts/rewrite-dts-extensions.mjs"`:
+  the post-build step rewrites the `./x.ts` specifiers tsc leaves in
+  `dist/*.d.ts` and adds Deno's `@ts-self-types` to `dist/*.js`
+  ([#157](https://github.com/johnhenry/math-plus/issues/157)). The drift test
+  enforces the script and checks every built `dist/`.
 - Once [#47](https://github.com/johnhenry/math-plus/issues/47) lands: run its manifest-drift check — it verifies the two
   points above for you and fails loudly if either is missed.
 

@@ -183,11 +183,13 @@ npm run test:bun -w @johnhenry/math-plus-tensor-mlx
 npm run test:deno -w @johnhenry/math-plus-tensor-mlx # Deno 2 (node:test via Deno's Node compat)
 ```
 
-`test:deno` runs the same files with `deno test -A --no-check
+`test:deno` runs the same files with `deno test -A
 --node-modules-dir=manual`, so it uses the repo's `node_modules` (and the
-platform package in it). It skips Deno's own type-check because
-tensor-core's published `dist/*.d.ts` import `./x.ts` siblings that only
-`tsc` resolves. `npm test` type-checks these files with `tsc` instead.
+platform package in it). Deno type-checks them too, against the built
+`dist/` of the workspace packages: the build rewrites the `./x.ts`
+specifiers tsc leaves in `.d.ts` files, and points each `dist/*.js` at its
+declarations with `@ts-self-types` (`scripts/rewrite-dts-extensions.mjs`,
+issue #157). Build first.
 
 - **`test/differential.test.ts`** compares every op against a **NumPy
   oracle**, `scripts/numpy_oracle.py`, which is resolved as
