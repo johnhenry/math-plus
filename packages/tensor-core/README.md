@@ -73,6 +73,17 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
 - **Random:** `random.seed`, `random.uniform`, `random.normal`,
   `random.randint`; plus `broadcastShapes`, `allocate`, `BYTES_PER_ELEMENT`,
   `isBigIntDType`.
+- **Kernels subpath (`@johnhenry/math-plus-tensor-core/kernels`):** the
+  flat typed-array kernels under the fast paths below (`gemmNT` +
+  `packPanel`, `softmaxAxis`, `sumAxis`, `extremumAxis`, `argExtremumAxis`,
+  `cumsumAxis`, `sortAxis`, strided/broadcast `binaryStrided` /
+  `compareStrided` / `whereStrided` / `stridedCopy`) plus fused NN kernels
+  (`linearNT`, `layerNormRows`, `ropeHalf`, `attention`, `gegluRows`,
+  `maskedMeanPool`, `takeRows`, `unaryFlat`). Low-level and unvalidated:
+  they exist so device packages that store flat typed arrays — the CPU
+  `Backend` in [`tensor-cpu`](../tensor-cpu) — reuse this package's GEMM
+  and friends instead of carrying a second copy (issue #144). Most code
+  wants the `Tensor` API instead.
 
 ## Traps
 
@@ -143,12 +154,14 @@ so which path ran is never observable except in time. Numbers:
   `cast`; `contiguous`; comparisons (same shape or scalar); `sum`/`mean`/
   `min`/`max` (full or any axis); fused `softmax` and `variance`/`std`
   (f32/f64). `matmul` always packs operands into f64 panels and runs a
-  4×4 register-blocked GEMM (strided operands included).
+  4×4 register-blocked GEMM (strided operands included). `argmin`/`argmax`
+  along an axis and `cumsum` (contiguous, non-BigInt), and `contiguous()`
+  of a strided view (row-at-a-time copy, any non-BigInt dtype) since #144.
 - **Not fast-pathed:** strided views (transposes, stepped/negative slices,
   stride-0 `broadcastTo` views, other broadcast patterns such as
-  `[B,T,C] + [1,T,1]`), `i64`/`u64` (BigInt), `argmin`/`argmax`,
-  cumulative scans, sorting, `where`, logical ops. These are correct, just
-  slower.
+  `[B,T,C] + [1,T,1]`) as op inputs, `i64`/`u64` (BigInt), full-tensor
+  `argmin`/`argmax`, `cumprod`, sorting, `where`, logical ops. These are
+  correct, just slower.
 - Single-threaded, no SIMD. `matmul` allocates up to `(m+n)·k + m·n` f64
   scratch per call. For more, see tensor-wasm above.
 
@@ -166,5 +179,6 @@ skip otherwise.
 
 Built across issues #1 (indexing/slicing), #2 (matmul), #4 (concat/stack/
 where), #5 (random), #64/#65 (op-table parity with the compiled IR), #84
-(unfold), #120 (contiguous fast paths, blocked GEMM). Part of the [math-plus](https://github.com/johnhenry/math-plus)
+(unfold), #120 (contiguous fast paths, blocked GEMM), #144 (`/kernels`
+subpath and fused NN kernels for the CPU `Backend`). Part of the [math-plus](https://github.com/johnhenry/math-plus)
 monorepo; family docs at <https://opensource.johnhenry.me/math/>.

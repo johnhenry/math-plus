@@ -1,0 +1,54 @@
+{
+  "name": "@johnhenry/math-plus-tensor-cpu",
+  "version": "0.0.0",
+  "description": "The CPU reference Backend for @johnhenry/tensor-backend (issue #144, RFC 0001 §12 Q3): pure TypeScript, f32 compute on tensor-core's kernels, every optional op native — part of Math Plus",
+  "keywords": [
+    "tensor",
+    "cpu",
+    "backend",
+    "reference",
+    "transformer",
+    "inference",
+    "math-plus"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "npm run typecheck && node --test test/*.test.ts",
+    "test:bun": "bun test ./test/",
+    "bench": "node bench/vs-laya.ts"
+  },
+  "dependencies": {
+    "@johnhenry/math-plus-tensor-core": "^0.1.2",
+    "@johnhenry/tensor-backend": "^0.2.0"
+  },
+  "devDependencies": {
+    "@johnhenry/backend-cpu": "0.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnhenry/math-plus.git",
+    "directory": "packages/tensor-cpu"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=24.0.0",
+    "bun": ">=1.2.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/johnhenry/math-plus/tree/main/packages/tensor-cpu"
+}
