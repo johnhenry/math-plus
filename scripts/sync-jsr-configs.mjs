@@ -52,6 +52,7 @@ const PACKAGE_DIRS = [
   "packages/tensor-compile",
   "packages/tensor-core",
   "packages/tensor-cpu",
+  "packages/tensor-mlx",
   "packages/tensor-wasm",
   "packages/tensor-webgpu",
   "adapters/adapter-math",
@@ -65,11 +66,9 @@ const PACKAGE_DIRS = [
  * in exactly one of PACKAGE_DIRS / JSR_EXCLUDED_DIRS.
  */
 const JSR_EXCLUDED_DIRS = [
-  // Native (mlx-c over koffi/bun:ffi via @johnhenry/backend-mlx), Node + Bun
-  // on darwin/arm64 only: no Deno.dlopen path exists, so a JSR listing would
-  // advertise a Deno package that cannot load. Revisit if backend-mlx gains
-  // a Deno adapter (RFC 0001, open question 4).
-  "packages/tensor-mlx",
+  // (none) -- packages/tensor-mlx was excluded until @johnhenry/backend-mlx
+  // 0.3.0 gained a Deno.dlopen loader (RFC 0001 §12 Q4, #147); it now runs
+  // its suites under Deno 2 and publishes to JSR like the rest.
 ];
 for (const dir of JSR_EXCLUDED_DIRS) {
   if (PACKAGE_DIRS.includes(dir)) throw new Error(`${dir} is in both PACKAGE_DIRS and JSR_EXCLUDED_DIRS`);
