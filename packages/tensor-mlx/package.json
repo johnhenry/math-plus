@@ -29,6 +29,7 @@
   "dependencies": {
     "@johnhenry/backend-mlx": "^0.1.0",
     "@johnhenry/math-plus-tensor-core": "^0.2.0",
+    "@johnhenry/math-plus-tensor-cpu": "^0.1.0",
     "@johnhenry/tensor-backend": "^0.1.0"
   },
   "repository": {

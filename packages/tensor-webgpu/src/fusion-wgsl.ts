@@ -355,3 +355,52 @@ function irUsesErfHelpers(node: IRNode): boolean {
       return irUsesErfHelpers(node.cond) || irUsesErfHelpers(node.then) || irUsesErfHelpers(node.else);
   }
 }
+
+/** Threads per workgroup of the fused kernel on backend-webgpu's runtime. */
+export const FUSED_WORKGROUP_SIZE = 256;
+
+/**
+ * The same lowering as {@link compileIRToWGSL}, packaged as a kernel for
+ * `@johnhenry/backend-webgpu`'s runtime (issue #146: the fusion runs on the
+ * one WebGPU runtime — its buffer pool, pipeline and bind-group caches and
+ * dispatch batching). The runtime generates the header: inputs `in0..inN-1`
+ * (`array<f32>`, read-only), output `outp`, and a uniform `P` with the
+ * element count `n` and each input's element offset `o<j>` (so backend
+ * tensor views work). The dispatch is 1-D, possibly folded into a 2-D grid
+ * of {@link FUSED_WORKGROUP_SIZE}-thread workgroups (more than 65535·256
+ * elements). Inputs must all have the output's element count — broadcast
+ * first, exactly as with {@link compileIRToWGSL}.
+ */
+export function compileIRToKernel(
+  node: IRNode,
+  numInputs: number,
+): {
+  key: string;
+  bindings: { name: string; elem: string; access: "read" | "read_write" }[];
+  params: [string, "u32"][];
+  body: string;
+  f16: false;
+} {
+  const expr = lower(node, (index) => {
+    if (index < 0 || index >= numInputs) throw new RangeError(`IR references input ${index}, but numInputs is ${numInputs}`);
+    return `in${index}[P.o${index} + i]`;
+  });
+  const body = `${irUsesErfHelpers(node) ? ERF_WGSL_FN : ""}
+@compute @workgroup_size(${FUSED_WORKGROUP_SIZE})
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let i = (wid.x + wid.y * nwg.x) * ${FUSED_WORKGROUP_SIZE}u + lid.x;
+  if (i >= P.n) {
+    return;
+  }
+  outp[i] = ${expr};
+}
+`;
+  const bindings: { name: string; elem: string; access: "read" | "read_write" }[] = Array.from({ length: numInputs }, (_, j) => ({
+    name: `in${j}`,
+    elem: "f32",
+    access: "read" as const,
+  }));
+  bindings.push({ name: "outp", elem: "f32", access: "read_write" });
+  const params: [string, "u32"][] = [["n", "u32"], ...Array.from({ length: numInputs }, (_, j): [string, "u32"] => [`o${j}`, "u32"])];
+  return { key: `math-plus-fused:${numInputs}:${body}`, bindings, params, body, f16: false };
+}

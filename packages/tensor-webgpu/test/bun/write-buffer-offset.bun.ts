@@ -3,9 +3,10 @@
  * #126), run by test/write-buffer.test.ts as `bun test/bun/write-buffer-offset.bun.ts`
  * (the node:test suite itself runs under Node). Prints one JSON line:
  *
- *  - `runtime`: bytes uploaded through this package's paths (`writeBytes`,
- *    `GPUTensor.fromFloat32Array` / `fromFloat16Bits` on views with a
- *    non-zero byteOffset) — must equal the view's own elements.
+ *  - `runtime`: bytes uploaded through this package's paths
+ *    (`GPUTensor.fromFloat32Array` / `fromFloat16Bits`, i.e. backend-webgpu's
+ *    `Runtime.write`, and the facade's `fromHost`, on views with a non-zero
+ *    byteOffset) — must equal the view's own elements.
  *  - `rawView`: what `queue.writeBuffer(buffer, 0, view)` uploads for the
  *    same view. Under Bun 1.2.x + Dawn (`webgpu` 0.6.x) this is the START of
  *    the underlying ArrayBuffer (`[0, 1, 2, 3]`), not the view (`[4, 5, 6, 7]`) —
@@ -13,9 +14,9 @@
  *
  * Exits 2 when Dawn has no adapter (the caller skips), 1 on a mismatch.
  */
+import { backendFor } from "../../src/bridge.ts";
 import { requestDawnGPU } from "../../src/dawn.ts";
 import { GPUTensor } from "../../src/device.ts";
-import { readBackBytes, writeBytes } from "../../src/gpu-runtime.ts";
 
 const gpu = await requestDawnGPU();
 const adapter = await gpu?.requestAdapter();
@@ -31,13 +32,14 @@ const view = backing.subarray(4, 8); // byteOffset 16
 const fresh = (): GPUBuffer =>
   device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
 
+const rt = backendFor(device).rt;
 const raw = fresh();
 device.queue.writeBuffer(raw, 0, view);
-const rawView = Array.from(new Float32Array(await readBackBytes(device, raw, 16)));
+const rawView = Array.from(new Float32Array(await rt.readBytes(raw, 0, 16)));
 
-const viaWriteBytes = fresh();
-writeBytes(device, viaWriteBytes, 0, view);
-const writeBytesOut = Array.from(new Float32Array(await readBackBytes(device, viaWriteBytes, 16)));
+const viaWrite = fresh();
+rt.write(viaWrite, false, view);
+const writeBytesOut = Array.from(new Float32Array(await rt.readBytes(viaWrite, 0, 16)));
 
 const t32 = GPUTensor.fromFloat32Array(device, view, [4]);
 const tensorF32 = Array.from(await t32.toFloat32Array());

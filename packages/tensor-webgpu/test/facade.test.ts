@@ -1,0 +1,182 @@
+/**
+ * `createWebGpuDevice()` (issue #146): the device facade over
+ * @johnhenry/backend-webgpu — explicit async transfers to and from
+ * tensor-core `Tensor`s (every device dtype, views with offsets, refusal of
+ * implicit conversions), backend ops on uploaded tensors cross-checked
+ * against tensor-core on the CPU, the IR -> WGSL fusion on the backend's
+ * runtime (`fuse`/`compile`) cross-checked against tensor-compile's CPU
+ * `forward`, scope tracking of fused results, interop with the deprecated
+ * `GPUTensor` API, and `destroy`. In-process on Dawn (Node and Bun); skips,
+ * never fails, without a WebGPU adapter.
+ */
+import assert from "node:assert/strict";
+import { compile, Traced } from "@johnhenry/math-plus-tensor-compile";
+import { Tensor } from "@johnhenry/math-plus-tensor-core";
+import { backendFor, createWebGpuDevice, detectWebGPU, GPUTensor, runGemm, webGpuUnavailableReason, type WebGpuDevice } from "../src/index.ts";
+import { requestDawnGPU } from "../src/dawn.ts";
+import { makeTest } from "../../../test/harness.ts";
+// @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
+const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
+
+const skip = await webGpuUnavailableReason();
+let shared: WebGpuDevice | undefined;
+const device = async (): Promise<WebGpuDevice> => (shared ??= await createWebGpuDevice());
+after(() => shared?.destroy());
+
+function lcg(n: number, seed: number): Float32Array {
+  let s = seed >>> 0;
+  return Float32Array.from({ length: n }, () => ((s = (s * 1664525 + 1013904223) >>> 0) / 0xffffffff) * 2 - 1);
+}
+
+function assertClose(got: ArrayLike<number>, want: ArrayLike<number>, tol: number, label: string): void {
+  assert.equal(got.length, want.length, `${label}: length`);
+  for (let i = 0; i < want.length; i++) {
+    const d = Math.abs(got[i]! - want[i]!);
+    if (!(d <= tol * Math.max(1, Math.abs(want[i]!)))) assert.fail(`${label}[${i}]: got ${got[i]}, want ${want[i]}`);
+  }
+}
+
+test("createWebGpuDevice: a real device with no global default; info and dtype support are reported", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  assert.equal(gpu.name, "webgpu");
+  assert.equal(gpu.backend.name, "webgpu");
+  assert.ok(gpu.device, "the GPUDevice is exposed for sharing");
+  assert.ok(gpu.info.source.length > 0);
+  for (const d of ["f32", "bf16", "i32", "bool"] as const) assert.equal(gpu.supports(d), true, d);
+  assert.equal(gpu.supports("f16"), gpu.device.features.has("shader-f16"));
+  const other = await createWebGpuDevice();
+  assert.notEqual(other.device, gpu.device, "each call creates its own device");
+  other.destroy();
+});
+
+test("fromTensor/toTensor round-trip every device dtype exactly, including a view with an offset", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  const cases: Tensor[] = [
+    Tensor.from([1.5, -2, 3.25, 0, 1e-3, -7], { dtype: "f32" }).reshape([2, 3]),
+    Tensor.from([1, -2, 3, 2 ** 30, -(2 ** 31)], { dtype: "i32" }),
+    Tensor.from([1, 0, 1, 1], { dtype: "bool" }),
+    Tensor.from([0.5, -1.25, 3], { dtype: "bf16" }),
+    Tensor.from(Array.from(lcg(12, 3)), { dtype: "f32" }).reshape([4, 3]).slice({ start: 1, end: 3 }), // rows 1..2: offset 3, contiguous
+  ];
+  if (gpu.supports("f16")) cases.push(Tensor.from([0.5, -1.25, 65504, 6e-5], { dtype: "f16" }));
+  for (const t of cases) {
+    const x = await gpu.fromTensor(t);
+    assert.deepEqual([...x.shape], [...t.shape]);
+    assert.equal(x.dtype, t.dtype);
+    const back = await gpu.toTensor(x);
+    assert.equal(back.dtype, t.dtype);
+    assert.deepEqual(back.toArray(), t.toArray(), `${t.dtype} [${t.shape}]`);
+    gpu.dispose(x);
+  }
+});
+
+test("fromTensor refuses implicit conversions: non-contiguous views and non-device dtypes (labelled tensor-webgpu)", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  await assert.rejects(gpu.fromTensor(Tensor.zeros([3, 4], { dtype: "f32" }).transpose()), /tensor-webgpu: .*contiguous\(\) first/);
+  await assert.rejects(gpu.fromTensor(Tensor.zeros([2], { dtype: "f64" })), /tensor-webgpu: dtype f64 .*cast\("f32"\)/);
+  await assert.rejects(gpu.fromTensor(Tensor.zeros([2], { dtype: "i64" })), /cast\("i32"\)/);
+});
+
+test("backend ops on uploaded tensors match tensor-core on the CPU (matmul, linear with bias, softmax, layerNorm)", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  const b = gpu.backend;
+  const A = Tensor.fromTypedArray(lcg(96 * 64, 1), [96, 64], { dtype: "f32" });
+  const B = Tensor.fromTypedArray(lcg(64 * 72, 2), [64, 72], { dtype: "f32" });
+  const W = Tensor.fromTypedArray(lcg(40 * 64, 3), [40, 64], { dtype: "f32" });
+  const bias = Tensor.fromTypedArray(lcg(40, 4), [40], { dtype: "f32" });
+  const [a, bb, w, bi] = await Promise.all([A, B, W, bias].map((t) => gpu.fromTensor(t)));
+  const outs = gpu.scope(() => ({ ab: b.matmul(a!, bb!), lin: b.linear(a!, w!, bi!), sm: b.softmax(a!, -1), ln: b.layerNorm(a!, null, null, 1e-5) }));
+  const ab = await gpu.toTensor(outs.ab);
+  assertClose(ab.data as Float32Array, A.matmul(B).data as Float32Array, 1e-4, "matmul");
+  const lin = await gpu.toTensor(outs.lin);
+  const linRef = A.matmul(W.transpose()).add(bias);
+  assertClose(lin.data as Float32Array, linRef.contiguous().data as Float32Array, 1e-4, "linear");
+  const sm = await gpu.toTensor(outs.sm);
+  assertClose(sm.data as Float32Array, A.softmax(-1).contiguous().data as Float32Array, 1e-5, "softmax");
+  const ln = await gpu.toTensor(outs.ln);
+  const lnRef = new Float32Array(96 * 64);
+  const ad = A.data as Float32Array;
+  for (let r = 0; r < 96; r++) {
+    const row = ad.subarray(r * 64, r * 64 + 64);
+    const mu = row.reduce((p, v) => p + v, 0) / 64;
+    const varc = row.reduce((p, v) => p + (v - mu) ** 2, 0) / 64;
+    for (let c = 0; c < 64; c++) lnRef[r * 64 + c] = (row[c]! - mu) / Math.sqrt(varc + 1e-5);
+  }
+  assertClose(ln.data as Float32Array, lnRef, 1e-4, "layerNorm");
+  for (const t of [a, bb, w, bi, outs.ab, outs.lin, outs.sm, outs.ln]) gpu.dispose(t!);
+});
+
+test("fuse/compile: a traced expression runs as ONE dispatch on the backend runtime and matches tensor-compile's CPU forward", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  const fn = (x: Traced, y: Traced, z: Traced): Traced => x.mul(y).add(z.exp()).gelu().select(x.gt(0), y.neg());
+  const n = 3000; // > one 256-thread workgroup, not a multiple of it
+  const X = Tensor.fromTypedArray(lcg(n, 1), [30, 100], { dtype: "f32" });
+  const Y = Tensor.fromTypedArray(lcg(n, 2), [30, 100], { dtype: "f32" });
+  const Z = Tensor.fromTypedArray(lcg(n, 3), [30, 100], { dtype: "f32" });
+  const want = compile(3, fn).forward(X, Y, Z);
+  const [x, y, z] = await Promise.all([X, Y, Z].map((t) => gpu.fromTensor(t)));
+  const before = gpu.backend.rt.stats.dispatches;
+  const f = gpu.compile(3, fn);
+  const out = f(x!, y!, z!);
+  assert.equal(gpu.backend.rt.stats.dispatches - before, 1, "one fused dispatch");
+  assert.deepEqual([...out.shape], [30, 100]);
+  const got = await gpu.toTensor(out);
+  assertClose(got.data as Float32Array, want.contiguous().data as Float32Array, 1e-5, "fused");
+  // Same expression via fuse() with a Traced and with a raw IRNode.
+  const traced = fn(Traced.input(0), Traced.input(1), Traced.input(2));
+  const viaNode = await gpu.toTensor(gpu.fuse(traced.node, [x!, y!, z!]));
+  const viaTraced = await gpu.toTensor(gpu.fuse(traced, [x!, y!, z!]));
+  assert.deepEqual(viaNode.toArray(), got.toArray());
+  assert.deepEqual(viaTraced.toArray(), got.toArray());
+});
+
+test("fuse: works on backend views at an element offset; results are tracked by scope; bad inputs are refused", { skip: skip ?? false }, async () => {
+  const gpu = await device();
+  const b = gpu.backend;
+  const X = Tensor.fromTypedArray(lcg(4 * 50, 9), [4, 50], { dtype: "f32" });
+  const x = await gpu.fromTensor(X);
+  const row2 = b.slice(x, [2, 0], [3, 50]); // contiguous view, offset 100
+  const twice = new Traced({ kind: "input", index: 0 }).mul(2);
+  let inner: ReturnType<typeof gpu.fuse> | undefined;
+  const kept = gpu.scope(() => {
+    inner = gpu.fuse(twice, [row2]);
+    return gpu.fuse(twice, [inner]);
+  });
+  assert.equal(inner!.disposed, true, "an intermediate fused result is freed by the scope");
+  assert.equal(kept.disposed, false);
+  const got = (await gpu.toTensor(kept)).data as Float32Array;
+  assertClose(got, (X.data as Float32Array).slice(100, 150).map((v) => 4 * v), 0, "offset view");
+  assert.throws(() => gpu.fuse(twice, [x, row2]), /share one shape/);
+  const i32 = await gpu.fromTensor(Tensor.from([1, 2], { dtype: "i32" }));
+  assert.throws(() => gpu.fuse(twice, [i32]), /f32 inputs only/);
+  assert.throws(() => gpu.fuse(twice, []), /at least one input/);
+  for (const t of [x, row2, kept, i32]) gpu.dispose(t);
+});
+
+test("createWebGpuDevice({ device }) shares the device's backend with the deprecated GPUTensor API (migration path)", { skip: skip ?? false }, async () => {
+  const cap = await detectWebGPU({ gpu: (await requestDawnGPU({ unsafe: true }))! });
+  assert.ok(cap.available, cap.reason);
+  const dev = cap.device!;
+  const gpu = await createWebGpuDevice({ device: dev });
+  assert.equal(gpu.backend, backendFor(dev), "one backend per device");
+  assert.equal(gpu.backend.hasSubgroupMatrix, cap.gemm!.subgroupMatrix, "subgroup matrices follow detectWebGPU's adapter check");
+  const A = GPUTensor.fromFloat32Array(dev, lcg(8 * 16, 5), [8, 16]);
+  const B = GPUTensor.fromFloat32Array(dev, lcg(16 * 4, 6), [16, 4]);
+  const legacy = await runGemm(dev, A, B);
+  const modern = gpu.backend.matmul(A.handle, B.handle); // GPUTensor.handle feeds backend ops directly
+  assert.deepEqual([...(await gpu.toHost(modern)).data], [...(await legacy.toFloat32Array())]);
+  gpu.dispose(modern);
+  for (const t of [A, B, legacy]) t.free();
+  gpu.destroy();
+  assert.equal(backendFor(dev), gpu.backend, "a device passed in keeps its backend after destroy()");
+  dev.destroy();
+});
+
+test("destroy() of a device createWebGpuDevice requested releases it and unregisters its backend", { skip: skip ?? false }, async () => {
+  const gpu = await createWebGpuDevice();
+  const dev = gpu.device;
+  const backend = gpu.backend;
+  assert.equal(backendFor(dev), backend);
+  gpu.destroy();
+  assert.notEqual(backendFor(dev), backend, "the destroyed backend is no longer handed out");
+});

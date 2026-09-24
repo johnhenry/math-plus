@@ -216,8 +216,8 @@ result. Individual tests call `getHarness()` and `t.skip(reason)` when unavailab
 
 **Two harness backends** (`test/helpers.ts`, selected by `$MATH_PLUS_WEBGPU_HARNESS`):
 
-- `dawn` — in-process Dawn via the `webgpu` npm package (a devDependency of this package; also
-  its optional peer for Node users, loaded through `src/dawn.ts`). Test bodies run as an
+- `dawn` — in-process Dawn via the `webgpu` npm package (a dependency of
+  `@johnhenry/backend-webgpu`, loaded through its `getGpu`, which `src/dawn.ts` delegates to). Test bodies run as an
   `AsyncFunction` with `navigator = { gpu: <Dawn> }`, so the same bodies run unmodified. No
   browser or display server — this is the path that works on macOS (Metal) and any machine with a
   Dawn-supported GPU. Created with `allow_unsafe_apis` so the experimental subgroup-matrix GEMM

@@ -8,12 +8,51 @@ f16 storage with f32 accumulation. **Result: on an Apple M2, WebGPU wins end to 
 square size from n = 128 (n = 96 under Dawn), and `GEMM_ELEMENT_THRESHOLD` is now
 `128 * 128`.** That number is from one machine; see [Caveats](#caveats).
 
+> **Since #146** GEMM runs on `@johnhenry/backend-webgpu`; the threshold was re-checked there
+> and left unchanged — see [Re-measured on backend-webgpu](#re-measured-on-backend-webgpu-issue-146-2026-09-24).
+>
 > **Current threshold (2026-09-24):** `chooseGemmBackend(m, n, k)` picks WebGPU when
 > `m·n >= 192²` **and** `m·n·k >= 2²²`, re-measured against tensor-wasm's SIMD128 GEMM (#130)
 > with the thermal-aware method — see
 > [Re-measured against the SIMD WASM GEMM](#re-measured-against-the-simd-wasm-gemm-2026-09-24).
 > The 2026-09-23 sections below it are kept as the record of the `128 * 128` threshold they
 > produced against the old scalar WASM kernel.
+
+## Re-measured on backend-webgpu (issue #146, 2026-09-24)
+
+Since #146 the package's GEMM entry points run on `@johnhenry/backend-webgpu`'s kernels and
+runtime (the kernels this package had ported from it were removed). A·B takes backend-webgpu's
+`linear` path through one transpose of B when subgroup matrices apply (`copy+gemmsg` below),
+because its `matmul` only has the portable tiled kernel. Re-measured with
+`scripts/measure-gemm-threshold.ts` under Dawn (Apple M2, Node 24.9, thermal-aware method,
+5 s cooldowns). The machine was shared: load average ≈ 8, so small-cell medians are noisy.
+
+| m x k x n | m·n·k | backend kernels | WASM e2e (ms) | WebGPU e2e (ms) | WASM/WebGPU | rule says |
+|---|---:|---|---:|---:|---:|---|
+| 96³ | 0.9 M | copy+gemmsg | 0.501 | 0.544 | 0.92x | wasm |
+| 128³ | 2.1 M | copy+gemmsg+splitk | 0.563 | 0.630 | 0.89x | wasm |
+| 160³ | 4.1 M | copy+gemmsg | 0.381 | 0.620 | 0.61x | wasm |
+| 192³ | 7.1 M | copy+gemmsg | 0.984 | 0.607 | 1.62x | webgpu |
+| 256³ | 16.8 M | copy+gemmsg | 1.716 | 0.745 | 2.30x | webgpu |
+| 384³ | 56.6 M | copy+gemmsg | 3.686 | 0.835 | 4.41x | webgpu |
+| 128x16x128 | 0.26 M | copy+gemmsg+splitk | 0.249 | 0.598 | 0.42x | wasm |
+| 128x256x128 | 4.2 M | copy+gemmsg+splitk | 0.793 | 0.610 | 1.30x | wasm |
+| 128x4096x128 | 67 M | copy+gemmsg+splitk | 3.708 | 1.271 | 2.92x | wasm |
+| 192x16x192 | 0.59 M | copy+gemmsg+splitk | 0.424 | 0.366 | 1.16x | wasm |
+| 192x64x192 | 2.4 M | copy+gemmsg+splitk | 0.442 | 0.419 | 1.05x | wasm |
+| 192x256x192 | 9.4 M | copy+gemmsg+splitk | 1.234 | 0.476 | 2.59x | webgpu |
+| 1x1024x3072ᵀ | 3.1 M | gemmskinny | 1.378 | 2.251 | 0.61x | wasm |
+| 16x1024x3072ᵀ | 50 M | gemmskinny | 3.587 | 2.510 | 1.43x | webgpu |
+| 64x1024x3072ᵀ | 201 M | gemmskinny | 12.226 | 3.622 | 3.38x | webgpu |
+
+**Consequence: threshold unchanged.** Every shape the rule sends to WebGPU is faster there. Some
+shapes it keeps on WASM are now WebGPU wins under Dawn: large k on small outputs (128x4096x128 at
+2.9x, and 128x256x128), plus near-ties at 192² with small k. Those are Dawn-only numbers. The
+rule follows the headless-Chrome crossover, which was not re-measured, so it is not loosened.
+Resident GEMM (operands already on the GPU) at 1024³ f32 went from 4.5 → 2.4-2.6 ms (A·B) and
+4.5 → 2.3 ms (A·Bᵀ) median per call including readback, in the same process with the old and new
+packages interleaved. The GPU kernel time is the same, ≈3.4-3.5 ms in timestamp-profiling
+mode, which runs one pass per dispatch. The A·B path adds a ≈0.37 ms transpose.
 
 ## Re-measured against the SIMD WASM GEMM (2026-09-24)
 

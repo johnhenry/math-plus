@@ -1,11 +1,11 @@
 /**
  * The `queue.writeBuffer` byteOffset bug (issue #126): Bun's Dawn binding
  * ignores a TypedArray view's own `byteOffset` and uploads bytes from the
- * start of the underlying ArrayBuffer. This package routes every upload
- * through gpu-runtime.ts's `writeBytes`, which always passes
+ * start of the underlying ArrayBuffer. Since issue #146 every upload goes
+ * through @johnhenry/backend-webgpu's `Runtime.write`, which always passes
  * `(arrayBuffer, byteOffset, byteLength)`.
  *
- *  1. Static audit: `writeBytes` holds the only `queue.writeBuffer` call in src/.
+ *  1. Static audit: src/ has no `queue.writeBuffer` call of its own.
  *  2. Non-zero-offset views upload correctly on the harness's adapter
  *     (Dawn under Node, or Chrome).
  *  3. The same under Bun, where the bug actually lives: the node:test suite
@@ -24,7 +24,7 @@ import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
 
 after(closeHarness);
 
-test("every queue.writeBuffer call in src/ is the one inside writeBytes (always (arrayBuffer, byteOffset, byteLength))", () => {
+test("src/ makes no queue.writeBuffer call of its own (uploads go through backend-webgpu's Runtime.write)", () => {
   const hits: string[] = [];
   for (const f of readdirSync(SRC).filter((n) => n.endsWith(".ts"))) {
     readFileSync(path.join(SRC, f), "utf8")
@@ -33,14 +33,13 @@ test("every queue.writeBuffer call in src/ is the one inside writeBytes (always 
         if (/\.writeBuffer\(/.test(line) && !/^\s*(\*|\/\/)/.test(line)) hits.push(`${f}:${i + 1}: ${line.trim()}`);
       });
   }
-  assert.equal(hits.length, 1, hits.join("\n"));
-  assert.match(hits[0] as string, /^gpu-runtime\.ts:.*writeBuffer\(buffer, bufferOffset, data\.buffer as ArrayBuffer, data\.byteOffset, data\.byteLength\)/);
+  assert.deepEqual(hits, []);
 });
 
-test("uploads of views with a non-zero byteOffset (f32 subarray, f16 subarray at a 2-byte offset, odd-length f16, writeBytes at a buffer offset) round-trip exactly", async (t) => {
+test("uploads of views with a non-zero byteOffset (f32 subarray, f16 subarray at a 2-byte offset, odd-length f16, a tensor-core view through the facade) round-trip exactly", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) return t.skip(`headless WebGPU not available: ${harness.reason}`);
-  const r = await harness.run<{ f32: number[]; f16: number[]; f16odd: number[]; wb: number[] }>(
+  const r = await harness.run<{ f32: number[]; f16: number[]; f16odd: number[]; facade: number[] }>(
     `
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter.requestDevice();
@@ -49,19 +48,19 @@ test("uploads of views with a non-zero byteOffset (f32 subarray, f16 subarray at
     const bits = new Uint16Array(12).map((_, i) => 0x3c00 + i);
     const b = GPUTensor.fromFloat16Bits(device, bits.subarray(3, 7), [4]);
     const c = GPUTensor.fromFloat16Bits(device, bits.subarray(5, 8), [3]);
-    const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    writeBytes(device, buf, 16, backing.subarray(8, 12));
-    const wb = Array.from(new Float32Array(await readBackBytes(device, buf, 32)));
-    const out = { f32: Array.from(await a.toFloat32Array()), f16: Array.from(await b.toUint16Array()), f16odd: Array.from(await c.toUint16Array()), wb };
-    a.free(); b.free(); c.free(); buf.destroy();
+    const gpu = await createWebGpuDevice({ device });
+    const d = await gpu.fromHost({ dtype: "f32", shape: [4], data: backing.subarray(8, 12) });
+    const facade = Array.from((await gpu.toHost(d)).data);
+    const out = { f32: Array.from(await a.toFloat32Array()), f16: Array.from(await b.toUint16Array()), f16odd: Array.from(await c.toUint16Array()), facade };
+    a.free(); b.free(); c.free(); gpu.dispose(d);
     return out;
     `,
-    bundleForBrowser([path.join(SRC, "device.ts")]),
+    bundleForBrowser([path.join(SRC, "index.ts")]),
   );
   assert.deepEqual(r.f32, [4, 5, 6, 7]);
   assert.deepEqual(r.f16, [0x3c03, 0x3c04, 0x3c05, 0x3c06]);
   assert.deepEqual(r.f16odd, [0x3c05, 0x3c06, 0x3c07]);
-  assert.deepEqual(r.wb.slice(4), [8, 9, 10, 11]);
+  assert.deepEqual(r.facade, [8, 9, 10, 11]);
 });
 
 function findBun(): string | undefined {

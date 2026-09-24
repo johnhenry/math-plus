@@ -1,7 +1,10 @@
 /**
- * GEMM correctness: every kernel (tiled, skinny, subgroup-matrix) x dtype
- * (f32, f16) x B layout (`[K,N]`, `transB`) x alignment case, on a real
- * adapter (test/helpers.ts: Dawn in-process, or headless Chrome), checked
+ * GEMM correctness: every kernel family (tiled, skinny, subgroup-matrix,
+ * and backend-webgpu's automatic choice) x dtype (f32, f16) x B layout
+ * (`[K,N]`, `transB`) x alignment case, through the deprecated
+ * `runGemm*` shims, which run on @johnhenry/backend-webgpu's GEMM since
+ * issue #146 — on a real adapter (test/helpers.ts: Dawn in-process, or
+ * headless Chrome), checked
  * against a NumPy float64 oracle (scripts/gemm_oracle.py) — the repo's
  * differential-oracle convention (docs/TESTING.md), skip-don't-fail when
  * either the adapter or NumPy is unavailable.
@@ -19,9 +22,8 @@ import path from "node:path";
 import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test, after } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
-import { gemmKernelApplicable, planGemm, selectGemmKernel } from "../src/gemm.ts";
+import { gemmKernelApplicable } from "../src/gemm.ts";
 import { subgroupMatrixUsable } from "../src/gemm-caps.ts";
-import { skinnyGemmWGSL, subgroupMatrixGemmWGSL, tiledGemmWGSL } from "../src/gemm-kernels.ts";
 import { bundleForBrowser, closeHarness, getHarness, SRC } from "./helpers.ts";
 
 after(closeHarness);
@@ -126,58 +128,23 @@ function assertWithinBound(got: Float32Array, ref: OracleResult, dtype: DType, l
 }
 
 // ---- pure logic (no GPU) --------------------------------------------------------
+//
+// The kernel generators, planGemm and selectGemmKernel were removed with the
+// duplicated kernels (issue #146); backend-webgpu's own kernel tests cover
+// its WGSL, and the oracle test below covers every family end to end.
 
 const NO_SG = { f16: true, subgroupMatrix: false };
 const SG = { f16: true, subgroupMatrix: true };
 
-test("selectGemmKernel: skinny for small-M transB with K%4==0; subgroup-matrix above M=64 when usable; tiled otherwise", () => {
-  assert.equal(selectGemmKernel(1, 1024, 3072, true, SG), "skinny");
-  assert.equal(selectGemmKernel(64, 1024, 3072, true, SG), "skinny");
-  assert.equal(selectGemmKernel(65, 1024, 3072, true, SG), "subgroup-matrix");
-  assert.equal(selectGemmKernel(65, 1024, 3072, true, NO_SG), "tiled");
-  assert.equal(selectGemmKernel(33, 70, 45, true, SG), "tiled", "K%4 != 0 -> no vec4 kernels");
-  assert.equal(selectGemmKernel(16, 64, 64, false, SG), "tiled", "skinny is transB-only");
-  assert.equal(selectGemmKernel(128, 64, 64, false, SG), "subgroup-matrix");
-  assert.equal(selectGemmKernel(128, 64, 66, false, SG), "tiled", "[K,N] B with N%4 != 0 -> no vec4 B tiles");
-  assert.equal(selectGemmKernel(128, 64, 66, true, SG), "subgroup-matrix", "transB only needs K%4==0");
-});
-
-test("gemmKernelApplicable: forced kernels are refused outside their preconditions", () => {
+test("gemmKernelApplicable: forced kernel families are refused outside their preconditions", () => {
   assert.equal(gemmKernelApplicable("tiled", 5, 3, 7, false, NO_SG), true);
-  assert.equal(gemmKernelApplicable("skinny", 65, 64, 64, true, SG), false);
-  assert.equal(gemmKernelApplicable("skinny", 8, 64, 64, false, SG), false);
+  assert.equal(gemmKernelApplicable("skinny", 64, 64, 64, true, SG), true);
+  assert.equal(gemmKernelApplicable("skinny", 65, 64, 64, true, SG), false, "backend-webgpu's skinny configs stop at M = 64");
+  assert.equal(gemmKernelApplicable("skinny", 8, 64, 64, false, SG), false, "skinny is transB-only");
+  assert.equal(gemmKernelApplicable("skinny", 8, 66, 64, true, SG), false, "K % 4 != 0");
   assert.equal(gemmKernelApplicable("subgroup-matrix", 128, 64, 64, false, NO_SG), false);
-});
-
-test("planGemm: shader source depends on the variant, not the exact shape (m/n/k are uniforms)", () => {
-  const a = planGemm("tiled", "f32", 17, 33, 9, false);
-  const b = planGemm("tiled", "f32", 300, 7, 45, false);
-  assert.equal(a.code, b.code, "same alignment class -> same shader");
-  assert.notEqual(a.code, planGemm("tiled", "f32", 17, 32, 9, false).code, "K%4==0 switches A to vec4 loads");
-  assert.notEqual(a.code, planGemm("tiled", "f16", 17, 33, 9, false).code);
-  assert.deepEqual(a.groups, [1, 1]);
-  assert.deepEqual(b.groups, [1, 5]);
-  assert.deepEqual(planGemm("skinny", "f32", 33, 1024, 3072, true).groups, [48, 1]);
-  assert.deepEqual(planGemm("subgroup-matrix", "f32", 93, 256, 200, true).groups, [4, 3]);
-});
-
-test("WGSL generators: f16 enables f16 and still accumulates in f32; subgroup-matrix enables the experimental extension", () => {
-  const cfg = { BM: 64, BN: 64, BK: 16, TM: 4, TN: 4 };
-  const t16 = tiledGemmWGSL("f16", false, true, true, cfg);
-  assert.match(t16, /^enable f16;/);
-  assert.match(t16, /var c0_0 = vec4<f32>\(0\.0\)/, "accumulators are f32");
-  assert.match(t16, /= f16\(v\.x\)/, "rounded to f16 only on store");
-  assert.doesNotMatch(tiledGemmWGSL("f32", false, true, true, cfg), /enable f16/);
-  assert.match(skinnyGemmWGSL("f16", { WX: 16, TN: 4, WY: 4, KS: 4 }, 3), /var c0_0 = 0\.0;/);
-  const sg = subgroupMatrixGemmWGSL("f32", true, { BM: 32, BN: 64, BK: 8, WM: 1, WN: 2 });
-  assert.match(sg, /enable chromium_experimental_subgroup_matrix;/);
-  assert.match(sg, /subgroup_matrix_result<f32, 8, 8>/);
-  assert.match(sg, /subgroupMatrixLoad<subgroup_matrix_right<f32, 8, 8>, col_major>/, "transB right fragments are column-major");
-  assert.match(
-    subgroupMatrixGemmWGSL("f32", false, { BM: 32, BN: 64, BK: 8, WM: 1, WN: 2 }, "bool"),
-    /subgroupMatrixLoad<subgroup_matrix_right<f32, 8, 8>>\(&Sh, [^;]*, false, 68u\)/,
-    "[K,N] right fragments are row-major (older bool-argument syntax)",
-  );
+  assert.equal(gemmKernelApplicable("subgroup-matrix", 128, 64, 66, false, SG), true, "[K,N] B is transposed first, so N % 4 no longer matters");
+  assert.equal(gemmKernelApplicable("subgroup-matrix", 128, 66, 64, true, SG), false, "K % 4 != 0");
 });
 
 test("subgroupMatrixUsable: needs the feature, an f32 8x8x8 config, and a fixed subgroup size of 32", () => {
@@ -260,7 +227,7 @@ for (const dtype of ["f32", "f16"] as const) {
           const out = ${JSON.stringify(dtype)} === "f32"
             ? await runGemmWGSL(device, new Float32Array(dec(c.a)), new Float32Array(dec(c.b)), c.m, c.k, c.n, opts)
             : await runGemmF16WGSL(device, new Uint16Array(dec(c.a)), new Uint16Array(dec(c.b)), c.m, c.k, c.n, opts);
-          const resolved = kernel === "auto" ? selectGemmKernel(c.m, c.k, c.n, c.transB, gemmCapabilities(device)) : kernel;
+          const resolved = kernel;
           results.push({ caseIndex: i, kernel, resolved, out: enc(out) });
         }
       }
@@ -281,7 +248,7 @@ for (const dtype of ["f32", "f16"] as const) {
       assertWithinBound(toF32(fromB64(r.out), dtype), oracle[r.caseIndex] as OracleResult, dtype, label);
     }
     t.diagnostic(`harness=${harness.kind}; ${results.length} kernel runs; kernels exercised: ${[...kernelsSeen].sort().join(", ")}`);
-    assert.ok(kernelsSeen.has("tiled") && kernelsSeen.has("skinny"), "both portable kernels must be exercised");
+    assert.ok(kernelsSeen.has("auto") && kernelsSeen.has("tiled") && kernelsSeen.has("skinny"), "the automatic choice and both portable families must be exercised");
     if (caps.subgroupMatrix) assert.ok(kernelsSeen.has("subgroup-matrix"), "the subgroup-matrix kernel must be exercised when the device supports it");
   });
 }

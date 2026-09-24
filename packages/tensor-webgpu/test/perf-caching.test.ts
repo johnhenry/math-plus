@@ -1,7 +1,9 @@
 /**
  * Regression tests for issue #100's WebGPU perf fixes (findings 2-4):
  * shader/pipeline caching, buffer pooling, and GPU-resident attention
- * chaining. These don't re-check numeric correctness (gemm.test.ts and
+ * chaining — still holding since issue #146 moved every op onto
+ * @johnhenry/backend-webgpu's runtime (whose pool also recycles the
+ * MAP_READ staging buffers). These don't re-check numeric correctness (gemm.test.ts and
  * attention.test.ts already cross-check every kernel against a CPU
  * reference for the NEW GPUTensor-based signatures) — they check that the
  * PERFORMANCE behavior the issue asked for is actually happening, by
@@ -59,16 +61,14 @@ test("runGemmWGSL: a second call with a different shape in the same kernel varia
     const b1 = new Float32Array(${JSON.stringify(Array.from(b1))});
     await runGemmWGSL(device, a1, b1, 4, 3, 5);
 
-    // A DIFFERENT shape in the same variant (tiled kernel, K and N both not
-    // multiples of 4 -> scalar loads) -- m/n/k travel via a uniform buffer,
-    // not baked into the WGSL text, so the pipeline cache should still hit.
-    // (Shaders ARE specialized by kernel/dtype/alignment -- planGemm's unit
-    // test in gemm.test.ts pins which shape changes switch variants.)
+    // A DIFFERENT shape in the same variant (backend-webgpu's tiled kernel,
+    // K and N both not multiples of 4 -> scalar loads) -- m/n/k travel via
+    // uniforms, not baked into the WGSL text, so the pipeline cache hits.
     const a2 = new Float32Array(${JSON.stringify(Array.from(a2))});
     const b2 = new Float32Array(${JSON.stringify(Array.from(b2))});
     await runGemmWGSL(device, a2, b2, 6, 7, 9);
 
-    return { shaderModuleCalls, pipelineCalls, cacheSizeAfter: pipelineCacheSize(device) };
+    return { shaderModuleCalls, pipelineCalls, cacheSizeAfter: backendFor(device).rt.stats.pipelines };
     `,
     bundle,
   );
@@ -77,7 +77,7 @@ test("runGemmWGSL: a second call with a different shape in the same kernel varia
   assert.equal(result.cacheSizeAfter, 1, "pipeline cache should hold exactly one entry for the one tiled variant both shapes use");
 });
 
-test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers instead of allocating new ones", async (t) => {
+test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers (staging included) instead of allocating new ones", async (t) => {
   const harness = await getHarness();
   if ("unavailable" in harness) {
     t.skip(`headless WebGPU not available: ${harness.reason}`);
@@ -102,10 +102,10 @@ test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers inste
     await runGemmWGSL(device, a1, b1, 4, 3, 5);
     const createBufferCallsAfterFirst = createBufferCalls;
 
-    // SAME shape as the first call -- every buffer runGemmWGSL needs
-    // (A, B, out, dims uniform) was released back to the pool at the end of
-    // the first call, so this second call of the identical shape should
-    // pull all four out of the pool rather than calling createBuffer again.
+    // SAME shape as the first call -- every buffer runGemmWGSL needs (A, B,
+    // out, the uniform arena, the MAP_READ staging buffer) went back to
+    // backend-webgpu's pools at the end of the first call, so this second
+    // call should not call createBuffer at all.
     const a2 = new Float32Array(${JSON.stringify(Array.from(a2))});
     const b2 = new Float32Array(${JSON.stringify(Array.from(b2))});
     await runGemmWGSL(device, a2, b2, 4, 3, 5);
@@ -116,16 +116,12 @@ test("runGemmWGSL: a second call with the SAME shape reuses pooled buffers inste
     bundle,
   );
   assert.ok(result.createBufferCallsAfterFirst > 0, "the first call should allocate real buffers");
-  // Each call also creates exactly one MAP_READ staging buffer for its final
-  // readback (readBackFloat32, gpu-runtime.ts) -- deliberately NOT pooled
-  // (see that function's doc comment), so a same-shape second call should
-  // allocate exactly ONE new buffer (the staging buffer), not the four
-  // storage/uniform buffers runGemmWGSL itself needs -- those come out of
-  // the pool this time.
+  // Before #146 the MAP_READ staging buffer was deliberately unpooled (one
+  // new buffer per call); backend-webgpu pools staging buffers by size class.
   assert.equal(
     result.createBufferCallsAfterSecond - result.createBufferCallsAfterFirst,
-    1,
-    "a same-shape second call should allocate exactly one new buffer (the unpooled MAP_READ staging buffer) -- A/B/out/dims should all be reused from the pool",
+    0,
+    "a same-shape second call should allocate nothing -- A/B/out/uniforms/staging all come from the pools",
   );
 });
 

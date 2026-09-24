@@ -1,7 +1,8 @@
 /**
- * Per-device record of which optional GPU features the GEMM kernel selector
- * (gemm.ts) may use. Lives in its own module so device.ts (which fills it in
- * from `detectWebGPU`) and gemm.ts (which reads it) don't import each other.
+ * Per-device record of which optional GPU features GEMM may use on a device
+ * you requested yourself (`detectWebGPU()`): bridge.ts reads it when it
+ * creates that device's backend-webgpu `WebGpuBackend`, whose kernel
+ * selector then uses subgroup matrices only if this says they are usable.
  *
  * Why a registry at all instead of just reading `device.features`: the
  * subgroup-matrix kernel needs more than the feature flag — it needs an
@@ -74,9 +75,4 @@ export function gemmCapabilities(device: GPUDevice): GemmCapabilities {
   const hit = registered.get(device);
   if (hit) return hit;
   return { f16: (device.features as unknown as ReadonlySet<string>).has("shader-f16"), subgroupMatrix: false };
-}
-
-/** Turn the subgroup-matrix kernel off for `device` (used by gemm.ts when an experimental shader fails validation on it, so later calls go straight to the portable kernel). */
-export function disableSubgroupMatrix(device: GPUDevice): void {
-  registered.set(device, { ...gemmCapabilities(device), subgroupMatrix: false });
 }

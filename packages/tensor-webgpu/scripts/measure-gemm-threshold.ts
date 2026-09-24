@@ -13,7 +13,10 @@
  * matmul costs: WASM = `WasmTensor.fromArray` x2 + `matmulInto` +
  * `toFloat32Array` + free (tensor-wasm's SIMD128 GEMM when the runtime has
  * SIMD, #130); WebGPU = `runGemmWGSL` on `Float32Array`s (upload, dispatch,
- * `mapAsync` readback, pooled buffers).
+ * `mapAsync` readback, pooled buffers) — since issue #146 running on
+ * @johnhenry/backend-webgpu's GEMM and runtime. The `kernel` column lists
+ * the backend pipelines one call dispatched (e.g. `gemmsg`, `gemmskinny`,
+ * `copy+gemmsg` for A·B through bᵀ, `gemm` = tiled).
  *
  * Harnesses (`$MATH_PLUS_WEBGPU_HARNESS`):
  *  - `dawn` (default here): Dawn in THIS process (`src/dawn.ts`), calling the
@@ -99,8 +102,8 @@ interface GpuSide {
 async function dawnSide(): Promise<GpuSide> {
   const { requestDawnGPU } = await import("../src/dawn.ts");
   const { detectWebGPU } = await import("../src/device.ts");
-  const { runGemmWGSL, selectGemmKernel } = await import("../src/gemm.ts");
-  const { gemmCapabilities } = await import("../src/gemm-caps.ts");
+  const { runGemmWGSL } = await import("../src/gemm.ts");
+  const { backendFor } = await import("../src/bridge.ts");
   const gpu = await requestDawnGPU({ unsafe: true });
   if (!gpu) throw new Error("Dawn: the `webgpu` package is not installed or failed to load");
   const cap = await detectWebGPU({ gpu });
@@ -119,7 +122,23 @@ async function dawnSide(): Promise<GpuSide> {
       const { c, a, b } = cur!;
       return runGemmWGSL(device, a, b, c.m, c.k, c.n, { transB: c.transB });
     },
-    kernel: async (c) => selectGemmKernel(c.m, c.k, c.n, c.transB, gemmCapabilities(device)),
+    kernel: async (c) => {
+      // Record the backend pipelines one call dispatches.
+      const rt = backendFor(device).rt;
+      const keys: string[] = [];
+      const orig = rt.dispatch;
+      rt.dispatch = function (this: typeof rt, k, ...rest) {
+        keys.push(k.key.split(":")[0]!);
+        return orig.call(this, k, ...rest);
+      };
+      try {
+        const { a, b } = inputs(c);
+        await runGemmWGSL(device, a, b, c.m, c.k, c.n, { transB: c.transB });
+      } finally {
+        rt.dispatch = orig;
+      }
+      return keys.join("+");
+    },
     close: async () => device.destroy(),
   };
 }
@@ -128,13 +147,13 @@ async function chromeSide(): Promise<GpuSide> {
   const harness = await getHarness();
   if ("unavailable" in harness) throw new Error(harness.reason);
   if (harness.kind !== "chrome") throw new Error(`expected the chrome harness, got ${harness.kind}`);
-  const bundle = bundleForBrowser([path.join(SRC, "gemm.ts"), path.join(SRC, "device.ts"), path.join(SRC, "gemm-caps.ts")]);
+  const bundle = bundleForBrowser([path.join(SRC, "gemm.ts"), path.join(SRC, "device.ts")]);
   // The bundle's declarations are local to one evaluation, so park what later calls need on globalThis.
   const info = await harness.run(
     `${LCG_SOURCE}
      const cap = await detectWebGPU({ gpu: navigator.gpu });
      if (!cap.available) throw new Error(cap.reason);
-     globalThis.__mp = { lcg, device: cap.device, runGemmWGSL, selectGemmKernel, gemmCapabilities };
+     globalThis.__mp = { lcg, device: cap.device, runGemmWGSL, backendFor };
      const i = cap.adapter.info;
      return { vendor: i.vendor, architecture: i.architecture, description: i.description, gemm: cap.gemm, userAgent: navigator.userAgent };`,
     bundle,
@@ -158,7 +177,11 @@ async function chromeSide(): Promise<GpuSide> {
     },
     kernel: (c) =>
       harness.run<string>(
-        `const P = globalThis.__mp; return P.selectGemmKernel(${c.m}, ${c.k}, ${c.n}, ${c.transB}, P.gemmCapabilities(P.device));`,
+        `const P = globalThis.__mp; const rt = P.backendFor(P.device).rt; const keys = []; const orig = rt.dispatch;
+         rt.dispatch = function (k, ...rest) { keys.push(k.key.split(":")[0]); return orig.call(this, k, ...rest); };
+         try { await P.runGemmWGSL(P.device, P.lcg(${c.m * c.k}, 1), P.lcg(${c.k * c.n}, 2), ${c.m}, ${c.k}, ${c.n}, { transB: ${c.transB} }); }
+         finally { rt.dispatch = orig; }
+         return keys.join("+");`,
       ),
     close: closeHarness,
   };

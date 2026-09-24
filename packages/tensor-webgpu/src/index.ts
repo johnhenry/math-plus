@@ -1,13 +1,29 @@
 /**
- * @johnhenry/math-plus-tensor-webgpu (issue #12) — WebGPU-accelerated GEMM and
- * attention-adjacent primitives for Math Plus tensors. Browsers via
- * `navigator.gpu`; Node/Bun via Dawn through the separate `./dawn` subpath
- * (optional `webgpu` peer dependency — see README.md "Node and Bun").
+ * @johnhenry/math-plus-tensor-webgpu — math-plus's WebGPU device.
  *
- * See docs/spikes/webgpu-tiled-gemm.md (and the v1 baseline it supersedes,
- * docs/spikes/webgpu-baseline.md) for the measured GEMM WASM-vs-WebGPU
- * crossover this package's `chooseGemmBackend` is built on.
+ * Since issue #146 (RFC 0001 §12 Q6, path (a)) this is a device facade over
+ * `@johnhenry/backend-webgpu`, the single WebGPU runtime: GEMM, fused
+ * attention, the op set and the runtime (buffer pool, pipeline and
+ * bind-group caches, batching) live there. This package adds explicit
+ * async transfers to and from tensor-core `Tensor`s (`createWebGpuDevice`),
+ * the tensor-compile IR -> WGSL elementwise fusion on that runtime, and the
+ * measured WASM-vs-WebGPU GEMM threshold. Browsers via `navigator.gpu`;
+ * Node/Bun via Dawn.
+ *
+ * The pre-#146 `GPUDevice` + `GPUTensor` API (`toWebGPU`, `runGemm*`,
+ * `runAttention`, `runQKT`/`runSoftmax`/`runWeightedSum`,
+ * `runElementwiseWGSL`, profiling, the `./dawn` subpath) still works, on
+ * the same runtime, and is deprecated: see the README's migration table.
  */
+export {
+  createWebGpuDevice,
+  webGpuUnavailableReason,
+  WebGpuDevice,
+  type WebGpuDeviceOptions,
+  type WebGpuBackend,
+  type WebGpuTensor,
+} from "./facade.ts";
+export { backendFor } from "./bridge.ts";
 export {
   detectWebGPU,
   toWebGPU,
@@ -21,74 +37,13 @@ export {
   runGemm,
   runGemmWGSL,
   runGemmF16WGSL,
-  selectGemmKernel,
   gemmKernelApplicable,
-  planGemm,
-  GEMM_CONFIG,
+  type GemmDType,
   type GemmKernel,
   type GemmOptions,
-  type GemmPlan,
 } from "./gemm.ts";
 export { registerGemmAdapter, gemmCapabilities, subgroupMatrixUsable, type GemmCapabilities } from "./gemm-caps.ts";
-export {
-  tiledGemmWGSL,
-  skinnyGemmWGSL,
-  subgroupMatrixGemmWGSL,
-  type GemmDType,
-  type TiledGemmConfig,
-  type SkinnyGemmConfig,
-  type SubgroupMatrixGemmConfig,
-  type SubgroupMatrixSyntax,
-} from "./gemm-kernels.ts";
-export {
-  runQKT,
-  runSoftmax,
-  runWeightedSum,
-  runAttention,
-  planAttention,
-  type AttentionOptions,
-  type AttentionPlan,
-} from "./attention.ts";
-export {
-  fastAttentionWGSL,
-  genericAttentionWGSL,
-  genericAttentionConfig,
-  type AttentionKernel,
-  type AttentionVariant,
-  type GenericAttentionConfig,
-} from "./attention-kernels.ts";
-export { compileIRToWGSL, type ElementwiseWGSL } from "./fusion-wgsl.ts";
+export { runQKT, runSoftmax, runWeightedSum, runAttention, type AttentionOptions } from "./attention.ts";
+export { compileIRToWGSL, compileIRToKernel, type ElementwiseWGSL } from "./fusion-wgsl.ts";
 export { runElementwiseWGSL } from "./elementwise.ts";
-export {
-  uploadStorageBuffer,
-  writePadded,
-  paddedByteLength,
-  bindingOf,
-  allocateOutputBuffer,
-  allocateGPUResidentBuffer,
-  acquireBuffer,
-  releaseBuffer,
-  destroyBufferPool,
-  readBackFloat32,
-  readBackBytes,
-  dispatchCompute,
-  getOrCreateComputePipeline,
-  pipelineCacheSize,
-  getKernel,
-  getKernelChecked,
-  parseWGSLBindings,
-  dispatchKernel,
-  writeBytes,
-  configureGPURuntime,
-  gpuRuntimeStats,
-  startProfiling,
-  stopProfiling,
-  type BindingKind,
-  type ComputeKernel,
-  type DispatchOptions,
-  type GPURuntimeOptions,
-  type GPURuntimeStats,
-  type KernelTiming,
-  workgroupsFor,
-  type SizedBuffer,
-} from "./gpu-runtime.ts";
+export { configureGPURuntime, startProfiling, stopProfiling, type GPURuntimeOptions, type KernelTiming } from "./profiling.ts";
