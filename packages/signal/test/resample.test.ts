@@ -12,6 +12,7 @@ import { makeTest } from "../../../test/harness.ts";
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { resamplePoly } from "../src/index.ts";
+import { SCIPY_SKIP_REASON, runScipyOracle } from "./helpers.ts";
 
 test("resamplePoly: output length matches ceil(len(x) * up / down)", () => {
   const x = Tensor.from(Array.from({ length: 100 }, (_, i) => i), { dtype: "f64" });
@@ -108,3 +109,52 @@ test("resamplePoly: rejects a non-1-D Tensor and non-positive-integer up/down", 
   assert.throws(() => resamplePoly(x, 1, -1), RangeError);
   assert.throws(() => resamplePoly(x, 1.5, 1), RangeError);
 });
+
+// Issue #113: the identity path (up === down after GCD reduction) returned the
+// input's raw storage labeled f64 -- for an f32 input, a Float32Array under a
+// "f64" dtype, which downstream dtype-branching ops misread.
+test("resamplePoly: identity path on an f32 input returns a genuine f64 tensor with the input's values (#113)", () => {
+  const values = [0.1, -2.5, 3.25, 1e-3, 7];
+  const f32 = Tensor.from(values, { dtype: "f32" });
+  const expected = Array.from(Float32Array.from(values)); // the f32-rounded inputs, widened exactly
+  for (const [up, down] of [
+    [1, 1],
+    [3, 3],
+  ] as const) {
+    const out = resamplePoly(f32, up, down);
+    assert.equal(out.dtype, "f64", `${up}/${down}: dtype label`);
+    assert.ok(out.data instanceof Float64Array, `${up}/${down}: storage must be a Float64Array, got ${out.data.constructor.name}`);
+    assert.deepEqual(out.toArray(), expected, `${up}/${down}: values`);
+    // A downstream op that trusts the label (the #113 failure mode) sees the right values.
+    assert.deepEqual(out.add(Tensor.zeros([values.length], { dtype: "f64" })).toArray(), expected);
+  }
+  // The identity result is a copy: mutating it never touches the input.
+  const out = resamplePoly(f32, 1, 1);
+  (out.data as Float64Array)[0] = 999;
+  assert.equal((f32.toArray() as number[])[0], Math.fround(0.1));
+});
+
+test("resamplePoly: identity path on f16 and i32 inputs decodes values rather than reinterpreting storage (#113)", () => {
+  const f16 = Tensor.from([1.5, -0.25, 2], { dtype: "f16" });
+  assert.deepEqual(resamplePoly(f16, 2, 2).toArray(), [1.5, -0.25, 2]);
+  const i32 = Tensor.from([3, -4, 5], { dtype: "i32" });
+  const out = resamplePoly(i32, 1, 1);
+  assert.equal(out.dtype, "f64");
+  assert.deepEqual(out.toArray(), [3, -4, 5]);
+});
+
+test(
+  "resamplePoly: identity path matches scipy.signal.resample_poly(x, n, n) on f32 input (#113)",
+  { skip: SCIPY_SKIP_REASON },
+  () => {
+    const values = Array.from({ length: 16 }, (_, i) => Math.sin(i * 0.7) * 3);
+    const f32 = Tensor.from(values, { dtype: "f32" });
+    for (const n of [1, 4]) {
+      const scipy = runScipyOracle<{ y: number[]; dtype: string }>({ op: "resample_poly", x: values, dtype: "float32", up: n, down: n });
+      assert.equal(scipy.dtype, "float32"); // scipy keeps f32; this package documents f64-everywhere output
+      const out = resamplePoly(f32, n, n);
+      assert.equal(out.dtype, "f64");
+      assert.deepEqual(out.toArray(), scipy.y, `up=down=${n}`);
+    }
+  },
+);

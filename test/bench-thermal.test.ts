@@ -44,6 +44,25 @@ test("timeCell: minRuns wins over the window for slow calls, maxRuns caps fast o
   assert.equal((await timeCell(fast.fn(), { cooldownMs: 0, maxRuns: 30, sleep: fast.sleep, now: fast.now })).n, 30);
 });
 
+test("timeCell: a call that returns { selfTimedMs } supplies its own sample; the window still uses the caller's clock", async () => {
+  const c = fakeClock(100); // 100 ms per call on the caller's clock (e.g. including a CDP round trip)
+  let i = 0;
+  const r = await timeCell(
+    () => {
+      c.fn()();
+      return { selfTimedMs: 10 + (i++ % 3) }; // what the page measured itself
+    },
+    { cooldownMs: 0, windowMs: 1000, sleep: c.sleep, now: c.now },
+  );
+  assert.equal(r.n, 10, "window bounded by the caller's 100 ms per call");
+  assert.ok(r.medianMs >= 10 && r.medianMs <= 12, `median ${r.medianMs} comes from selfTimedMs`);
+  assert.equal(r.maxMs, 12);
+  // Anything else a call returns is ignored.
+  const d = fakeClock(50);
+  const r2 = await timeCell(() => (d.fn()(), { selfTimedMs: "fast" }), { cooldownMs: 0, windowMs: 200, sleep: d.sleep, now: d.now });
+  assert.equal(r2.medianMs, 50);
+});
+
 test("runGrid: every cell cools down, backends alternate and swap order on every other cell", async () => {
   const c = fakeClock(10);
   const rows = await runGrid({

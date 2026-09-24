@@ -16,7 +16,7 @@ export {
   type DetectWebGPUOptions,
   type GPUDType,
 } from "./device.ts";
-export { GEMM_ELEMENT_THRESHOLD, chooseGemmBackend } from "./threshold.ts";
+export { GEMM_ELEMENT_THRESHOLD, GEMM_WORK_THRESHOLD, chooseGemmBackend } from "./threshold.ts";
 export {
   runGemm,
   runGemmWGSL,

@@ -206,10 +206,6 @@ nix-shell -p "python3.withPackages(ps: [ps.pyarrow ps.pandas ps.numpy ps.pytest]
 
 ## Headless WebGPU oracle (`@johnhenry/math-plus-tensor-webgpu`)
 
-> A **Dawn/Node test path** is being added by the tensor-webgpu tiled-GEMM PR (issue #127, item 4).
-> It runs these tests against WebGPU from Node directly, with no Chrome or Xvfb. That PR owns the
-> path and its documentation. The Chrome harness below is the current path until it lands.
-
 Same "oracle unavailable -> skip, never fail" convention as the NumPy/pyarrow oracles above, but
 the oracle is a live `GPUAdapter` reached over the Chrome DevTools Protocol instead of a Python
 subprocess — `packages/tensor-webgpu/test/helpers.ts` launches headless Chrome under Xvfb (mirroring
@@ -227,8 +223,15 @@ result. Individual tests call `getHarness()` and `t.skip(reason)` when unavailab
   kernel is exercised where the adapter supports it.
 - `chrome` — the headless-Chrome-over-CDP harness described below (Linux: Xvfb; macOS:
   `--headless=new --use-angle=metal`, no display needed).
-- unset / `auto` — Dawn first, Chrome if Dawn has no adapter (e.g. a GPU-less CI runner, where
-  Chrome's SwiftShader path is the one that works).
+- unset / `auto` — Dawn first, Chrome if Dawn has no adapter.
+
+**On a GPU-less Linux machine (CI)**, install Mesa's lavapipe software Vulkan driver
+(`apt-get install mesa-vulkan-drivers libvulkan1`): Dawn's plain `requestAdapter()` then returns the
+`llvmpipe` CPU adapter and every WebGPU test runs, slowly but for real. CI does exactly this with
+`MATH_PLUS_WEBGPU_HARNESS=dawn`; the only WebGPU test that skips there is the Apple-only
+subgroup-matrix kernel (lavapipe has no f32 8x8x8 subgroup matrices). CI does not install Chrome:
+headless Chrome under Xvfb with `--enable-unsafe-swiftshader` never exposed its CDP endpoint on
+GitHub's runners, so before the lavapipe switch all 33 WebGPU tests skipped there.
 
 GEMM correctness (`test/gemm.test.ts`) additionally uses a NumPy float64 oracle
 (`packages/tensor-webgpu/scripts/gemm_oracle.py`, same `$MATH_PLUS_ORACLE_PYTHON` / `python3`
@@ -281,7 +284,12 @@ optional dependency, a local build, Homebrew):
   GPU and CPU MLX devices.
 - `test/bridge.test.ts` — explicit-transfer and lifetime rules; its host-view half runs everywhere.
 
-CI's Linux runners skip the MLX parts; on an Apple Silicon machine with numpy a run must show
+CI's Linux runners skip the MLX parts. The `mlx-macos` job (`macos-15`, Apple Silicon, real Metal;
+non-blocking via `continue-on-error` until it has a stability record, #145) runs all three suites under
+Node and Bun, prints the pass/skip counts to the job summary, and goes red if anything skips. It builds
+mlx-c against the runner's own `mlx` wheel with laya-js's `build-mlxc.sh` (`$LAYA_MLXC_PATH`), as
+laya-js's CI does, because the published `@johnhenry/backend-mlx-darwin-arm64@0.1.0` bundle's
+`mlx.metallib` targets macOS 26+ and fails on macOS 15 ("could not create gpu stream"). On an Apple Silicon machine with numpy a run must show
 **0 skipped** (`npm test -w @johnhenry/math-plus-tensor-mlx` and `npm run test:bun -w …`). Wrap
 runs in the `~/gpu.lock` convention on shared machines:
 
