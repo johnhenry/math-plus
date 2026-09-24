@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-tensor-webgpu",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "math-plus's WebGPU device: a facade over @johnhenry/backend-webgpu (the single WebGPU runtime: GEMM, fused attention, the tensor-backend op set) with explicit async transfers to/from tensor-core Tensors and tensor-compile IR -> WGSL elementwise fusion — browsers via navigator.gpu, Node/Bun via Dawn",
   "type": "module",
   "exports": {
