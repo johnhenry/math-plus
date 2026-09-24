@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Batch NumPy oracle for @johnhenry/math-plus-tensor-mlx differential tests.
+"""Batch NumPy oracle for the shared DeviceArray suite (test/device-array-suite.ts).
 
-One process answers every case (MLX tests build dozens of cases; spawning
-Python per op would dominate the run). Reads a JSON list of jobs:
+The suite runs the same cases over every math-plus device facade (CPU here,
+tensor-mlx's MLX, tensor-webgpu's WebGPU), so this oracle lives next to the
+one DeviceArray implementation (src/device-array.ts). It moved here from
+tensor-mlx's scripts/numpy_oracle.py. One process answers every case (the
+suite builds hundreds of cases; spawning Python per op would dominate the
+run). Reads a JSON list of jobs:
 
   [{"op": "add", "inputs": ["/tmp/a.npy", "/tmp/b.npy"],
     "args": {"scalar": 2.0, "axis": 1, "keepdims": true, "eps": 1e-5,
@@ -20,7 +24,9 @@ int32 (the device's dtypes), so the harness can compare those exactly.
 
 This is separate from tensor-core's scripts/numpy_oracle.py on purpose:
 that one is one-op-per-process and has no layer_norm, exact-erf gelu or
-half-precision casts, which are this package's core ops.
+half-precision casts, which are core DeviceArray ops. It is also separate
+from this package's scripts/numpy_oracle.py, which covers the fused
+transformer ops of the Backend contract (linear, rope, sdpa, ...).
 """
 
 import json

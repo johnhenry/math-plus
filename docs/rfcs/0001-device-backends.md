@@ -538,6 +538,11 @@ Answers to §11:
    *Status:* done in tensor-webgpu 0.2 (#146, #159/#160). The deprecation
    window ended in 0.3.0, which removed `toWebGPU`, `GPUTensor` and the rest
    of the pre-facade API (see its README's "Removed in 0.3.0").
+   *Follow-up:* the device facades share one chainable array API:
+   `ArrayDevice`/`DeviceArray` in `@johnhenry/math-plus-tensor-cpu` (next to
+   the shared host bridge), which tensor-mlx's `MlxDevice`/`MlxArray`,
+   tensor-webgpu's `WebGpuDevice` (0.4.0: `fromTensor` returns an array) and
+   `createCpuDevice()` subclass, with one behavioural suite run over all three.
 7. **Contract growth: in tensor-backend.** A "general numerics" section
    (comparisons, `sqrt`, `argmax`, `erf`, …) is added to the one contract as
    optional ops with default compositions in `compose.ts`, plus conformance

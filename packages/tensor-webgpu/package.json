@@ -19,11 +19,11 @@
     "test:bun": "bun test ./test/"
   },
   "dependencies": {
-    "@johnhenry/backend-webgpu": "^0.3.1",
+    "@johnhenry/backend-webgpu": "^0.4.0",
     "@johnhenry/math-plus-tensor-compile": "^0.1.3",
     "@johnhenry/math-plus-tensor-core": "^0.2.1",
     "@johnhenry/math-plus-tensor-cpu": "^0.2.1",
-    "@johnhenry/tensor-backend": "^0.2.0"
+    "@johnhenry/tensor-backend": "^0.3.0"
   },
   "devDependencies": {
     "@johnhenry/math-plus-scalar-types": "^0.0.3",

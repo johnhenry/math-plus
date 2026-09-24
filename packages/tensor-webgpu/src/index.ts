@@ -5,7 +5,9 @@
  * `@johnhenry/backend-webgpu`, the single WebGPU runtime: GEMM, fused
  * attention, the op set and the runtime (buffer pool, pipeline and
  * bind-group caches, batching) live there. This package adds explicit
- * async transfers to and from tensor-core `Tensor`s (`createWebGpuDevice`),
+ * async transfers to and from tensor-core `Tensor`s (`createWebGpuDevice`,
+ * whose arrays are the chainable `DeviceArray` shared with tensor-mlx and
+ * tensor-cpu),
  * the tensor-compile IR -> WGSL elementwise fusion on that runtime, and the
  * measured WASM-vs-WebGPU GEMM threshold. Browsers via `navigator.gpu`;
  * Node/Bun via Dawn.
@@ -19,6 +21,9 @@ export {
   createWebGpuDevice,
   webGpuUnavailableReason,
   WebGpuDevice,
+  type WebGpuArray,
+  type WebGpuInput,
+  type FusedFunction,
   type WebGpuDeviceOptions,
   type WebGpuBackend,
   type WebGpuTensor,

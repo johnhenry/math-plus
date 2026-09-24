@@ -26,9 +26,10 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | Train something / take gradients | [`tensor-autograd`](./packages/tensor-autograd) |
 | Fuse elementwise expressions | [`tensor-compile`](./packages/tensor-compile) |
 | Go faster on CPU | [`tensor-wasm`](./packages/tensor-wasm) — read its README first; it's a separate storage type, not a drop-in backend |
-| Go faster on GPU | [`tensor-webgpu`](./packages/tensor-webgpu) — browser-only in v1, and read its "honest threshold" section |
+| Go faster on GPU | [`tensor-webgpu`](./packages/tensor-webgpu) — a facade over `@johnhenry/backend-webgpu`: browsers, Deno, and Node/Bun via Dawn; read its GEMM-threshold section |
 | Run `@johnhenry/tensor-backend` model code on plain CPU (the reference backend) | [`tensor-cpu`](./packages/tensor-cpu) — pure TypeScript, every contract op native, built on tensor-core's kernels |
-| Native Apple Silicon GPU from Node/Bun (experimental) | [`tensor-mlx`](./packages/tensor-mlx) — MLX via `@johnhenry/backend-mlx`; darwin/arm64 only; prototype for [RFC 0001](./docs/rfcs/0001-device-backends.md) |
+| Native Apple Silicon GPU from Node/Bun/Deno (experimental) | [`tensor-mlx`](./packages/tensor-mlx) — MLX via `@johnhenry/backend-mlx`; darwin/arm64 only; prototype for [RFC 0001](./docs/rfcs/0001-device-backends.md) |
+| The same chainable array code on CPU, MLX or WebGPU | `createCpuDevice()` / `createMlxDevice()` / `await createWebGpuDevice()` — one `DeviceArray` API ([tensor-cpu](./packages/tensor-cpu#the-shared-device-array-api-arraydevice--devicearray)): `await dev.fromTensor(t)`, `x.matmul(w).add(1).softmax()`, `await y.toTensor()` |
 | FFTs / filters / peaks | [`fft`](./packages/fft), [`signal`](./packages/signal) |
 | Resize/normalize images | [`image`](./packages/image) |
 | Load/save model weights (`.safetensors`) | [`safetensors`](./packages/safetensors) — lazy reads from files, Blobs and HTTP ranges |
@@ -47,9 +48,9 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 | [`@johnhenry/math-plus-tensor-autograd`](./packages/tensor-autograd) | Reverse-mode tape, `nn.*`, `optim.*`, trainer, checkpoints |
 | [`@johnhenry/math-plus-tensor-compile`](./packages/tensor-compile) | Expression IR + elementwise fusion (opt-in); the shared lowering target for WGSL |
 | [`@johnhenry/math-plus-tensor-wasm`](./packages/tensor-wasm) | Rust→WASM kernels (SIMD, arena allocator, zero-alloc `...Into` ops) + opt-in Deno-native FFI |
-| [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU device facade over `@johnhenry/backend-webgpu` (GEMM, fused attention, the tensor-backend ops) plus IR→WGSL fusion. Browsers, and Node/Bun via Dawn. |
-| [`@johnhenry/math-plus-tensor-cpu`](./packages/tensor-cpu) | The CPU reference `Backend` for the `@johnhenry/tensor-backend` contract (RFC 0001 §12 Q3): f32 compute on tensor-core's kernels (`/kernels` subpath), every optional op native, passes the conformance suite. Pure TypeScript; Node, Bun, Deno, browsers. |
-| [`@johnhenry/math-plus-tensor-mlx`](./packages/tensor-mlx) | **Experimental.** MLX (Metal) arrays on Node/Bun with explicit `fromTensor`/`toTensor` transfers, over the `@johnhenry/tensor-backend` contract. darwin/arm64 only; not on JSR. |
+| [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU device facade over `@johnhenry/backend-webgpu` (GEMM, fused attention, the tensor-backend ops) with the shared chainable `DeviceArray` API, plus IR→WGSL fusion. Browsers, Deno, and Node/Bun via Dawn. |
+| [`@johnhenry/math-plus-tensor-cpu`](./packages/tensor-cpu) | The CPU reference `Backend` for the `@johnhenry/tensor-backend` contract (RFC 0001 §12 Q3): f32 compute on tensor-core's kernels (`/kernels` subpath), every optional op native, passes the conformance suite. Also the home of the one chainable device-array API (`DeviceArray`) every device facade shares, and `createCpuDevice()`. Pure TypeScript; Node, Bun, Deno, browsers. |
+| [`@johnhenry/math-plus-tensor-mlx`](./packages/tensor-mlx) | **Experimental.** MLX (Metal) arrays (the shared `DeviceArray`) on Node, Bun and Deno with explicit `fromTensor`/`toTensor` transfers, over the `@johnhenry/tensor-backend` contract. darwin/arm64 only; configured for JSR, not yet published there. |
 | [`@johnhenry/math-plus-safetensors`](./packages/safetensors) | safetensors reader/writer: validated headers, typed views (F16 as `Float16Array`), lazy reads from files/Blobs/HTTP ranges, optional tensor-core interop. Zero deps. |
 | [`@johnhenry/math-plus-special`](./packages/special) | The one canonical double-precision `erf`/`erfc`/GELU (SciPy-verified). Zero deps; used by tensor-core (which re-exports it) and frame-arrow's `fn.erf`. |
 
@@ -100,7 +101,7 @@ Which package do I want?` — the whole cost is the export itself.
 **A genuinely new package is warranted when the functionality needs its
 own install footprint** — a project that wants FFTs shouldn't have to pull
 in dataframes — **or crosses into a distinct dependency/runtime shape**
-(`tensor-webgpu`'s browser-only WebGPU requirement, `interop-python`'s
+(`tensor-webgpu`'s WebGPU runtime dependency, `interop-python`'s
 separate PyPI distribution). `signal` is the harder case: it isn't a new
 runtime shape, just a decision that SciPy's `signal` module maps to its
 own npm package rather than growing `fft` past what "Fourier transforms"

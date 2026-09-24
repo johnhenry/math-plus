@@ -1,26 +1,30 @@
 /**
  * `createWebGpuDevice()` — math-plus's WebGPU device (issue #146, RFC 0001
  * §12 Q6 path (a)), the same shape as `@johnhenry/math-plus-tensor-mlx`'s
- * `createMlxDevice()`:
+ * `createMlxDevice()`, because it is the same class: `WebGpuDevice` extends
+ * `@johnhenry/math-plus-tensor-cpu`'s `ArrayDevice`, so its arrays are the
+ * chainable `DeviceArray` every math-plus device shares (one implementation
+ * for CPU, MLX and WebGPU — AGENTS.md's canonical-implementation rule).
  *
  * - The runtime is `@johnhenry/backend-webgpu` (the one WebGPU
  *   implementation of the `@johnhenry/tensor-backend` contract); `backend`
- *   exposes it, and its ops (`matmul`, `linear`, `sdpa`, `softmax`,
- *   `layerNorm`, elementwise, reductions, the general-numerics section, …)
- *   are the device's ops.
+ *   exposes it for the ops the arrays do not wrap (`linear`, `sdpa`, `rope`,
+ *   slicing, …) — use `array.handle` to pass an array in and
+ *   `gpu.wrap(handle)` to bring a result back.
  * - No global default device: you create one, and pass it around.
  * - Transfers are explicit and async in both directions (PLAN.md non-goal
  *   5; RFC §12 Q2): `await gpu.fromTensor(t)` uploads a tensor-core
- *   `Tensor`, `await gpu.toTensor(x)` downloads into a new one. Nothing is
- *   copied implicitly.
+ *   `Tensor` as a `WebGpuArray`, `await x.toTensor()` (or
+ *   `gpu.toTensor(x)`) downloads into a new one. Nothing is copied
+ *   implicitly.
  * - What this package adds on top is the tensor-compile IR -> WGSL
  *   elementwise fusion (`fuse`, `compile`), running on the same runtime.
  */
 import { isWebGpuAvailable, type AdapterSummary, type CreateWebGpuBackendOptions, type WebGpuBackend, type WebGpuTensor } from "@johnhenry/backend-webgpu";
 import { Traced, type IRNode } from "@johnhenry/math-plus-tensor-compile";
 import type { Tensor } from "@johnhenry/math-plus-tensor-core";
-import { hostFromTensor, tensorFromHost } from "@johnhenry/math-plus-tensor-cpu";
-import type { DType, HostTensor } from "@johnhenry/tensor-backend";
+import { ArrayDevice, DeviceArray, tensorFromHost } from "@johnhenry/math-plus-tensor-cpu";
+import type { HostTensor } from "@johnhenry/tensor-backend";
 import { createBackend, registerBackend, unregisterBackend, lookupBackend } from "./bridge.ts";
 import { encodeFused } from "./elementwise.ts";
 
@@ -68,17 +72,31 @@ export async function webGpuUnavailableReason(): Promise<string | null> {
   }
 }
 
-const LABEL = "tensor-webgpu";
+/** An array of a {@link WebGpuDevice}: the chainable `DeviceArray` shared by every math-plus device. */
+export type WebGpuArray = DeviceArray<WebGpuDevice>;
 
-export class WebGpuDevice {
-  readonly name = "webgpu" as const;
-  /** The `@johnhenry/tensor-backend` `Backend` (backend-webgpu): the device's ops, and the target of the conformance suite. */
-  readonly backend: WebGpuBackend;
+/** What the transfer, `dispose` and fusion methods accept: an array of this device, or a raw backend tensor. */
+export type WebGpuInput = WebGpuArray | WebGpuTensor;
+
+/** A fused function from `compile`: arrays in, an array out; raw backend tensors in, a raw tensor out. */
+export interface FusedFunction {
+  (...inputs: WebGpuArray[]): WebGpuArray;
+  (...inputs: WebGpuTensor[]): WebGpuTensor;
+}
+
+/**
+ * The WebGPU device. Transfers (`fromTensor`/`fromHost` → `WebGpuArray`),
+ * `scope`, `eval`, `where`, `wrap` and `supports` are the shared
+ * `ArrayDevice` ones; this class adds the GPU specifics (`device`, `info`,
+ * `sync`, `destroy`) and the IR -> WGSL fusion.
+ */
+export class WebGpuDevice extends ArrayDevice<WebGpuBackend> {
+  declare readonly name: "webgpu";
   readonly #owns: boolean;
 
   /** @internal Use `createWebGpuDevice()`. */
   constructor(backend: WebGpuBackend, owns: boolean) {
-    this.backend = backend;
+    super(backend, { label: "tensor-webgpu", device: "WebGpuDevice", array: "a WebGpuArray" });
     this.#owns = owns;
   }
 
@@ -92,42 +110,16 @@ export class WebGpuDevice {
     return this.backend.adapterInfo;
   }
 
-  /** Whether the device stores and computes `dtype` natively (f16 needs `shader-f16`; bf16 is stored as f32). */
-  supports(dtype: DType): boolean {
-    return this.backend.supports(dtype);
-  }
+  // ---- downloads (arrays also have their own toTensor/toHost) ----------------
 
-  // ---- transfers (the only way data crosses the boundary) -------------------
-
-  /**
-   * Explicit upload of a tensor-core `Tensor` (one copy, from its own
-   * storage into a GPU buffer). The tensor must be C-contiguous (call
-   * `.contiguous()` first) and have a device dtype (f32/f16/bf16/i32/bool —
-   * cast f64/i64/… explicitly first).
-   */
-  fromTensor(t: Tensor): Promise<WebGpuTensor> {
-    let h: HostTensor;
-    try {
-      h = hostFromTensor(t, LABEL);
-    } catch (e) {
-      return Promise.reject(e);
-    }
-    return this.backend.fromHost(h);
-  }
-
-  /** Explicit upload of a tensor-backend `HostTensor` (one copy). */
-  fromHost(h: HostTensor): Promise<WebGpuTensor> {
-    return this.backend.fromHost(h);
-  }
-
-  /** Explicit download into a new tensor-core `Tensor` (submits pending work, one copy). */
-  async toTensor(x: WebGpuTensor): Promise<Tensor> {
-    return tensorFromHost(await this.backend.read(x));
+  /** Explicit download into a new tensor-core `Tensor` (submits pending work, one copy). Same as `x.toTensor()` for an array. */
+  async toTensor(x: WebGpuInput): Promise<Tensor> {
+    return tensorFromHost(await this.toHost(x));
   }
 
   /** Explicit download as a tensor-backend `HostTensor` (f16 as `Float16Array`, bf16 as raw bits). */
-  toHost(x: WebGpuTensor): Promise<HostTensor> {
-    return this.backend.read(x);
+  toHost(x: WebGpuInput): Promise<HostTensor> {
+    return this.backend.read(this.#raw(x, "toHost"));
   }
 
   // ---- fusion (tensor-compile IR -> one WGSL dispatch) ------------------------
@@ -138,14 +130,21 @@ export class WebGpuDevice {
    * dispatch: every op the expression chains is fused, with no intermediate
    * GPU buffer. Inputs are f32 and broadcast against each other like
    * NumPy's (and like tensor-compile's CPU `forward`): e.g. `[B, N]` with
-   * `[N]` or `[B, 1]`. The result is a new f32 tensor of the broadcast
-   * shape, tracked by the enclosing `scope`. Runs on backend-webgpu's
-   * `elementwise` hook.
+   * `[N]` or `[B, 1]`. The result is a new f32 array of the broadcast
+   * shape (a raw backend tensor when the inputs are raw tensors), tracked by
+   * the enclosing `scope`. Runs on backend-webgpu's `elementwise` hook.
    */
-  fuse(expr: IRNode | Traced, inputs: readonly WebGpuTensor[]): WebGpuTensor {
+  fuse(expr: IRNode | Traced, inputs: readonly WebGpuArray[]): WebGpuArray;
+  fuse(expr: IRNode | Traced, inputs: readonly WebGpuTensor[]): WebGpuTensor;
+  /** Mixed inputs: the result is an array when the first input is one. */
+  fuse(expr: IRNode | Traced, inputs: readonly WebGpuInput[]): WebGpuInput;
+  fuse(expr: IRNode | Traced, inputs: readonly WebGpuInput[]): WebGpuInput {
     const node = expr instanceof Traced ? expr.node : expr;
     if (!inputs.length) throw new RangeError("tensor-webgpu fuse: needs at least one input");
-    return encodeFused(this.backend, node, inputs);
+    const arrays = inputs[0] instanceof DeviceArray;
+    const raw = inputs.map((x) => this.#raw(x, "fuse"));
+    const out = encodeFused(this.backend, node, raw);
+    return arrays ? this.wrap(out) : out;
   }
 
   /**
@@ -155,25 +154,21 @@ export class WebGpuDevice {
    *     const f = gpu.compile(2, (x, y) => x.mul(y).add(1).gelu());
    *     const z = f(a, b); // one dispatch
    */
-  compile(numInputs: number, fn: (...args: Traced[]) => Traced): (...inputs: WebGpuTensor[]) => WebGpuTensor {
+  compile(numInputs: number, fn: (...args: Traced[]) => Traced): FusedFunction {
     // The same trace tensor-compile's `compile` performs (its IR is private there).
     const node = fn(...Array.from({ length: numInputs }, (_, i) => Traced.input(i))).node;
-    return (...inputs) => {
+    return ((...inputs: WebGpuInput[]) => {
       if (inputs.length !== numInputs) throw new RangeError(`tensor-webgpu compile: expects ${numInputs} input(s), got ${inputs.length}`);
-      return this.fuse(node, inputs);
-    };
+      return this.fuse(node, inputs as WebGpuArray[]);
+    }) as FusedFunction;
   }
 
   // ---- lifetime ----------------------------------------------------------------
 
-  /** Runs `fn`; every tensor created inside and not returned (directly, or one level deep in an array/object) is disposed afterwards — also when `fn` throws. */
-  scope<R>(fn: () => R): R {
-    return this.backend.scope(fn);
-  }
-
-  /** Frees a tensor now (idempotent). */
-  dispose(x: WebGpuTensor): void {
-    this.backend.dispose(x);
+  /** Frees an array or a raw backend tensor now (idempotent). Same as `x.dispose()` for an array. */
+  dispose(x: WebGpuInput): void {
+    if (x instanceof DeviceArray) x.dispose();
+    else this.backend.dispose(x);
   }
 
   /** Resolves when all submitted GPU work is done (benchmarking); throws the first uncaptured device error. */
@@ -183,17 +178,22 @@ export class WebGpuDevice {
 
   /**
    * Releases the runtime's pooled buffers and pipelines, and the
-   * `GPUDevice` if `createWebGpuDevice()` requested it. Tensors must not be
+   * `GPUDevice` if `createWebGpuDevice()` requested it. Arrays must not be
    * used afterwards. A device passed in with `{ device }` is left alive, and
    * its backend stays registered, so a later `createWebGpuDevice({ device })`
    * shares it.
    */
-  destroy(): void {
+  override destroy(): void {
     if (!this.#owns) {
       this.backend.rt.trim();
       return;
     }
     unregisterBackend(this.backend);
     this.backend.destroy();
+  }
+
+  /** The backend tensor of an array of this device, or a raw backend tensor as is. */
+  #raw(x: WebGpuInput, op: string): WebGpuTensor {
+    return x instanceof DeviceArray ? this._own(x, op) : x;
   }
 }

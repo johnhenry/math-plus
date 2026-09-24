@@ -13,6 +13,11 @@ shape as [`@johnhenry/math-plus-tensor-mlx`](../tensor-mlx):
 - You create a device. There is no global default.
 - Data moves only through explicit, async transfers to and from
   tensor-core `Tensor`s.
+- Uploads are **chainable arrays** (`WebGpuArray`): the one `DeviceArray`
+  API every math-plus device shares (from
+  [`@johnhenry/math-plus-tensor-cpu`](../tensor-cpu#the-shared-device-array-api-arraydevice--devicearray);
+  the same class is tensor-mlx's `MlxArray`), so `x.matmul(w).add(1).softmax()`
+  reads the same on WebGPU, MLX and the CPU.
 - The ops are the [`@johnhenry/tensor-backend`](https://www.npmjs.com/package/@johnhenry/tensor-backend)
   contract, implemented by backend-webgpu: GEMM (skinny, subgroup-matrix
   and tiled kernels), fused flash attention, softmax, LayerNorm, RoPE,
@@ -43,18 +48,20 @@ import { createWebGpuDevice, webGpuUnavailableReason } from "@johnhenry/math-plu
 if (await webGpuUnavailableReason()) throw new Error("no WebGPU here");
 const gpu = await createWebGpuDevice();          // requests an adapter + device
 
-const x = await gpu.fromTensor(Tensor.from([1, 2, 3, 4, 5, 6]).reshape([2, 3])); // explicit upload
+const x = await gpu.fromTensor(Tensor.from([1, 2, 3, 4, 5, 6]).reshape([2, 3])); // explicit upload: a WebGpuArray
 const w = await gpu.fromTensor(Tensor.from([0.5, -1, 2, 0, 1, 1]).reshape([2, 3]));
 
-const b = gpu.backend;                           // the tensor-backend ops
-const y = gpu.scope(() => b.softmax(b.linear(x, w), -1)); // intermediates are freed
+const y = gpu.scope(() => x.matmul(w.transpose()).add(1).softmax(-1)); // chainable; intermediates are freed
+
+// Ops the arrays do not wrap: gpu.backend with .handle, then wrap() the result
+const lin = gpu.wrap(gpu.backend.linear(x.handle, w.handle));
 
 // Fusion: one dispatch for the whole expression
 const f = gpu.compile(2, (p, q) => p.mul(q).add(1).gelu());
 const z = f(x, x);
 
-console.log(await gpu.toTensor(y), await gpu.toTensor(z)); // explicit downloads
-for (const t of [x, w, y, z]) gpu.dispose(t);
+console.log(await y.toTensor(), await lin.toTensor(), await z.toTensor()); // explicit downloads
+for (const t of [x, w, y, lin, z]) t.dispose();
 gpu.destroy();
 ```
 
@@ -86,22 +93,36 @@ use about 3× less CPU for about 2% more latency (measured in
 [`docs/spikes/webgpu-runtime.md`](../../docs/spikes/webgpu-runtime.md#since-146-backend-webgpus-sleep-and-sleepthresholdms-15)).
 Browsers don't busy-poll, so there is no sleep for `navigator.gpu`.
 
-`WebGpuDevice`:
+`WebGpuDevice` extends tensor-cpu's `ArrayDevice`:
 
-- `backend`: the `WebGpuBackend`. Its ops are the device's ops, and it is
-  the target of the conformance suite. `backend.rt` exposes the runtime
-  (`stats`, `trim()`, `startProfiling()`, `stopProfiling()`).
-- Transfers in: `fromTensor(t)` and `fromHost(hostTensor)`, both async. The
-  tensor must be C-contiguous (call `.contiguous()` first) and have a
-  device dtype: f32, f16, bf16, i32 or bool. Other dtypes throw; cast them
-  explicitly first.
-- Transfers out: `toTensor(x)` returns a new tensor-core `Tensor`.
-  `toHost(x)` returns a `HostTensor`. Both are async.
+- Transfers in: `fromTensor(t)` and `fromHost(hostTensor)`, both async,
+  both resolving to a `WebGpuArray`. The tensor must be C-contiguous (call
+  `.contiguous()` first) and have a dtype the device `supports()`: f32,
+  bf16, i32, bool, and f16 when the adapter has `shader-f16`. Anything else
+  throws **synchronously**, before any Promise; cast it explicitly first.
+- `WebGpuArray` is the shared `DeviceArray`: `add` `sub` `mul` `div`
+  `maximum` `minimum` `pow`, `neg` `abs` `exp` `log` `sqrt` `rsqrt` `tanh`
+  `sigmoid` `erf` `relu` `gelu`, the comparisons and logical ops, `sum`
+  `mean` `max` `min` `argmax` `argmin` `cumsum` `softmax`, `matmul`,
+  `layerNorm`, `cast`, `reshape`, `transpose`, `toTensor()`/`toHost()`,
+  `eval()`, `dispose()`, `handle` — see
+  [tensor-cpu's README](../tensor-cpu#the-shared-device-array-api-arraydevice--devicearray)
+  for the list and the dtype rules.
+- `backend`: the `WebGpuBackend`, for the ops the arrays do not wrap
+  (`linear`, `sdpa`, `rope`, `slice`, `concat`, `embedding`, quantized
+  weights, …) and the target of the conformance suite. Pass `x.handle` in
+  and `gpu.wrap(result)` to get an array back. `backend.rt` exposes the
+  runtime (`stats`, `trim()`, `startProfiling()`, `stopProfiling()`).
+- Transfers out: `x.toTensor()` / `x.toHost()` on an array, or
+  `gpu.toTensor(x)` / `gpu.toHost(x)`, which also take a raw backend
+  tensor. All async.
 - Fusion: `fuse(expr, inputs)` and `compile(numInputs, fn)`, described
   below.
-- Lifetime: `scope(fn)`, `dispose(x)`, `sync()`, `destroy()`.
-- Introspection: `device`, `info` (adapter summary), `supports(dtype)`,
-  and `name` (`"webgpu"`).
+- Lifetime: `scope(fn)` (keeps returned arrays and raw backend tensors),
+  `x.dispose()` or `gpu.dispose(x)` (arrays or raw tensors), `eval()`,
+  `sync()`, `destroy()`.
+- Also `where(cond, a, b)`, `wrap(handle)`, `supports(dtype)`, `device`
+  (the `GPUDevice`), `info` (adapter summary), and `name` (`"webgpu"`).
 
 The host conversion (`hostFromTensor`, `tensorFromHost`) is shared with
 tensor-mlx and lives in `@johnhenry/math-plus-tensor-cpu`.
@@ -112,7 +133,7 @@ tensor-mlx and lives in `@johnhenry/math-plus-tensor-cpu`.
 dispatch. The expression is an `IRNode`, or a `Traced` built with
 `Traced.input(i)`. There is no intermediate buffer per op.
 `gpu.compile(n, fn)` traces `fn` once and returns
-`(...tensors) => tensor`.
+`(...arrays) => array`.
 
 - The lowering is `compileIRToWGSL`'s (every `UnaryOp`, `BinaryOp` and
   `CmpOp`, `select`, and the canonical f32 erf and exact GELU).
@@ -123,8 +144,9 @@ dispatch. The expression is an `IRNode`, or a `Traced` built with
   tensor-compile's CPU `forward`: `[B, N]` with `[N]`, `[B, 1]` or `[1]`,
   both sides at once, up to rank 8. Views with an element offset are fine.
   Inputs must be f32; cast other dtypes first.
-- The result is an f32 tensor of the broadcast shape, tracked by the
-  enclosing `scope`.
+- The result is an f32 `WebGpuArray` of the broadcast shape, tracked by
+  the enclosing `scope`. Raw backend tensors in (e.g. `gpu.backend.slice`
+  views) give a raw backend tensor out.
 
 ### One runtime per device
 
@@ -156,6 +178,21 @@ on the GPU make WebGPU cheaper at every size. Re-run
 `scripts/measure-gemm-threshold.ts` (Dawn or headless Chrome) and
 `scripts/gemm-threshold-page/serve.ts` (any browser) on your own hardware.
 
+## Changed in 0.4.0: uploads are chainable arrays
+
+`gpu.fromTensor()` and `gpu.fromHost()` now resolve to a `WebGpuArray`
+(the shared `DeviceArray`) instead of a raw backend `WebGpuTensor`, so the
+WebGPU device has the same chainable API as tensor-mlx and the CPU device.
+This is the one breaking change; `gpu.backend` is unchanged.
+
+| 0.3 | 0.4 |
+|---|---|
+| `const x = await gpu.fromTensor(t); gpu.backend.matmul(x, y)` | `x.matmul(y)`, or `gpu.wrap(gpu.backend.matmul(x.handle, y.handle))` |
+| raw tensors for `gpu.backend.*` code: `await gpu.fromHost(h)` | `await gpu.backend.fromHost(h)` (unchanged backend API) |
+| `await gpu.fromTensor(badTensor)` rejects | throws synchronously (non-contiguous, or a dtype the device does not support — f16 without `shader-f16` is refused, not widened) |
+| `gpu.fuse(expr, tensors)` / `compile(n, fn)(...tensors)` | unchanged for raw tensors; arrays in give an array out |
+| `gpu.toTensor(x)`, `gpu.toHost(x)`, `gpu.dispose(x)`, `gpu.scope(fn)` | unchanged, and they also take arrays (`x.toTensor()`, `x.dispose()` work too) |
+
 ## Removed in 0.3.0
 
 The pre-0.2 `GPUDevice` + `GPUTensor` API, deprecated in 0.2.0, is gone.
@@ -182,11 +219,11 @@ stay.
 
 ## Limitations
 
-- **The device API has no chainable array wrapper yet**, unlike
-  `MlxArray`: ops are called on `gpu.backend` with backend tensors. A shared
-  array API for the device packages is future work. It waits on tensor-mlx
-  moving to the async-upload contract (tensor-backend 0.2), because
-  number operands need a synchronous constant op.
+- **The arrays wrap the elementwise/reduction/matmul/LayerNorm op set
+  only.** The fused transformer ops, slicing, `concat`, `sort` and
+  quantized weights stay on `gpu.backend` (use `x.handle` and
+  `gpu.wrap()`). Reductions take one axis or all axes. No autograd on
+  device arrays.
 - **Fusion is f32-only**, like tensor-compile's forward pass. Cast other
   dtypes first. (backend-webgpu's `elementwise` hook could load f16, bf16,
   i32 and bool inputs as f32, but no test covers that yet.) It lowers the
@@ -205,16 +242,22 @@ stay.
 
 ## Tests
 
-`npm test` and `npm run test:bun` run the same 54 tests under Node and
+`npm test` and `npm run test:bun` run the same 260 tests under Node and
 Bun. GPU tests run on a real adapter, either Dawn in-process or headless
 Chrome over CDP (`$MATH_PLUS_WEBGPU_HARNESS=dawn|chrome`; the default is
 Dawn, falling back to Chrome). They skip, never fail, where neither exists.
 
 - The **tensor-backend conformance suite** runs through the facade, in f32
   and in f16/bf16 where the device supports them.
+- The **shared DeviceArray suite** (`test/device-array.test.ts`, the same
+  suite tensor-cpu and tensor-mlx run, from tensor-cpu's
+  `test/device-array-suite.ts`): every array op against a NumPy oracle in
+  f32, f16 (with `shader-f16`), bf16, i32 and bool, casts bit-exact, and
+  the transfer, dtype, constant, lifetime and `handle`/`wrap` rules.
 - **Facade tests**:
   - transfers of every dtype, including views
   - refusal of implicit conversions
+  - arrays and raw backend tensors through `toTensor`/`toHost`/`dispose`/`fuse`
   - backend ops against tensor-core on the CPU
   - `fuse`/`compile` against tensor-compile's CPU `forward`, including
     broadcasting (lower ranks, size-1 axes on both sides, offset views, an

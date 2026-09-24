@@ -33,11 +33,14 @@ import type { Backend, DType, HostTensor, NumericsOp, Shape, Tensor } from "@joh
 import { sizeOf, toF32 } from "@johnhenry/tensor-backend";
 import { broadcastShapes, Tensor as MpTensor } from "@johnhenry/math-plus-tensor-core";
 import * as K from "@johnhenry/math-plus-tensor-core/kernels";
+import { ArrayDevice, type DeviceArray } from "./device-array.ts";
 
 /** The canonical scalar erf / erfc / exact GELU the backend uses (from @johnhenry/math-plus-special via tensor-core). */
 export { erf, erfc, geluErf as geluScalar } from "@johnhenry/math-plus-tensor-core";
 /** The tensor-core `Tensor` <-> `HostTensor` bridge every math-plus device package (tensor-mlx, tensor-webgpu) uses; see host.ts. */
 export { DEVICE_DTYPES, hostFromTensor, isDeviceDType, tensorFromHost, type DeviceDType } from "./host.ts";
+/** The chainable device-array API every math-plus device facade (CPU, MLX, WebGPU) shares; see device-array.ts. */
+export { ArrayDevice, DeviceArray, type ArrayDeviceNames, type DeviceArrayClass, type HandleOf } from "./device-array.ts";
 
 type CpuDType = "f32" | "i32" | "bool";
 type Data = Float32Array | Int32Array | Uint8Array;
@@ -605,4 +608,35 @@ class CpuBackendImpl implements CpuBackend {
     K.maskedMeanPool(x.data, B, L, D, mask.data, out);
     return this.#make([B, D], "f32", out);
   }
+}
+
+// ---------------------------------------------------------------- device facade
+/**
+ * The CPU device: the chainable {@link DeviceArray} API (shared with
+ * tensor-mlx's `MlxDevice` and tensor-webgpu's `WebGpuDevice`) over a
+ * {@link CpuBackend}. Eager, f32/i32/bool: f16/bf16 uploads and casts are
+ * refused (the backend would widen them to f32 silently), so cast to f32
+ * explicitly first.
+ */
+export class CpuDevice extends ArrayDevice<CpuBackend> {
+  declare readonly name: "cpu";
+
+  /** @internal Use `createCpuDevice()`. */
+  constructor(backend: CpuBackend) {
+    super(backend, { label: "tensor-cpu", device: "CpuDevice", array: "a CpuArray" });
+  }
+}
+
+/** An array of a {@link CpuDevice}. */
+export type CpuArray = DeviceArray<CpuDevice>;
+
+/**
+ * Creates a CPU device (its own backend; no shared global state):
+ *
+ *     const cpu = createCpuDevice();
+ *     const x = await cpu.fromTensor(Tensor.from([1, 2, 3]));
+ *     const t = await x.mul(2).softmax().toTensor();
+ */
+export function createCpuDevice(): CpuDevice {
+  return new CpuDevice(createCpuBackend());
 }

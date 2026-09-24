@@ -38,7 +38,7 @@ test("one backend per GPUDevice: createWebGpuDevice({ device }) calls share it, 
     try { registerBackend(extra); } catch (e) { refused = e.message; } finally { extra.destroy(); }
     g1.destroy(); // a device passed in stays alive and keeps its backend
     const g3 = await createWebGpuDevice({ device });
-    const x = await g3.fromHost({ dtype: "f32", shape: [2], data: new Float32Array([1, 2]) });
+    const x = await g3.backend.fromHost({ dtype: "f32", shape: [2], data: new Float32Array([1, 2]) });
     const deviceAlive = Array.from((await g3.toHost(g3.backend.add(x, x))).data).join() === "2,4";
     return { shared: g1.backend === g2.backend, refused, afterDestroy: g3.backend === g1.backend, deviceAlive };
     `,
@@ -59,8 +59,8 @@ test("bind-group and pipeline caches hit through the facade: a repeated same-sha
     const gpu = await createWebGpuDevice({ device: await adapter.requestDevice() });
     const b = gpu.backend;
     const stats = () => { const s = b.rt.stats; return [s.bindGroups, s.pipelines, s.buffersCreated]; };
-    const A = await gpu.fromHost({ dtype: "f32", shape: [24, 20], data: new Float32Array(24 * 20).map((_, i) => (i % 7) - 3) });
-    const B = await gpu.fromHost({ dtype: "f32", shape: [20, 28], data: new Float32Array(20 * 28).map((_, i) => (i % 5) - 2) });
+    const A = await gpu.backend.fromHost({ dtype: "f32", shape: [24, 20], data: new Float32Array(24 * 20).map((_, i) => (i % 7) - 3) });
+    const B = await gpu.backend.fromHost({ dtype: "f32", shape: [20, 28], data: new Float32Array(20 * 28).map((_, i) => (i % 5) - 2) });
     const s0 = stats();
     const c1 = b.matmul(A, B);
     const d1 = (await gpu.toHost(c1)).data;
@@ -89,7 +89,7 @@ test("fused kernel: 300 dispatches over views at distinct offsets before one rea
     const gpu = await createWebGpuDevice({ device });
     const b = gpu.backend;
     const data = new Float32Array(400).map((_, i) => i);
-    const x = await gpu.fromHost({ dtype: "f32", shape: [400], data });
+    const x = await gpu.backend.fromHost({ dtype: "f32", shape: [400], data });
     const node = { kind: "binary", op: "add", left: { kind: "binary", op: "mul", left: { kind: "input", index: 0 }, right: { kind: "const", value: 2 } }, right: { kind: "const", value: 1 } };
     const outs = [];
     for (let i = 0; i < 300; i++) outs.push(gpu.fuse(node, [b.slice(x, [i], [i + 1 + (i % 50)])]));
@@ -140,7 +140,7 @@ test("timestamp profiler through gpu.backend.rt: GPU time per backend kernel wit
     let noFeature = "";
     try { plain.backend.rt.startProfiling(); } catch (e) { noFeature = e.message; }
     const b = gpu.backend;
-    const A = await gpu.fromHost({ dtype: "f32", shape: [256, 256], data: new Float32Array(256 * 256).fill(0.5) });
+    const A = await gpu.backend.fromHost({ dtype: "f32", shape: [256, 256], data: new Float32Array(256 * 256).fill(0.5) });
     b.rt.startProfiling();
     const outs = [];
     for (let i = 0; i < 7; i++) outs.push(b.matmul(A, A));

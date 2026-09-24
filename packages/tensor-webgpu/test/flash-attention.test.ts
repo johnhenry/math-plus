@@ -192,7 +192,7 @@ async function runOnGPU(
       const gpu = c.raisedLimits ? gpus.raised : gpus.plain;
       const b = gpu.backend;
       const device = gpu.device;
-      const up = (s, shape) => gpu.fromHost({ dtype: "f32", shape, data: dec(s) });
+      const up = (s, shape) => gpu.backend.fromHost({ dtype: "f32", shape, data: dec(s) });
       const q = await up(c.q, [c.batch, 1, c.seqQ, c.dim]);
       const k = await up(c.k, [c.batch, 1, c.seqK, c.dim]);
       const v = await up(c.v, [c.batch, 1, c.seqK, c.dim]);

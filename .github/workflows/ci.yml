@@ -154,7 +154,7 @@ jobs:
         if: matrix.runtime == 'node'
         run: python3 -m pytest packages/interop-python/tests/ -v
 
-  # tensor-mlx's MLX suites (conformance + NumPy differential + bridge) on
+  # tensor-mlx's MLX suites (conformance + the shared DeviceArray suite vs NumPy + bridge) on
   # real Apple Silicon Metal (#145, decided in RFC 0001 §12 Q5), under Node,
   # Bun and Deno. The Linux legs above skip every MLX test (skip-don't-fail
   # off darwin/arm64), so this is the only CI coverage of the native path.
@@ -163,7 +163,7 @@ jobs:
   #
   # MLX comes from the published platform package that `npm ci` installs
   # (@johnhenry/backend-mlx-darwin-arm64@0.1.1, an optional dependency of
-  # @johnhenry/backend-mlx 0.3). 0.1.1 carries a metallib that loads on
+  # @johnhenry/backend-mlx 0.4). 0.1.1 carries a metallib that loads on
   # macOS 15 (verified by laya-js CI); 0.1.0's did not ("could not create gpu
   # stream: vector"), which is why this job used to build mlx-c itself.
   # LAYA_MLXC_PATH must stay unset so the tests exercise that package.
@@ -192,7 +192,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # numpy: the differential suite's oracle (packages/tensor-mlx/scripts/numpy_oracle.py).
+      # numpy: the DeviceArray suite's oracle (packages/tensor-cpu/scripts/device_array_oracle.py).
       - run: pip install numpy
 
       - run: npm ci
@@ -201,7 +201,7 @@ jobs:
       # this leg (the Linux legs build and test everything).
       - name: Build (special + tensor-core + tensor-cpu + tensor-mlx)
         # tensor-core depends on math-plus-special (the canonical erf), so build it first;
-        # tensor-mlx imports the shared Tensor<->HostTensor bridge from tensor-cpu (#146).
+        # tensor-mlx imports the shared Tensor<->HostTensor bridge and the DeviceArray API from tensor-cpu.
         run: npm run build -w @johnhenry/math-plus-special -w @johnhenry/math-plus-tensor-core -w @johnhenry/math-plus-tensor-cpu -w @johnhenry/math-plus-tensor-mlx
 
       - name: Report the runner and the MLX bundle the tests load

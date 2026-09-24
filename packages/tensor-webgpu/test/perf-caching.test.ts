@@ -37,8 +37,8 @@ const PAGE_SETUP = `
   const device = await adapter.requestDevice();
   const gpu = await createWebGpuDevice({ device });
   const hostGemm = async (a, b, m, k, n) => {
-    const A = await gpu.fromHost({ dtype: "f32", shape: [m, k], data: a });
-    const B = await gpu.fromHost({ dtype: "f32", shape: [k, n], data: b });
+    const A = await gpu.backend.fromHost({ dtype: "f32", shape: [m, k], data: a });
+    const B = await gpu.backend.fromHost({ dtype: "f32", shape: [k, n], data: b });
     const C = gpu.backend.matmul(A, B);
     const out = (await gpu.toHost(C)).data;
     for (const x of [A, B, C]) gpu.dispose(x);
@@ -133,7 +133,7 @@ test("attention chain (QKᵀ -> softmax -> ·V) and a GEMM chain stay GPU-reside
   const result = await harness.run<{ duringChain: number; afterReadback: number }[]>(
     `${PAGE_SETUP}
     const b = gpu.backend;
-    const up = (data, shape) => gpu.fromHost({ dtype: "f32", shape, data: new Float32Array(data) });
+    const up = (data, shape) => gpu.backend.fromHost({ dtype: "f32", shape, data: new Float32Array(data) });
     const q = await up(${JSON.stringify(Array.from(q))}, [1, 4, 4]);
     const k = await up(${JSON.stringify(Array.from(k))}, [1, 4, 4]);
     const v = await up(${JSON.stringify(Array.from(v))}, [1, 4, 4]);
