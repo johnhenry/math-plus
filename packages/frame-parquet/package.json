@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-frame-parquet",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Parquet read/write bridge into @johnhenry/math-plus-frame-arrow's Frame, built on hyparquet (issue #20) — part of Math Plus",
   "type": "module",
   "exports": {
@@ -24,7 +24,7 @@
     "hyparquet-writer": "0.16.6",
     "hyparquet-compressors": "1.1.1",
     "@hpcc-js/wasm-zstd": "1.15.0",
-    "@johnhenry/math-plus-frame-arrow": "^0.0.2"
+    "@johnhenry/math-plus-frame-arrow": "^0.0.3"
   },
   "repository": {
     "type": "git",
