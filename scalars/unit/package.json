@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-unit",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Unit/dimension scalar type (issue #23) — magnitude plus dimension metadata, parsing, formatting, dimensional-analysis-checked arithmetic. Pure TypeScript, zero dependencies (conversion/parsing is metadata transformation, not bulk numeric work, per the acceleration test). Units never enter tensor storage.",
   "type": "module",
   "exports": {

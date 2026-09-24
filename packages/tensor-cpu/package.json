@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-tensor-cpu",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The CPU reference Backend for @johnhenry/tensor-backend (issue #144, RFC 0001 §12 Q3): pure TypeScript, f32 compute on tensor-core's kernels, every optional op native — part of Math Plus",
   "keywords": [
     "tensor",
@@ -29,7 +29,7 @@
     "bench": "node bench/vs-laya.ts"
   },
   "dependencies": {
-    "@johnhenry/math-plus-tensor-core": "^0.2.0",
+    "@johnhenry/math-plus-tensor-core": "^0.2.1",
     "@johnhenry/tensor-backend": "^0.2.0"
   },
   "devDependencies": {

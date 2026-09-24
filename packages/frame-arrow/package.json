@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-frame-arrow",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Immutable, expression-oriented Frame/Series dataframe library on top of apache-arrow — part of Math Plus",
   "type": "module",
   "exports": {
@@ -19,7 +19,7 @@
     "test:bun": "bun test ./test/"
   },
   "dependencies": {
-    "@johnhenry/math-plus-special": "^0.1.0",
+    "@johnhenry/math-plus-special": "^0.1.1",
     "apache-arrow": "21.2.0"
   },
   "peerDependencies": {
