@@ -49,7 +49,7 @@ const result = op(va, vb, vc); // a Variable; backward() matches the unfused gra
   comparisons + short-circuiting `select(then, else)`, and a large unary set
   (full trig incl. reciprocals, full hyperbolic, `exp`/`log*`, `erf`,
   `relu`/`sigmoid`/`gelu`, `floor`/`ceil`/`round`/`sign`/`trunc`...).
-  `erf` and both GELU modes evaluate tensor-core's canonical `src/special.ts`,
+  `erf` and both GELU modes evaluate the canonical `@johnhenry/math-plus-special` (re-exported by tensor-core),
   so compiled and eager results are bit-identical.
 - `gelu({ approximate })` mirrors `Tensor.gelu()`: default `"none"` → IR op
   `"gelu"` (exact erf-GELU, **changed from tanh in #122**), `"tanh"` → IR op

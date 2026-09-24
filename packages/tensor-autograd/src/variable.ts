@@ -354,7 +354,7 @@ export class Variable {
    * approximation). The backward pass differentiates whichever forward was
    * actually computed:
    * - exact: `Φ(x) + x·φ(x)`, with `Φ(x) = 0.5·erfc(-x/√2)` from the
-   *   canonical `Tensor.erfc()` (tensor-core src/special.ts);
+   *   canonical `Tensor.erfc()` (@johnhenry/math-plus-special, re-exported by tensor-core);
    * - tanh: the exact derivative of the tanh approximation, using the
    *   identity tanh(x) = 2*sigmoid(2x)-1.
    */

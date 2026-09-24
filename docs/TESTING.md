@@ -135,13 +135,14 @@ BEHAVIOR (apply `sosFilter` to `butter`'s output, compare against `scipy.signal.
 `scipy.signal.butter`'s own output, on the same input) — invariant to section grouping, and the
 property that actually matters.
 
-## SciPy / PyTorch oracle for erf and GELU (tensor-core, issue #122)
+## SciPy / PyTorch oracle for erf and GELU (special + tensor-core, issue #122)
 
-`packages/tensor-core/test/special-oracle.test.ts` checks the canonical `erf`/`erfc`
-(`packages/tensor-core/src/special.ts`) against `scipy.special.erf`/`erfc` over [-6, 6] plus both
-tails, exact GELU against `x·scipy.special.ndtr(x)`, and `Tensor.gelu()` against
-`torch.nn.functional.gelu` in both `approximate` modes (f64 and f32), via
-`packages/tensor-core/scripts/special_oracle.py`. Same skip-don't-fail convention. SciPy resolves
+`packages/special/test/special-oracle.test.ts` checks the canonical `erf`/`erfc`
+(`@johnhenry/math-plus-special`, `packages/special/src/index.ts`) against `scipy.special.erf`/`erfc`
+over [-6, 6] plus both tails, and exact GELU against `x·scipy.special.ndtr(x)`, via
+`packages/special/scripts/special_oracle.py`. `packages/tensor-core/test/special-oracle.test.ts`
+checks `Tensor.gelu()` against `torch.nn.functional.gelu` in both `approximate` modes (f64 and f32),
+via `packages/tensor-core/scripts/gelu_torch_oracle.py`. Same skip-don't-fail convention. SciPy resolves
 via `$MATH_PLUS_SCIPY_ORACLE_PYTHON`, else `$MATH_PLUS_ORACLE_PYTHON`, else `python3`. PyTorch
 resolves via `$MATH_PLUS_TORCH_ORACLE_PYTHON`, else `$MATH_PLUS_ORACLE_PYTHON`, else `python3`. The
 two can be different interpreters. Without a system SciPy, a throwaway venv works:
@@ -150,7 +151,7 @@ two can be different interpreters. Without a system SciPy, a throwaway venv work
 uv venv /tmp/scipy-venv && uv pip install --python /tmp/scipy-venv/bin/python scipy numpy
 MATH_PLUS_SCIPY_ORACLE_PYTHON=/tmp/scipy-venv/bin/python \
 MATH_PLUS_TORCH_ORACLE_PYTHON=$(python3 -c 'import sys; print(sys.executable)') \
-  npm test -w @johnhenry/math-plus-tensor-core
+  npm test -w @johnhenry/math-plus-special -w @johnhenry/math-plus-tensor-core
 ```
 
 (On macOS 27, the SciPy 1.15 wheel for Python 3.10 fails to `dlopen`; use Python 3.12 with a current

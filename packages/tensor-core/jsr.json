@@ -2,5 +2,8 @@
   "name": "@johnhenry/math-plus-tensor-core",
   "version": "0.0.0",
   "license": "MIT",
-  "exports": "./src/index.ts"
+  "exports": "./src/index.ts",
+  "imports": {
+    "@johnhenry/math-plus-special": "jsr:@johnhenry/math-plus-special@^0.0.0"
+  }
 }

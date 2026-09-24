@@ -30,8 +30,8 @@
  * hyperbolics/`erf`/`cbrt`/`log10`, so those are expanded to the same formulas
  * `unaryValueAndDeriv` in tensor-compile/src/ir.ts uses (documented per-op
  * below), not re-derived independently — same math, different backend
- * (`erf`/exact `gelu`: an f32 lowering of tensor-core's canonical
- * src/special.ts, see `ERF_WGSL_FN`).
+ * (`erf`/exact `gelu`: an f32 lowering of the canonical
+ * @johnhenry/math-plus-special, see `ERF_WGSL_FN`).
  */
 import type { BinaryOp, CmpOp, IRNode, UnaryOp } from "@johnhenry/math-plus-tensor-compile";
 import { ERF_F32_PARAMS, ERF_SERIES_CUTOFF } from "@johnhenry/math-plus-tensor-core";
@@ -212,11 +212,11 @@ function formatFloatLiteral(value: number): string {
 
 /**
  * f32 lowering of the canonical double-precision `erf`/`erfc`
- * (`@johnhenry/math-plus-tensor-core`'s src/special.ts, issue #122) — the SAME
+ * (`@johnhenry/math-plus-special`, issue #122) — the SAME
  * algorithm, not an independent approximation: Maclaurin series below
  * `ERF_SERIES_CUTOFF`, the even-contracted Laplace continued fraction for
- * `erfc` at or above it, with the loop counts taken from tensor-core's
- * `ERF_F32_PARAMS` (whose truncation error tensor-core's own tests verify
+ * `erfc` at or above it, with the loop counts taken from the
+ * `ERF_F32_PARAMS` (whose truncation error that package's own tests verify
  * against the f64 original: < 2^-24 relative). `exp(-z²)` uses the same
  * `s = round(z·64)/64` split as the f64 code so `z*z`'s rounding doesn't
  * multiply the tail's relative error by ~2z².

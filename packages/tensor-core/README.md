@@ -65,9 +65,10 @@ const r2 = random.uniform([5], { rng: random.seed(42) }); // identical
   argmin argmax variance std prod cumsum cumprod sort argsort topK`).
 - **I/O:** `toNpy()` / `Tensor.fromNpy(bytes)` — NPY v1.0.
 - **Special functions (scalar):** `erf`, `erfc`, `gelu(x, approximate)`,
-  `geluErf`, `geluTanh`, `geluDerivative` — the monorepo's ONE canonical
-  double-precision erf (`src/special.ts`, ~1e-15 relative, SciPy-verified).
-  tensor-compile's IR and tensor-webgpu's WGSL `erf` derive from it; don't
+  `geluErf`, `geluTanh`, `geluDerivative` — re-exported from
+  [`@johnhenry/math-plus-special`](../special), the monorepo's ONE canonical
+  double-precision erf (~1e-15 relative, SciPy-verified). tensor-compile's
+  IR, tensor-webgpu's WGSL and frame-arrow's `fn.erf` derive from it; don't
   add another.
 - **Random:** `random.seed`, `random.uniform`, `random.normal`,
   `random.randint`; plus `broadcastShapes`, `allocate`, `BYTES_PER_ELEMENT`,

@@ -42,13 +42,14 @@ A JS/TypeScript-native numeric computation runtime — a NumPy + PyTorch + panda
 
 | Package | Role |
 |---|---|
-| [`@johnhenry/math-plus-tensor-core`](./packages/tensor-core) | Typed n-D arrays: dtypes, strides/views, broadcasting, `.npy` I/O. Pure JS, zero deps. |
+| [`@johnhenry/math-plus-tensor-core`](./packages/tensor-core) | Typed n-D arrays: dtypes, strides/views, broadcasting, `.npy` I/O. Pure JS; its one dependency is `special`. |
 | [`@johnhenry/math-plus-tensor-autograd`](./packages/tensor-autograd) | Reverse-mode tape, `nn.*`, `optim.*`, trainer, checkpoints |
 | [`@johnhenry/math-plus-tensor-compile`](./packages/tensor-compile) | Expression IR + elementwise fusion (opt-in); the shared lowering target for WGSL |
 | [`@johnhenry/math-plus-tensor-wasm`](./packages/tensor-wasm) | Rust→WASM kernels (SIMD, arena allocator, zero-alloc `...Into` ops) + opt-in Deno-native FFI |
 | [`@johnhenry/math-plus-tensor-webgpu`](./packages/tensor-webgpu) | WebGPU GEMM, attention primitives, IR→WGSL fusion. Chromium-family browsers only. |
 | [`@johnhenry/math-plus-tensor-mlx`](./packages/tensor-mlx) | **Experimental.** MLX (Metal) arrays on Node/Bun with explicit `fromTensor`/`toTensor` transfers, over the `@johnhenry/tensor-backend` contract. darwin/arm64 only; not on JSR. |
 | [`@johnhenry/math-plus-safetensors`](./packages/safetensors) | safetensors reader/writer: validated headers, typed views (F16 as `Float16Array`), lazy reads from files/Blobs/HTTP ranges, optional tensor-core interop. Zero deps. |
+| [`@johnhenry/math-plus-special`](./packages/special) | The one canonical double-precision `erf`/`erfc`/GELU (SciPy-verified). Zero deps; used by tensor-core (which re-exports it) and frame-arrow's `fn.erf`. |
 
 ### Signal & media
 

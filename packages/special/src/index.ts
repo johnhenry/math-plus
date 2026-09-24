@@ -4,9 +4,11 @@
  * Every other `erf` in this monorepo derives from this module rather than
  * carrying its own approximation (AGENTS.md's canonical-implementation rule):
  *
- * - `Tensor.erf()`/`Tensor.erfc()`/`Tensor.gelu()` (tensor-core) call it directly.
+ * - `@johnhenry/math-plus-tensor-core` re-exports it, and its
+ *   `Tensor.erf()`/`Tensor.erfc()`/`Tensor.gelu()` call it.
  * - `@johnhenry/math-plus-tensor-compile`'s IR evaluator (`ir.ts`,
- *   `unaryValueAndDeriv`'s `erf`/`gelu`/`gelu_tanh` cases) imports it.
+ *   `unaryValueAndDeriv`'s `erf`/`gelu`/`gelu_tanh` cases) imports it
+ *   (through tensor-core's re-export).
  * - `@johnhenry/math-plus-tensor-autograd`'s `Variable.gelu()` backward uses
  *   `Tensor.erfc()` for the exact-GELU derivative.
  * - `@johnhenry/math-plus-tensor-webgpu`'s WGSL `math_plus_erf`/`math_plus_erfc`
@@ -15,12 +17,19 @@
  *   truncation error is itself verified against this f64 implementation
  *   (test/special.test.ts), so the f32 variant is derived from, not
  *   independent of, this one.
+ * - `@johnhenry/math-plus-frame-arrow`'s `fn.erf()` column expression.
  *
- * Why tensor-core: it is the root of the tensor graph (zero runtime
- * dependencies), and every consumer above already depends on it — so no
- * package gains a new dependency edge. `@johnhenry/math-plus-scalar-types`
- * was the other candidate, but it pulls in `@johnhenry/math`, which
- * tensor-compile/tensor-webgpu deliberately do not depend on.
+ * Why its own package: it began in tensor-core (#122), the root of the
+ * tensor graph, which every consumer above already depended on — except
+ * frame-arrow, which deliberately has no static dependency on the tensor
+ * track (tensor-core is only its optional, lazily-imported peer; see
+ * frame-arrow's tensor.ts and test/tensor.test.ts). frame-arrow therefore
+ * kept a second, Abramowitz & Stegun 7.1.26 copy (~1.5e-7 absolute error),
+ * against AGENTS.md's canonical-implementation rule. Moving the one
+ * implementation into this zero-dependency leaf gives both tensor-core and
+ * frame-arrow a place to depend on without either growing the other's
+ * install footprint. `@johnhenry/math-plus-scalar-types` was rejected as
+ * the home for the same reason as in #122: it pulls in `@johnhenry/math`.
  *
  * Algorithm (derived from laya-js's `packages/backend-cpu/src/erf.ts`, same
  * author, Apache-2.0; tightened here — see "Accuracy"):
