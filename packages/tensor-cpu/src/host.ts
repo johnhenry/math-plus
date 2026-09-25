@@ -27,21 +27,26 @@ import { toMathPlusArgs, type DType as DeviceDType, type HostTensor } from "@joh
 
 export type { DeviceDType };
 
-/** dtypes a device tensor can hold (the tensor-backend contract's set; same names as tensor-core). */
-export const DEVICE_DTYPES: readonly DeviceDType[] = Object.freeze(["f32", "f16", "bf16", "i32", "bool"]);
+/**
+ * dtypes a device tensor can hold at the host<->device transfer boundary
+ * (the tensor-backend contract's set; same names as tensor-core). This is
+ * the full 13-dtype set as of 2026-09-25 -- it is a storage/representation
+ * question (can tensor-core even hand this dtype's data across the
+ * boundary), not a "does this specific backend support it" question. A
+ * backend that can't compute in a given dtype still rejects it via its own
+ * `supports(dtype)` (e.g. WebGPU has no f64/i8/u8/i16/u16/i64/u64 -- see its
+ * README's Limitations section for why, hardware/spec-capped not a gap).
+ */
+export const DEVICE_DTYPES: readonly DeviceDType[] = Object.freeze([
+  "f32", "f16", "bf16", "i32", "bool", "u8", "i8", "u16", "i16", "u32", "u64", "i64", "f64",
+]);
 
 export function isDeviceDType(d: string): d is DeviceDType {
   return (DEVICE_DTYPES as readonly string[]).includes(d);
 }
 
 function unsupported(label: string, dtype: DType): TypeError {
-  const hint =
-    dtype === "f64"
-      ? 'the device has no float64 — cast("f32") explicitly first'
-      : dtype === "i64" || dtype === "u64"
-        ? 'cast("i32") explicitly first (check the range yourself; nothing is narrowed implicitly)'
-        : 'cast("i32") or cast("f32") explicitly first';
-  return new TypeError(`${label}: dtype ${dtype} is not supported on the device (supported: ${DEVICE_DTYPES.join(", ")}); ${hint}`);
+  return new TypeError(`${label}: dtype ${dtype} is not supported at the host<->device boundary (supported: ${DEVICE_DTYPES.join(", ")})`);
 }
 
 /**
@@ -72,6 +77,22 @@ export function hostFromTensor(t: Tensor, label = "tensor-cpu"): HostTensor {
       return { dtype: "i32", shape, data: data as Int32Array };
     case "bool":
       return { dtype: "bool", shape, data: data as Uint8Array };
+    case "u8":
+      return { dtype: "u8", shape, data: data as Uint8Array };
+    case "i8":
+      return { dtype: "i8", shape, data: data as Int8Array };
+    case "u16":
+      return { dtype: "u16", shape, data: data as Uint16Array };
+    case "i16":
+      return { dtype: "i16", shape, data: data as Int16Array };
+    case "u32":
+      return { dtype: "u32", shape, data: data as Uint32Array };
+    case "f64":
+      return { dtype: "f64", shape, data: data as Float64Array };
+    case "u64":
+      return { dtype: "u64", shape, data: data as BigUint64Array };
+    case "i64":
+      return { dtype: "i64", shape, data: data as BigInt64Array };
   }
 }
 

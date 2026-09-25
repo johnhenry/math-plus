@@ -332,7 +332,11 @@ export function deviceArraySuite(fns: TestFns, opts: SuiteOptions): void {
         { to: "i32", from: f32 },
         { to: "bool", from: f32 },
         { to: "f32", from: Tensor.fromTypedArray(Int32Array.from([0, 1, -5, 2 ** 24 + 1, -(2 ** 30)]), [5], { dtype: "i32" }) },
-      ] as { to: DType; from: Tensor }[]
+        // This suite's own scope is RunDType (the original 5 dtypes) --
+        // see its definition above; the 8 dtypes added 2026-09-25 need
+        // their own oracle coverage before joining this shared suite,
+        // tracked separately from the per-backend work.
+      ] as { to: RunDType; from: Tensor }[]
     ).filter((c) => supported(c.to));
     let castWant: Tensor[] = [];
     beforeAll(() => {
@@ -410,8 +414,20 @@ export function deviceArraySuite(fns: TestFns, opts: SuiteOptions): void {
       assert.equal((await hp).dtype, "i32");
       const t = Tensor.fromTypedArray(Float32Array.from([1, 2, 3, 4]), [2, 2], { dtype: "f32" }).transpose();
       assert.throws(() => d().fromTensor(t), /contiguous\(\) first/);
-      assert.throws(() => d().fromTensor(Tensor.from([1], { dtype: "f64" })), /no float64/);
-      assert.throws(() => d().fromTensor(Tensor.from([1], { dtype: "i64" })), /cast\("i32"\)/);
+      // f64/i64 support varies by backend (full parity on CPU as of
+      // 2026-09-25; MLX/WebGPU have their own real constraints -- see
+      // tensor-backend's DType docs) -- assert whichever behavior this
+      // device actually has, not a blanket "always refused".
+      if (dev?.supports("f64")) {
+        assert.deepEqual(await vals(await d().fromTensor(Tensor.from([1], { dtype: "f64" }))), [1]);
+      } else {
+        assert.throws(() => d().fromTensor(Tensor.from([1], { dtype: "f64" })), /no float64|not support/);
+      }
+      if (dev?.supports("i64")) {
+        assert.deepEqual(await vals(await d().fromTensor(Tensor.from([1], { dtype: "i64" }))), [1]);
+      } else {
+        assert.throws(() => d().fromTensor(Tensor.from([1], { dtype: "i64" })), /cast\("i32"\)|not support/);
+      }
     });
 
     itUnless(skipAll, "ops refuse tensor-core Tensors and arrays of another device (no implicit transfers)", async () => {

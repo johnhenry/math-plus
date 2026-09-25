@@ -195,5 +195,9 @@ it("drop-in compatible with @johnhenry/backend-cpu@0.2.0: same result dtypes, sh
 it("same dtype table as backend-cpu@0.2.0 for every supported input dtype (supports/cast)", () => {
   const ours = createCpuBackend();
   const theirs = createLayaCpuBackend();
-  for (const d of ["f32", "f16", "bf16", "i32", "bool"] as DType[]) assert.equal(ours.supports(d), theirs.supports(d), d);
+  // backend-cpu@0.2.0 is pinned to the pre-2026-09-25 5-dtype contract, so
+  // its own (nested, older) `DType` type is a different, narrower import
+  // identity than this package's -- not annotated `as DType[]` (ambiguous
+  // between the two) since plain string literals satisfy both structurally.
+  for (const d of ["f32", "f16", "bf16", "i32", "bool"] as const) assert.equal(ours.supports(d), theirs.supports(d), d);
 });
