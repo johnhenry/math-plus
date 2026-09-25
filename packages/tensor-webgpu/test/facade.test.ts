@@ -87,8 +87,11 @@ test("fromTensor/toTensor round-trip every device dtype exactly, including a vie
 test("fromTensor refuses implicit conversions synchronously, before any Promise: non-contiguous views and non-device dtypes (labelled tensor-webgpu)", { skip: skip ?? false }, async () => {
   const gpu = await device();
   assert.throws(() => gpu.fromTensor(Tensor.zeros([3, 4], { dtype: "f32" }).transpose()), /tensor-webgpu: .*contiguous\(\) first/);
-  assert.throws(() => gpu.fromTensor(Tensor.zeros([2], { dtype: "f64" })), /tensor-webgpu: dtype f64 .*cast\("f32"\)/);
-  assert.throws(() => gpu.fromTensor(Tensor.zeros([2], { dtype: "i64" })), /cast\("i32"\)/);
+  // f64/i64 are permanently unsupported on WebGPU (real WGSL spec limits --
+  // see backend-webgpu's README "Limitations"), rejected by #checkDtype's
+  // generic message now, not a dtype-specific "cast(...)" hint.
+  assert.throws(() => gpu.fromTensor(Tensor.zeros([2], { dtype: "f64" })), /does not support f64/);
+  assert.throws(() => gpu.fromTensor(Tensor.zeros([2], { dtype: "i64" })), /does not support i64/);
   if (!gpu.supports("f16")) assert.throws(() => gpu.fromTensor(Tensor.from([1], { dtype: "f16" })), /does not support f16/);
 });
 

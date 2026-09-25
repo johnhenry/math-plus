@@ -44,7 +44,7 @@ rt.write(viaWrite, false, view);
 const writeBytesOut = Array.from(new Float32Array(await rt.readBytes(viaWrite, 0, 16)));
 
 const t32 = await gpu.fromHost({ dtype: "f32", shape: [4], data: view });
-const tensorF32 = Array.from((await gpu.toHost(t32)).data);
+const tensorF32 = Array.from((await gpu.toHost(t32)).data as Float32Array);
 
 const expected = { f32: [4, 5, 6, 7], f16: [0x3c03, 0x3c04, 0x3c05, 0x3c06] };
 let tensorF16: number[] | null = null;

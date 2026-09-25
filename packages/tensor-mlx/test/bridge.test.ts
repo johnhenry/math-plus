@@ -51,10 +51,15 @@ describe("host views (no MLX needed)", () => {
     assert.doesNotThrow(() => hostFromTensor(t.contiguous()));
   });
 
-  it("rejects dtypes the device cannot hold, naming the explicit cast", () => {
-    assert.throws(() => hostFromTensor(Tensor.from([1, 2], { dtype: "f64" })), /no float64.*cast\("f32"\)/);
-    assert.throws(() => hostFromTensor(Tensor.from([1, 2], { dtype: "i64" })), /cast\("i32"\)/);
-    assert.throws(() => hostFromTensor(Tensor.from([1, 2], { dtype: "u8" })), /not supported on the device/);
+  it("accepts every tensor-core dtype at the host<->device boundary (2026-09-25: full parity)", () => {
+    // hostFromTensor's DEVICE_DTYPES now mirrors tensor-core's full 13-dtype
+    // set -- it's a storage/representation question, not "does a specific
+    // backend support this", which is what used to make f64/i64/u8 throw
+    // here. Per-backend rejection (e.g. MLX on GPU refusing f64) now happens
+    // at upload time instead -- see "MlxDevice transfers & lifetime" below.
+    assert.doesNotThrow(() => hostFromTensor(Tensor.from([1, 2], { dtype: "f64" })));
+    assert.doesNotThrow(() => hostFromTensor(Tensor.from([1, 2], { dtype: "i64" })));
+    assert.doesNotThrow(() => hostFromTensor(Tensor.from([1, 2], { dtype: "u8" })));
   });
 });
 
@@ -123,7 +128,10 @@ describe("MlxDevice transfers & lifetime", () => {
     assert.equal((await hp).dtype, "i32");
     const t = Tensor.fromTypedArray(Float32Array.from([1, 2, 3, 4]), [2, 2], { dtype: "f32" }).transpose();
     assert.throws(() => d().fromTensor(t), /contiguous\(\) first/);
-    assert.throws(() => d().fromTensor(Tensor.from([1], { dtype: "f64" })), /no float64/);
+    // The default MlxDevice uses the GPU, which genuinely can't hold f64 (no
+    // Apple GPU has double-precision hardware) -- #checkDtype's real message
+    // ("does not support f64"), not the old bridge-level "no float64" wording.
+    assert.throws(() => d().fromTensor(Tensor.from([1], { dtype: "f64" })), /does not support f64/);
   });
 
   itUnless(mlxSkip, "number operands become on-device constants (no upload, nothing left alive)", async () => {
