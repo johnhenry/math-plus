@@ -1,15 +1,19 @@
 /**
  * Guards against the "functions.csv rot" failure mode documented in
  * docs/spikes/woxi-study.md: a hand-maintained manifest with no validating
- * test silently drifts from reality. This repo has two such manifests --
- * root package.json's build/test `-w` script lists, and
- * scripts/sync-jsr-configs.mjs's PACKAGE_DIRS -- and both have already
- * required a manual edit (easy to forget) for every new package added.
- * A forgotten root-script entry means `npm run build`/`npm test` silently
- * stops covering that package while its own package-level scripts still
- * work -- invisible until something depends on a stale dist. A forgotten
- * PACKAGE_DIRS entry means the package ships to npm but never to JSR --
- * unless the package is listed, with a reason, in JSR_EXCLUDED_DIRS.
+ * test silently drifts from reality. This repo has one remaining such
+ * manifest -- scripts/sync-jsr-configs.mjs's PACKAGE_DIRS -- which has
+ * already required a manual edit (easy to forget) for every new package
+ * added. A forgotten PACKAGE_DIRS entry means the package ships to npm but
+ * never to JSR -- unless the package is listed, with a reason, in
+ * JSR_EXCLUDED_DIRS.
+ *
+ * Root package.json's build/test scripts used to be a second such manifest
+ * (a hand-maintained `-w <name>` list, one entry per package). Since
+ * 2026-09-25 they call `turbo run build`/`turbo run test` instead, which
+ * covers every workspace package with that script by construction -- so
+ * that failure mode no longer applies to them; see the "routes through
+ * Turborepo" test below for what replaced the old per-package check.
  */
 import assert from "node:assert/strict";
 import { makeTest } from "./harness.ts";
@@ -59,22 +63,15 @@ function readRootPackageJson(): { scripts: Record<string, string> } {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 }
 
-test("every npm workspace package appears in root package.json's build AND test scripts", () => {
+test("root build AND test scripts route through Turborepo, not a hand-maintained -w list", () => {
+  // Since 2026-09-25 (turbo.json adoption), root build/test call `turbo run
+  // <task>`, which runs a task for every workspace package that defines it
+  // -- structurally, not via a list that can go stale. The old assertion
+  // here checked for a literal "-w <name>" per package; that's no longer
+  // the mechanism, so this now checks the new one is actually in place.
   const rootPkg = readRootPackageJson();
-  const packages = discoverWorkspacePackages();
-  const missingFromBuild = packages.filter((p) => !rootPkg.scripts.build.includes(`-w ${p.name}`)).map((p) => p.name);
-  const missingFromTest = packages.filter((p) => !rootPkg.scripts.test.includes(`-w ${p.name}`)).map((p) => p.name);
-
-  assert.deepEqual(
-    missingFromBuild,
-    [],
-    `package(s) missing from root "build" script: ${missingFromBuild.join(", ")} -- add "-w <name>" to package.json's scripts.build`,
-  );
-  assert.deepEqual(
-    missingFromTest,
-    [],
-    `package(s) missing from root "test" script: ${missingFromTest.join(", ")} -- add "-w <name>" to package.json's scripts.test`,
-  );
+  assert.match(rootPkg.scripts.build, /turbo run build/, 'root "build" script must invoke "turbo run build"');
+  assert.match(rootPkg.scripts.test, /turbo run test/, 'root "test" script must invoke "turbo run test"');
 });
 
 test('root build/test scripts contain no stale "-w" entries for packages that no longer exist', () => {
