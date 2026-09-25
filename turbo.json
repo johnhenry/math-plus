@@ -1,0 +1,60 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [
+    "tsconfig.base.json"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "dist/**"
+      ],
+      "cache": true
+    },
+    "typecheck": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [],
+      "cache": true
+    },
+    "test": {
+      "dependsOn": [
+        "build"
+      ],
+      "outputs": [],
+      "cache": true
+    },
+    "test:bun": {
+      "dependsOn": [
+        "build"
+      ],
+      "outputs": [],
+      "cache": true
+    },
+    "test:deno": {
+      "dependsOn": [
+        "build"
+      ],
+      "outputs": [],
+      "cache": true
+    },
+    "test:bench": {
+      "cache": false
+    },
+    "bench": {
+      "cache": false
+    },
+    "build:wasm": {
+      "cache": false
+    },
+    "build:wasm:scalar": {
+      "cache": false
+    },
+    "build:wasm:simd": {
+      "cache": false
+    }
+  }
+}
