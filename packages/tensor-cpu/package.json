@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@johnhenry/math-plus-tensor-core": "^0.2.1",
-    "@johnhenry/tensor-backend": "^0.3.0"
+    "@johnhenry/tensor-backend": "^0.4.0"
   },
   "devDependencies": {
     "@johnhenry/backend-cpu": "0.2.0"
