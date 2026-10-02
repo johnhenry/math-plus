@@ -1,5 +1,14 @@
 # @johnhenry/math-plus-tensor-mlx
 
+## 0.2.3
+
+### Patch Changes
+
+- 7eee743: Track the 13-dtype backend releases: `@johnhenry/tensor-backend` `^0.4.0` (whose `DType` has the full dtype set these facades now implement; `^0.3.0` resolved to the published 0.3.0 with five dtypes, which broke type-checking), `@johnhenry/backend-webgpu` `^0.6.0` (u32 support the WebGPU facade relies on; 0.4.x crashed on u32 cases) and `@johnhenry/backend-mlx` `^0.5.0` (wide-dtype MLX). Each facade and its backend now share one `tensor-backend` 0.4.
+- Updated dependencies [7eee743]
+- Updated dependencies [a075fe4]
+  - @johnhenry/math-plus-tensor-cpu@0.3.0
+
 ## 0.2.2
 
 ### Patch Changes
