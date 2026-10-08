@@ -25,14 +25,20 @@ concurrency:
 
 jobs:
   publish:
+    runs-on: ubuntu-latest
     permissions:
-      contents: write # tag + GitHub Release by-product of pypi-publish.yml
+      contents: write # tag + GitHub Release by-product
       id-token: write # PyPI OIDC trusted publishing
-    uses: johnhenry/workflows/.github/workflows/pypi-publish.yml@v1
-    with:
-      package-name: johnhenry-math-plus-interop
-      working-directory: packages/interop-python
-      # Runs only when the version is new on PyPI, before the build.
-      gate-commands: |
-        pip install pytest pyarrow pandas numpy -e .
-        python3 -m pytest tests/ -v
+    steps:
+      - uses: actions/checkout@v4
+      # Composite action: runs inside THIS job, so PyPI sees this file as the
+      # OIDC job_workflow_ref (a reusable workflow from another repo is
+      # rejected as invalid-publisher).
+      - uses: johnhenry/workflows/.github/actions/pypi-publish@v1
+        with:
+          package-name: johnhenry-math-plus-interop
+          working-directory: packages/interop-python
+          # Runs only when the version is new on PyPI, before the build.
+          gate-commands: |
+            pip install pytest pyarrow pandas numpy -e .
+            python3 -m pytest tests/ -v

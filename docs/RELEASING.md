@@ -75,8 +75,9 @@ swallowed.
 ### Publishing
 
 Main is the release branch: bump `version` in `packages/interop-python/pyproject.toml` in a PR and
-merge it. The push to `main` runs `release-interop-python.yml` (a thin caller of
-`johnhenry/workflows`' `pypi-publish.yml`), which publishes only if that version is not on PyPI yet,
+merge it. The push to `main` runs `release-interop-python.yml` (an inline job using
+`johnhenry/workflows`' `pypi-publish` composite action, so PyPI sees this file as the
+OIDC `job_workflow_ref`; a reusable workflow from another repo is rejected), which publishes only if that version is not on PyPI yet,
 verifies it appears, then tags `johnhenry-math-plus-interop-v<version>` and creates a GitHub
 Release. Any other push to `main` is a green no-op. `workflow_dispatch` re-runs it (e.g. after fixing
 a Trusted Publishing misconfiguration). The conformance suite runs as a gate before the build.
