@@ -53,7 +53,7 @@ outside both the npm and Cargo workspaces, released separately.
 ## PyPI (`interop-python`, issue #21)
 
 `packages/interop-python` ships to PyPI as **`johnhenry-math-plus-interop`**, on its own
-tag-triggered release cadence (`.github/workflows/release-interop-python.yml`) — independent of the
+release cadence (`.github/workflows/release-interop-python.yml`, push-to-`main` like the other publish workflows) — independent of the
 npm/JSR Changesets flow above, since it's a different package manager, versioning scheme, and
 release cadence entirely.
 
@@ -68,19 +68,18 @@ Like the JSR job below, this uses OIDC — no token to store — but needs a one
    workflow `release-interop-python.yml`, environment (leave blank unless you've configured one).
 
 Until that's done, `release-interop-python.yml` fails at the publish step (no token, no configured
-trusted publisher) — it isn't `continue-on-error` like the JSR job, since a failed *tag push*
-release should be visibly red, not silently swallowed.
+trusted publisher) whenever the version in `pyproject.toml` is not on PyPI — it isn't
+`continue-on-error` like the JSR job, since a failed release should be visibly red, not silently
+swallowed.
 
 ### Publishing
 
-```bash
-# bump the version in packages/interop-python/pyproject.toml first
-git tag johnhenry-math-plus-interop-v0.0.1
-git push origin johnhenry-math-plus-interop-v0.0.1
-```
-
-`workflow_dispatch` re-runs the publish without a new tag (e.g. after fixing a Trusted Publishing
-misconfiguration).
+Main is the release branch: bump `version` in `packages/interop-python/pyproject.toml` in a PR and
+merge it. The push to `main` runs `release-interop-python.yml` (a thin caller of
+`johnhenry/workflows`' `pypi-publish.yml`), which publishes only if that version is not on PyPI yet,
+verifies it appears, then tags `johnhenry-math-plus-interop-v<version>` and creates a GitHub
+Release. Any other push to `main` is a green no-op. `workflow_dispatch` re-runs it (e.g. after fixing
+a Trusted Publishing misconfiguration). The conformance suite runs as a gate before the build.
 
 ## JSR (dual publish, issue #25)
 

@@ -241,7 +241,3 @@ jobs:
 
   workflow-lint:
     uses: johnhenry/workflows/.github/workflows/workflow-lint.yml@v1
-    with:
-      # release-interop-python.yml is a tag-triggered PyPI release (PyPI trusted
-      # publishing, not npm) and is intentionally outside the npm publish model.
-      publish-workflows: ".github/workflows/release.yml"
