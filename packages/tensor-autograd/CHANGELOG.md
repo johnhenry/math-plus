@@ -1,5 +1,11 @@
 # @johnhenry/math-plus-tensor-autograd
 
+## 0.1.4
+
+### Patch Changes
+
+- 4cc6552: Variable ids now come from a process-wide counter (a `Symbol.for` slot on `globalThis`), so a second bundled copy of the module (e.g. from esm.sh) no longer produces colliding ids that break `backward()` (#170).
+
 ## 0.1.3
 
 ### Patch Changes
