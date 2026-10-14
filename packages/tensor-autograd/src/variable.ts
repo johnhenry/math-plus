@@ -86,7 +86,19 @@ interface TapeNode {
   backwardFn: (gradOutput: Tensor) => readonly (Tensor | undefined)[];
 }
 
-let nextId = 0;
+/**
+ * Variable ids come from a process-wide counter keyed on a global symbol, not
+ * a module-local `let`. CDN bundlers (esm.sh) can inline a second copy of this
+ * module into another entry, and a per-copy counter makes ids collide on the
+ * tape (issue #170). `Symbol.for` makes every copy share one counter.
+ */
+const ID_COUNTER_KEY = Symbol.for("@johnhenry/math-plus-tensor-autograd/nextVariableId");
+function takeId(): number {
+  const g = globalThis as unknown as Record<symbol, number | undefined>;
+  const id = g[ID_COUNTER_KEY] ?? 0;
+  g[ID_COUNTER_KEY] = id + 1;
+  return id;
+}
 
 export class Variable {
   /**
@@ -110,7 +122,7 @@ export class Variable {
     this.value = value;
     this.requiresGrad = requiresGrad;
     this.node = node;
-    this.id = nextId++;
+    this.id = takeId();
   }
 
   /** A leaf that accumulates gradients on `.backward()`. */
