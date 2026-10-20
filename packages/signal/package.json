@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-signal",
-  "version": "0.0.5",
+  "version": "0.1.0",
   "description": "convolve/stft/istft/findPeaks/sosFilter/butter/resamplePoly for math-plus (issue #44) — v2/v3 SciPy-equivalent bundle, the signal-processing slice",
   "type": "module",
   "exports": {
