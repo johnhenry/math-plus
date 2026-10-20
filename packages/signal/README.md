@@ -43,9 +43,22 @@ findPeaks(Tensor.from(x, { dtype: "f64" }), { distance: 4 });
 |---|---|
 | Convolution | `convolve`, `convolve1D`, `correlate`, `correlate1D`, `correlate2D` (true 2-D, FFT-based, `"full"` only), `applyTimeDomainOp` |
 | Spectral | `stft`, `istft`, `welch`, `hannWindow`, `hammingWindow` |
-| Filters | `butter` (lowpass/highpass/bandpass/bandstop, SOS output only), `sosFilter`, `freqz` |
+| Filters | `butter` (lowpass/highpass/bandpass/bandstop, SOS output only), `sosFilter`, `sosfiltfilt` (zero-phase, scipy's odd padding + steady-state `zi`; 1-D, `padlen` option), `freqz` |
 | Peaks | `findPeaks` (`height`/`distance`/`prominence` options, scipy semantics) |
 | Resampling | `resamplePoly(signal, up, down)` — positional integer args, GCD-reduced |
+
+## Browser / Web Worker entry
+
+```js
+import { Tensor, rfft, welch, stft, butter, sosfiltfilt, findPeaks, resamplePoly }
+  from "@johnhenry/math-plus-signal/web";
+```
+
+`/web` re-exports exactly the spectral + filtering surface above (plus
+`Tensor`/`ComplexTensor`, `sosFilter`) from one specifier. Nothing reachable
+from it uses Node built-ins or Node globals; `test/web-entry.test.ts` checks
+the built import graph and loads the entry with `process`/`Buffer`/`require`
+removed. It ships unbundled ESM: use a bundler or an ESM CDN for a single file.
 
 ## Traps
 
