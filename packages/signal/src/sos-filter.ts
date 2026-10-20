@@ -18,9 +18,21 @@ export function sosFilter(sos: Sos, signal: Tensor): Tensor {
   // Read-only below (each section reads `data[n]` into a fresh `out`
   // array, then rebinds `data = out` -- the original array is never
   // mutated in place), so no defensive copy is needed here.
-  let data = signal.contiguous().data as Float64Array;
+  const data = sosFilterRaw(sos, signal.contiguous().data as Float64Array, undefined);
+  return Tensor.fromTypedArray(data, [data.length], { dtype: "f64" });
+}
 
-  for (const section of sos) {
+/**
+ * The shared cascade kernel behind `sosFilter` and `sosfiltfilt`. `zi`, when
+ * given, holds one `[z1, z2]` initial state per section, already scaled to
+ * the signal (scipy's `sosfilt(..., zi=)`).
+ *
+ * @internal
+ */
+export function sosFilterRaw(sos: Sos, input: Float64Array, zi: ReadonlyArray<readonly [number, number]> | undefined): Float64Array {
+  let data = input;
+  for (let s = 0; s < sos.length; s++) {
+    const section = sos[s] as SosSection;
     const [b0raw, b1raw, b2raw, a0, a1raw, a2raw] = section;
     if (a0 === 0) throw new RangeError("sosFilter: a section's a0 coefficient must be nonzero");
     const b0 = b0raw / a0;
@@ -30,8 +42,8 @@ export function sosFilter(sos: Sos, signal: Tensor): Tensor {
     const a2 = a2raw / a0;
 
     const out = new Float64Array(data.length);
-    let z1 = 0;
-    let z2 = 0;
+    let z1 = zi ? (zi[s] as readonly [number, number])[0] : 0;
+    let z2 = zi ? (zi[s] as readonly [number, number])[1] : 0;
     for (let n = 0; n < data.length; n++) {
       const x = data[n] as number;
       const y = b0 * x + z1;
@@ -41,6 +53,5 @@ export function sosFilter(sos: Sos, signal: Tensor): Tensor {
     }
     data = out;
   }
-
-  return Tensor.fromTypedArray(data, [data.length], { dtype: "f64" });
+  return data;
 }

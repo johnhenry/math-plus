@@ -12,6 +12,7 @@ export { findPeaks, type FindPeaksOptions, type FindPeaksResult } from "./find-p
 export { freqz, type FreqzResult } from "./freqz.ts";
 export { resamplePoly } from "./resample.ts";
 export { sosFilter, type Sos, type SosSection } from "./sos-filter.ts";
+export { sosfiltfilt, type SosfiltfiltOptions } from "./sosfiltfilt.ts";
 export { istft, stft, type StftOptions } from "./stft.ts";
 export { welch, type WelchOptions } from "./welch.ts";
 export { hammingWindow, hannWindow } from "./window.ts";
