@@ -12,9 +12,11 @@ import { closeScaled, maxAbs, runScipyOracle, SCIPY_17_PLUS, SCIPY_SKIP_REASON }
 const TOL = 1e-12;
 /**
  * chebwin is an inverse DFT of the Chebyshev polynomial's samples (as in SciPy), so its last bits depend on the FFT
- * rounding of whichever NumPy is installed: ~1.4e-12 against NumPy 2.5 at n = 255. It is held to 1e-11.
+ * rounding of whichever NumPy build CI installs, and the error grows with n: against NumPy 2.5 / SciPy 1.18 on CI it
+ * was ~1.4e-12 at n = 255 and ~6e-11 at n = 2001, though the same cases passed at 1e-12 on an earlier run. It is held
+ * to 1e-9, still far below anything a window's user could see.
  */
-const CHEB_TOL = 1e-11;
+const CHEB_TOL = 1e-9;
 const CHEB = new Set(["chebwin", "cheb"]);
 
 interface Case {
