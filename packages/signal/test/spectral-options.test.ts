@@ -45,7 +45,8 @@ test("getWindow: periodic hann/hamming/blackman/boxcar/rectangular match closed 
 
 test("getWindow: unknown names, bad lengths and wrong-length arrays throw", () => {
   assert.throws(() => getWindow("kaiser" as never, 8), RangeError);
-  assert.throws(() => getWindow("hann", 0), RangeError);
+  assert.throws(() => getWindow("hann", -1), RangeError);
+  assert.equal(getWindow("hann", 0).length, 0, "length 0 is an empty window, as in SciPy");
   assert.throws(() => getWindow(new Float64Array(7), 8), RangeError);
   const mine = Float64Array.from([1, 2, 3]);
   assert.deepEqual(Array.from(getWindow(mine, 3)), [1, 2, 3]);
@@ -103,7 +104,8 @@ test("welch: rejects bad options", () => {
   assert.throws(() => welch(t, { nperseg: 64, nfft: 32 }), RangeError);
   assert.throws(() => welch(t, { detrend: "quadratic" as never }), RangeError);
   assert.throws(() => welch(t, { scaling: "none" as never }), RangeError);
-  assert.throws(() => welch(t, { average: "max" as never }), RangeError);
+  assert.throws(() => welch(t, { nperseg: 64, average: "max" as never }), RangeError);
+  assert.doesNotThrow(() => welch(t, { average: "max" as never }), "SciPy only checks `average` when there is more than one segment");
   assert.throws(() => welch(t, { nperseg: 64, window: new Float64Array(10) }), RangeError);
   assert.throws(() => welch(t, { nperseg: 64, noverlap: 64 }), RangeError);
   assert.doesNotThrow(() => welch(t, { nperseg: 64, nfft: 96 })); // non-power-of-two nfft is fine now
@@ -190,15 +192,18 @@ test("stft: returns { freqs, times, Zxx } with Zxx shaped [freqs, times] and Sci
   assert.ok(!("frames" in none));
 });
 
-test("stft: scaling 'none' is the raw windowed FFT (= 'spectrum' times sum(window)); 'density' aliases 'psd'", () => {
+test("stft/istft: scaling is SciPy's 'spectrum' or 'psd' only ('density' and 'none' are errors, as in SciPy)", () => {
   const t = tensorOf(signalOf(300, 11));
   const spec = zParts(stft(t, { nperseg: 64 }).Zxx);
-  const none = zParts(stft(t, { nperseg: 64, scaling: "none" }).Zxx);
-  const sumW = (getWindow("hann", 64) as Float64Array).reduce((a, b) => a + b, 0);
-  closeScaled(none.re, spec.re.map((v) => v * sumW), maxAbs(none.re), "none vs spectrum");
-  const a = zParts(stft(t, { nperseg: 64, scaling: "density" }).Zxx);
-  const b = zParts(stft(t, { nperseg: 64, scaling: "psd" }).Zxx);
-  assert.deepEqual(a.re, b.re);
+  const psd = zParts(stft(t, { nperseg: 64, scaling: "psd" }).Zxx);
+  const w = getWindow("hann", 64) as Float64Array;
+  const sumW = w.reduce((a, b) => a + b, 0);
+  const sumW2 = w.reduce((a, b) => a + b * b, 0);
+  closeScaled(psd.re, spec.re.map((v) => (v * sumW) / Math.sqrt(sumW2)), maxAbs(psd.re), "psd vs spectrum");
+  for (const bad of ["density", "none"] as const) {
+    assert.throws(() => stft(t, { nperseg: 64, scaling: bad as never }), RangeError);
+    assert.throws(() => istft(stft(t, { nperseg: 64 }).Zxx, { nperseg: 64, scaling: bad as never }), RangeError);
+  }
 });
 
 test("stft: rejects bad options", () => {
@@ -229,7 +234,7 @@ test("stft matches scipy.signal.stft for combinations of fs, onesided, detrend, 
     for (const [nperseg, nfft] of shapes) {
       for (const onesided of [false, true]) {
         for (const detrend of DETRENDS) {
-          for (const scaling of ["spectrum", "psd", "density"] as const) {
+          for (const scaling of ["spectrum", "psd"] as const) {
             for (const window of WINDOWS) {
               const noverlap = [undefined, 0, Math.floor(nperseg * 0.75)][cases % 3];
               const boundary = boundaries[cases % boundaries.length];

@@ -133,15 +133,17 @@ test("getWindow: periodic is the default, a 1-sample window is [1], arrays pass 
     { spec: ["exponential", 2, 3], fftbins: false },
     { spec: ["taylor", 0] },
   ];
-  const wants = runScipyOracle<Array<{ error?: string }>>({
+  const wants = runScipyOracle<Array<{ error?: string; error_type?: string }>>({
     op: "batch",
     jobs: bad.map((b) => ({ op: "get_window", expect_error: true, window: pyWindow(b.spec), n: b.n ?? 8, fftbins: b.fftbins ?? true })),
   });
   bad.forEach((b, i) => {
     assert.ok((wants[i] as { error?: string }).error, `SciPy accepts ${JSON.stringify(b.spec)} (the test expects it to reject it)`);
-    assert.throws(() => getWindow(b.spec as never, b.n ?? 8, b.fftbins ?? true), RangeError, JSON.stringify(b.spec));
+    // SciPy's ValueError is a RangeError here; its TypeError (wrong parameter count) is a TypeError
+    const cls = (wants[i] as { error_type?: string }).error_type === "TypeError" ? TypeError : RangeError;
+    assert.throws(() => getWindow(b.spec as never, b.n ?? 8, b.fftbins ?? true), cls, JSON.stringify(b.spec));
   });
-  assert.throws(() => getWindow("hann", 0), RangeError);
+  assert.throws(() => getWindow("hann", -1), RangeError);
   assert.throws(() => getWindow(new Float64Array(3), 4), RangeError);
 });
 
@@ -388,7 +390,7 @@ test("N-D: validation of axes and dimensions", () => {
   assert.throws(() => welch(t, { axis: 2 }), RangeError);
   assert.throws(() => welch(t, { axis: -3 }), RangeError);
   assert.throws(() => stft(t, { axis: 5 }), RangeError);
-  assert.throws(() => welch(t, { axis: 1.5 }), RangeError);
+  assert.doesNotThrow(() => welch(t, { axis: 1.5 }), "SciPy does int(axis)");
   const Z = stft(t).Zxx;
   assert.throws(() => istft(Z, { freqAxis: 1, timeAxis: 1 }), RangeError);
   assert.throws(() => istft(Z, { freqAxis: -1, timeAxis: 2 }), RangeError); // the same axis, written two ways
@@ -687,7 +689,7 @@ test("istft: with no onWarning a failed NOLA check goes to console.warn; a passi
     istft(Zxx, { nperseg: 16, noverlap: 0, boundary: false });
     assert.equal(logged.length, 1);
     assert.match(logged[0] as string, /NOLA/);
-    istft(stft(t).Zxx);
+    istft(stft(t, { onWarning: () => {} }).Zxx);
     assert.equal(logged.length, 1, "the default round trip satisfies NOLA");
   } finally {
     console.warn = original;

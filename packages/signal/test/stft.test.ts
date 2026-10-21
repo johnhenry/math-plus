@@ -30,7 +30,6 @@ test("stft: each frame's spectrum matches an independently-computed windowed-fra
     onesided: false,
     boundary: null,
     padded: false,
-    scaling: "none",
   });
 
   const window = hannWindow(nperseg);
@@ -39,9 +38,10 @@ test("stft: each frame's spectrum matches an independently-computed windowed-fra
     x: signal.slice(0, nperseg),
     window: Array.from(window),
   });
+  const sumW = window.reduce((a, b) => a + b, 0); // the default scaling is "spectrum": X / sum(w)
   for (let k = 0; k < nperseg; k++) {
-    assert.ok(Math.abs((Zxx.real.at(k, 0) as number) - (oracle.real[k] as number)) < 1e-9, `real[${k}]`);
-    assert.ok(Math.abs((Zxx.imag.at(k, 0) as number) - (oracle.imag[k] as number)) < 1e-9, `imag[${k}]`);
+    assert.ok(Math.abs((Zxx.real.at(k, 0) as number) - (oracle.real[k] as number) / sumW) < 1e-9, `real[${k}]`);
+    assert.ok(Math.abs((Zxx.imag.at(k, 0) as number) - (oracle.imag[k] as number) / sumW) < 1e-9, `imag[${k}]`);
   }
 });
 

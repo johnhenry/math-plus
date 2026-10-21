@@ -7,7 +7,8 @@
 import { ComplexTensor } from "@johnhenry/math-plus-fft";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { type DftPlan, planDft } from "./dft.ts";
-import { isComplexTensor } from "./nd.ts";
+import { isComplexTensor, type Rows } from "./nd.ts";
+import { emitWarning, type WarningOptions } from "./warn.ts";
 import { getWindow, type WindowSpec } from "./window.ts";
 
 /**
@@ -20,35 +21,24 @@ import { getWindow, type WindowSpec } from "./window.ts";
 export type DetrendFunction = (segment: Tensor | ComplexTensor) => Tensor | ComplexTensor | Float64Array;
 export type Detrend = false | "constant" | "linear" | DetrendFunction;
 
-/**
- * Where warnings go. SciPy's `warnings.warn` becomes `onWarning(message)`; without a callback the message goes to
- * `console.warn`. Pass `() => {}` to silence them.
- */
-export interface WarningOptions {
-  readonly onWarning?: (message: string) => void;
-}
-
-export function emitWarning(options: WarningOptions, message: string): void {
-  if (options.onWarning) options.onWarning(message);
-  else console.warn(message);
-}
+export { emitWarning, type WarningOptions };
 /** How `stft` extends the signal by `floor(nperseg / 2)` samples at both ends (`scipy.signal.stft`'s `boundary`); `null` = no extension. */
 export type Boundary = "zeros" | "even" | "odd" | "constant" | null;
 
 export interface SegmentOptions extends WarningOptions {
   /** Sample rate; default 1. Frequencies come out in the same unit (hertz for samples per second). */
   readonly fs?: number;
-  /** Window: a name, a `(name, param)` tuple or a number (all periodic, as `scipy.signal.get_window`) or a `Float64Array` (its length then sets `nperseg`). Default `"hann"`. */
+  /** Window: a name (any of `get_window`'s, see `WINDOW_NAMES`), a `(name, param, ...)` tuple (both periodic, as `scipy.signal.get_window`) or a `Float64Array` (its length then sets `nperseg`). A bare number is not a window here (SciPy rejects it too). Default `"hann"`. */
   readonly window?: WindowSpec;
-  /** Segment length, any positive integer; default `min(256, signal.length)` (a longer request is clamped, as SciPy does). */
+  /** Segment length, truncated to an integer as Python's `int()` does; default `min(256, signal.length)` (a longer request is clamped with SciPy's warning). */
   readonly nperseg?: number;
-  /** Samples shared by consecutive segments, `[0, nperseg)`; default `floor(nperseg / 2)`. */
+  /** Samples shared by consecutive segments, below `nperseg` (negative leaves gaps); truncated to an integer; default `floor(nperseg / 2)`. */
   readonly noverlap?: number;
-  /** DFT length, any integer `>= nperseg` (not just powers of two); each segment is zero-padded to it. Default: `nperseg`. */
+  /** DFT length, any integer `>= nperseg` (not just powers of two; truncated to an integer); each segment is zero-padded to it. Default: `nperseg`. */
   readonly nfft?: number;
   /** Removed from each segment before windowing: `"constant"` (mean), `"linear"` (least-squares line), a function `(segment) -> segment` ({@link DetrendFunction}) or `false`. Default: `"constant"` for `welch`, `false` for `stft` (SciPy's own defaults). */
   readonly detrend?: Detrend;
-  /** Keep only the `floor(nfft / 2) + 1` bins from DC up (real input). Default `true`; `false` keeps all `nfft` bins. Complex input is always two-sided (`stft` warns when you left this on, as SciPy does; `welch` switches silently, as SciPy does). */
+  /** Keep only the `floor(nfft / 2) + 1` bins from DC up (real input). Default `true`; `false` keeps all `nfft` bins. Complex input is always two-sided (`stft` and `spectrogram` warn when you left this on, as SciPy does; `welch`, `csd`, `periodogram` and `coherence` switch silently, as SciPy does). */
   readonly onesided?: boolean;
 }
 
@@ -82,12 +72,78 @@ export interface ResolveExtras {
   readonly defaultDetrend: Detrend;
   readonly boundary?: Boundary;
   readonly padded?: boolean;
-  /** Emit SciPy's "Input data is complex, switching to onesided=false" warning (`stft` does, `welch` does not). */
+  /** Emit SciPy's "Input data is complex, switching to return_onesided=False" warning (`stft` and `spectrogram` do; `welch`, `csd` do not). */
   readonly warnComplexOnesided?: boolean;
+  /**
+   * Which SciPy code path's rules apply. `"csd"` (`welch`, `csd`, `periodogram`, `coherence`): `nperseg` defaults to 256
+   * for a named window and to the window's length for an array; a longer `nperseg` warns and clamps for a named window.
+   * `"helper"` (`stft`, `spectrogram`): `nperseg` given is compared with an array window's length, and an array window
+   * longer than the signal is an error. Default `"csd"`.
+   */
+  readonly family?: "csd" | "helper";
+  /** `noverlap` when not given, from the resolved `nperseg`; default `floor(nperseg / 2)` (`spectrogram` uses `floor(nperseg / 8)`). */
+  readonly defaultNoverlap?: (nperseg: number) => number;
 }
 
 const DEFAULT_NPERSEG = 256;
 const BOUNDARIES = ["zeros", "even", "odd", "constant"];
+
+/** Python's `int(v)` for the numbers SciPy takes as sizes: truncation toward zero; NaN and infinities are errors. */
+export function toInt(who: string, name: string, v: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) throw new RangeError(`${who}: ${name} must be a finite number, got ${String(v)}`);
+  return Math.trunc(v);
+}
+
+/** Re-throw an error from `getWindow` as `who`'s, keeping its class (`TypeError` for a wrong parameter count or type, else `RangeError`). */
+export function rethrowWindowError(who: string, e: unknown): never {
+  const message = `${who}: ${(e as Error).message.replace(/^getWindow: /, "")}`;
+  throw e instanceof TypeError ? new TypeError(message) : new RangeError(message);
+}
+
+/** `scipy.signal.windows`-style `window` argument that is neither a name nor a tuple nor an array. */
+function checkWindowKind(who: string, spec: unknown, family: "csd" | "helper"): void {
+  if (spec instanceof Float64Array || typeof spec === "string" || Array.isArray(spec)) return;
+  if (family === "helper") throw new RangeError(`${who}: window must be 1-D`); // np.asarray(4.0).shape is ()
+  throw new TypeError(`${who}: window must be a name, a (name, parameter, ...) tuple or a Float64Array, got ${typeof spec}`);
+}
+
+/**
+ * The window and `nperseg` SciPy's rules give for an input of `length` samples (`csd`'s or `_triage_segments`'s,
+ * per `family`), with SciPy's warning when a longer `nperseg` is clamped.
+ */
+export function triageSegments(who: string, length: number, options: SegmentOptions, family: "csd" | "helper"): { window: Float64Array; nperseg: number } {
+  const spec = options.window ?? "hann";
+  checkWindowKind(who, spec, family);
+  let nperseg = options.nperseg === undefined ? undefined : family === "helper" ? toInt(who, "nperseg", options.nperseg) : options.nperseg;
+  if (spec instanceof Float64Array) {
+    if (family === "helper") {
+      if (length < spec.length) throw new RangeError(`${who}: window is longer than input signal`);
+      if (nperseg !== undefined && nperseg !== spec.length) throw new RangeError(`${who}: value specified for nperseg is different from length of window`);
+    } else if (nperseg !== undefined && nperseg !== spec.length) {
+      throw new RangeError(`${who}: nperseg=${nperseg} does not equal len(win)=${spec.length}`);
+    }
+    return { window: spec, nperseg: spec.length };
+  }
+  if (family === "csd") {
+    nperseg = options.nperseg === undefined ? DEFAULT_NPERSEG : toInt(who, "nperseg", options.nperseg);
+    if (nperseg < 1) throw new RangeError(`${who}: Parameter nperseg=${nperseg} is not a positive integer!`);
+    if (length < nperseg) {
+      emitWarning(options, `nperseg=${nperseg} is greater than signal length max(len(x), len(y)) = ${length}, using nperseg = ${length}`);
+      nperseg = length;
+    }
+  } else {
+    nperseg = nperseg ?? DEFAULT_NPERSEG;
+    if (nperseg > length) {
+      emitWarning(options, `nperseg = ${nperseg} is greater than input length  = ${length}, using nperseg = ${length}`);
+      nperseg = length;
+    }
+  }
+  try {
+    return { window: getWindow(spec, nperseg, true, options), nperseg };
+  } catch (e) {
+    return rethrowWindowError(who, e);
+  }
+}
 
 /** `scipy.signal`'s `even_ext`/`odd_ext`/`const_ext`/`zero_ext` by `n` samples at each end. */
 function extend(who: string, x: Float64Array, n: number, kind: Exclude<Boundary, null>): Float64Array {
@@ -123,28 +179,16 @@ function extend(who: string, x: Float64Array, n: number, kind: Exclude<Boundary,
 export function resolveSegments(who: string, length: number, complex: boolean, options: SegmentOptions, extras: ResolveExtras): ResolvedSegments {
   const fs = options.fs ?? 1;
   if (!(fs > 0) || !Number.isFinite(fs)) throw new RangeError(`${who}: fs must be a finite number above 0, got ${fs}`);
-  const spec = options.window ?? "hann";
   if (length < 1) throw new RangeError(`${who}: signal must not be empty`);
-
-  let nperseg: number;
-  if (spec instanceof Float64Array) {
-    nperseg = options.nperseg ?? spec.length;
-    if (nperseg !== spec.length) throw new RangeError(`${who}: nperseg (${nperseg}) differs from the window's length (${spec.length})`);
-    if (length < nperseg) throw new RangeError(`${who}: window is longer than the signal (${nperseg} > ${length})`);
-  } else {
-    nperseg = options.nperseg ?? DEFAULT_NPERSEG;
-    if (!Number.isInteger(nperseg) || nperseg < 1) throw new RangeError(`${who}: nperseg must be a positive integer, got ${nperseg}`);
-    if (nperseg > length) nperseg = length; // SciPy warns and uses the whole signal
-  }
+  const family = extras.family ?? "csd";
+  // (`_spectral_helper` checks a given nperseg before it sets the window up; `spectrogram`'s own triage does not, hence not in triageSegments)
+  if (family === "helper" && options.nperseg !== undefined && toInt(who, "nperseg", options.nperseg) < 1) throw new RangeError(`${who}: nperseg must be a positive integer`);
+  const { window, nperseg } = triageSegments(who, length, options, family);
   if (!Number.isInteger(nperseg) || nperseg < 1) throw new RangeError(`${who}: nperseg must be a positive integer, got ${nperseg}`);
-  const noverlap = options.noverlap ?? Math.floor(nperseg / 2);
-  if (!Number.isInteger(noverlap) || noverlap < 0 || noverlap >= nperseg) {
-    throw new RangeError(`${who}: noverlap (${noverlap}) must be an integer in [0, nperseg) (nperseg=${nperseg})`);
-  }
-  const nfft = options.nfft ?? nperseg;
-  if (!Number.isInteger(nfft) || nfft < nperseg) {
-    throw new RangeError(`${who}: nfft must be an integer >= nperseg (${nperseg}), got ${nfft}`);
-  }
+  const noverlap = options.noverlap === undefined ? (extras.defaultNoverlap ?? ((n: number) => Math.floor(n / 2)))(nperseg) : toInt(who, "noverlap", options.noverlap);
+  if (noverlap >= nperseg) throw new RangeError(`${who}: noverlap=${noverlap} must be less than nperseg=${nperseg}!`);
+  const nfft = options.nfft === undefined ? nperseg : toInt(who, "nfft", options.nfft);
+  if (nfft < nperseg) throw new RangeError(`${who}: nfft=${nfft} must be greater than or equal to nperseg=${nperseg}!`);
   const detrend = options.detrend ?? extras.defaultDetrend;
   if (detrend !== false && detrend !== "constant" && detrend !== "linear" && typeof detrend !== "function") {
     throw new RangeError(`${who}: detrend must be false, "constant", "linear" or a function, got ${String(detrend)}`);
@@ -153,12 +197,6 @@ export function resolveSegments(who: string, length: number, complex: boolean, o
   if (boundary !== null && !BOUNDARIES.includes(boundary)) {
     throw new RangeError(`${who}: boundary must be null, "zeros", "even", "odd" or "constant", got ${String(boundary)}`);
   }
-  let window: Float64Array;
-  try {
-    window = getWindow(spec, nperseg);
-  } catch (e) {
-    throw new RangeError(`${who}: ${(e as Error).message}`);
-  }
   const hop = nperseg - noverlap;
   const padded = extras.padded ?? false;
 
@@ -166,7 +204,7 @@ export function resolveSegments(who: string, length: number, complex: boolean, o
   let extLength = boundary === null ? length : length + 2 * Math.floor(nperseg / 2);
   if (padded) extLength += ((((-(extLength - nperseg)) % hop) + hop) % hop) % nperseg;
   const numFrames = Math.floor((extLength - nperseg) / hop) + 1;
-  if (numFrames < 1) throw new RangeError(`${who}: signal too short (${length} samples) for nperseg=${nperseg}`);
+  if (numFrames < 1 || extLength < nperseg) throw new RangeError(`${who}: signal too short (${length} samples) for nperseg=${nperseg}`);
 
   let sumW = 0;
   let sumW2 = 0;
@@ -177,7 +215,7 @@ export function resolveSegments(who: string, length: number, complex: boolean, o
   let onesided = options.onesided ?? true;
   if (complex && onesided) {
     onesided = false;
-    if (extras.warnComplexOnesided) emitWarning(options, `${who}: input data is complex, switching to onesided=false`);
+    if (extras.warnComplexOnesided) emitWarning(options, "Input data is complex, switching to return_onesided=False");
   }
   return {
     fs,
@@ -290,5 +328,97 @@ export function segmentSpectrum(who: string, start: number, p: ResolvedSegments,
     fr[i] = (sr[i] as number) * w;
     if (si !== null) fi[i] = (si[i] as number) * w;
   }
-  return p.plan.transform(fr, fi, false);
+  const out = p.plan.transform(fr, fi, false);
+  if (si === null) {
+    // The DFT of real data is exactly real at DC and (even nfft) at Nyquist: set the rounding residue to zero, as an
+    // rfft does, so that angle() of those bins is 0 or pi like SciPy's, not a coin toss.
+    out.im[0] = 0;
+    if (p.nfft % 2 === 0) out.im[p.nfft / 2] = 0;
+  }
+  return out;
+}
+
+/** The per-frame spectra of every row, in SciPy's output layout: the input's shape with `axis` replaced by the bins, then the frames last. */
+export interface FrameSpectra {
+  readonly re: Float64Array;
+  /** `null` when only the power was asked for. */
+  readonly im: Float64Array | null;
+  readonly shape: number[];
+}
+
+/**
+ * One windowed `nfft`-point DFT per frame of every row (what `stft`, `spectrogram`, `csd` and `welch` are made of):
+ * the complex spectra times `scale`, or, with `power`, their squared magnitudes `|scale · X|²` (then `im` is `null`).
+ */
+export function frameSpectra(who: string, rows: Rows, p: ResolvedSegments, scale: number, power: boolean): FrameSpectra {
+  const { bins, numFrames } = p;
+  const total = rows.pre * bins * rows.inner * numFrames;
+  const re = new Float64Array(total);
+  const im = power ? null : new Float64Array(total);
+  for (let r = 0; r < rows.rows; r++) {
+    const row = prepareRow(who, p, rows.re.subarray(r * rows.n, (r + 1) * rows.n), rows.im === null ? null : rows.im.subarray(r * rows.n, (r + 1) * rows.n));
+    const pi = Math.floor(r / rows.inner);
+    const ii = r % rows.inner;
+    for (let f = 0; f < numFrames; f++) {
+      const spec = segmentSpectrum(who, f * p.hop, p, row);
+      for (let k = 0; k < bins; k++) {
+        const at = ((pi * bins + k) * rows.inner + ii) * numFrames + f;
+        const a = (spec.re[k] as number) * scale;
+        const b = (spec.im[k] as number) * scale;
+        if (im === null) re[at] = a * a + b * b;
+        else {
+          re[at] = a;
+          im[at] = b;
+        }
+      }
+    }
+  }
+  const shape = [...rows.shape];
+  shape[rows.axis] = bins;
+  shape.push(numFrames);
+  return { re, im, shape };
+}
+
+/** `np.mod` for floats: the result takes the sign of the divisor. */
+function pyMod(a: number, b: number): number {
+  const m = a % b;
+  return m !== 0 && m < 0 !== b < 0 ? m + b : m;
+}
+
+/** `np.unwrap(values, axis=axis)` (`discont` and `period` at their defaults) in place, for a row-major array of `shape`. */
+export function unwrapAlong(values: Float64Array, shape: readonly number[], axis: number): void {
+  const n = shape[axis] as number;
+  if (n < 2) return;
+  let inner = 1;
+  for (let d = axis + 1; d < shape.length; d++) inner *= shape[d] as number;
+  const pre = values.length / (n * inner);
+  const period = 2 * Math.PI;
+  const half = period / 2;
+  for (let a = 0; a < pre; a++) {
+    for (let b = 0; b < inner; b++) {
+      const base = a * n * inner + b;
+      let correction = 0;
+      let previous = values[base] as number;
+      for (let k = 1; k < n; k++) {
+        const at = base + k * inner;
+        const current = values[at] as number;
+        const dd = current - previous;
+        let ddmod = pyMod(dd + half, period) - half;
+        if (ddmod === -half && dd > 0) ddmod = half;
+        let fix = ddmod - dd;
+        if (Math.abs(dd) < half) fix = 0;
+        correction += fix;
+        values[at] = current + correction;
+        previous = current; // the differences are those of the original values
+      }
+    }
+  }
+}
+
+/** Segment-centre times in `1/fs` units (`np.arange(nperseg / 2, n - nperseg / 2 + 1, hop) / fs`, shifted back by `nperseg / 2` when the signal was boundary-extended). */
+export function frameTimes(p: ResolvedSegments): number[] {
+  const shift = p.extended ? p.nperseg / 2 : 0;
+  const times: number[] = [];
+  for (let f = 0; f < p.numFrames; f++) times.push((f * p.hop + p.nperseg / 2 - shift) / p.fs);
+  return times;
 }
