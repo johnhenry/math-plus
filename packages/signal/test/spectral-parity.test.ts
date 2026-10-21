@@ -28,6 +28,7 @@ import {
   pyKw,
   pyWindow,
   runScipyOracle,
+  SCIPY_17_PLUS,
   SCIPY_SKIP_REASON,
   signalOf,
   type StftWant,
@@ -141,7 +142,9 @@ test("getWindow: periodic is the default, a 1-sample window is [1], arrays pass 
     assert.ok((wants[i] as { error?: string }).error, `SciPy accepts ${JSON.stringify(b.spec)} (the test expects it to reject it)`);
     // SciPy's ValueError is a RangeError here; its TypeError (wrong parameter count) is a TypeError
     const cls = (wants[i] as { error_type?: string }).error_type === "TypeError" ? TypeError : RangeError;
-    assert.throws(() => getWindow(b.spec as never, b.n ?? 8, b.fftbins ?? true), cls, JSON.stringify(b.spec));
+    // (SciPy >= 1.17 raises ValueError for a wrong parameter count where 1.16 raises TypeError: see helpers.ts)
+    if (SCIPY_17_PLUS) assert.throws(() => getWindow(b.spec as never, b.n ?? 8, b.fftbins ?? true), (e: unknown) => e instanceof RangeError || e instanceof TypeError, JSON.stringify(b.spec));
+    else assert.throws(() => getWindow(b.spec as never, b.n ?? 8, b.fftbins ?? true), cls, JSON.stringify(b.spec));
   });
   assert.throws(() => getWindow("hann", -1), RangeError);
   assert.throws(() => getWindow(new Float64Array(3), 4), RangeError);

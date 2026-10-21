@@ -5,7 +5,7 @@ const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("
 import { ComplexTensor } from "@johnhenry/math-plus-fft";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { coherence, csd, type DetrendFunction, getWindow, istft, periodogram, type SignalInput, spectrogram, stft, welch } from "../src/index.ts";
-import { closeScaled, flat, flatten, type Kw, maxAbs, pyKw, runScipyOracle, SCIPY_SKIP_REASON, signalOf } from "./helpers.ts";
+import { closeScaled, flat, flatten, type Kw, maxAbs, pyKw, runScipyOracle, SCIPY_17_PLUS, SCIPY_SKIP_REASON, signalOf } from "./helpers.ts";
 
 // periodogram, csd, spectrogram and coherence against scipy.signal, and the empty-input and warning behaviour of every
 // spectral function (welch, csd, periodogram, coherence, spectrogram, stft, istft). Every expectation is SciPy's own
@@ -142,6 +142,9 @@ function compare(what: string, s: Scn, got: { freqs: number[]; times?: number[];
   }
 }
 
+/** What SciPy >= 1.17's get_window says about the two things 1.16 accepts and this package follows. */
+const KNOWN_NEWER_ERRORS = /Parameter Nx=0 is not a positive integer|Invalid window name '[\s+\-.\d]*'/;
+
 /** All scenarios against SciPy in one oracle call. */
 function check(scenarios: readonly Scn[]): void {
   const built = scenarios.map((s) => {
@@ -165,8 +168,19 @@ function check(scenarios: readonly Scn[]): void {
     const yTensor = s.y === "same" ? b.x.tensor : b.y?.tensor;
     const warned: string[] = [];
     if (want.error !== undefined) {
+      if (SCIPY_17_PLUS && KNOWN_NEWER_ERRORS.test(want.error)) {
+        // SciPy >= 1.17's get_window refuses a length of 0 and numeric strings, which 1.16 (this package) accepts (see helpers.ts)
+        try {
+          execute(s, b.x.tensor, yTensor, (m) => warned.push(m));
+        } catch {
+          // (an error is fine too)
+        }
+        return;
+      }
       const cls = /TypeError$/.test(want.error_type ?? "") ? TypeError : RangeError;
-      assert.throws(() => execute(s, b.x.tensor, yTensor, (m) => warned.push(m)), cls, `${what}: SciPy raised ${want.error}`);
+      // (SciPy >= 1.17 raises ValueError where 1.16 raises TypeError for a wrong window parameter count)
+      if (SCIPY_17_PLUS) assert.throws(() => execute(s, b.x.tensor, yTensor, (m) => warned.push(m)), (e: unknown) => e instanceof RangeError || e instanceof TypeError, `${what}: SciPy raised ${want.error}`);
+      else assert.throws(() => execute(s, b.x.tensor, yTensor, (m) => warned.push(m)), cls, `${what}: SciPy raised ${want.error}`);
       return;
     }
     const got = execute(s, b.x.tensor, yTensor, (m) => warned.push(m));
@@ -765,7 +779,8 @@ test("istft takes SciPy's option semantics: int() truncation, negative noverlap,
     const run = () => istft(z, { ...c.opts, onWarning: (m: string) => warned.push(m) } as never);
     const what = JSON.stringify(c.opts, (_, v) => (v instanceof Float64Array ? `Float64Array(${v.length})` : v));
     if (want.error !== undefined) {
-      assert.throws(run, /TypeError$/.test(want.error_type ?? "") ? TypeError : RangeError, `${what}: SciPy raised ${want.error}`);
+      if (SCIPY_17_PLUS) assert.throws(run, (e: unknown) => e instanceof RangeError || e instanceof TypeError, `${what}: SciPy raised ${want.error}`);
+      else assert.throws(run, /TypeError$/.test(want.error_type ?? "") ? TypeError : RangeError, `${what}: SciPy raised ${want.error}`);
       return;
     }
     const got = run();

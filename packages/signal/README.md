@@ -397,6 +397,12 @@ changes a few results and errors:
 
 `npm test`. SciPy differential tests skip (not fail) unless a Python with
 SciPy is found (`MATH_PLUS_SCIPY_ORACLE_PYTHON` / `MATH_PLUS_ORACLE_PYTHON`).
+This package follows **SciPy 1.16**. The tests run against any SciPy, and a
+few expectations that depend on what 1.17 changed in `get_window` (it refuses a
+length of 0 and numeric strings, also accepts `"kaiser_bessel_derived"` and
+`"<name>_periodic"` / `"<name>_symmetric"`, and raises `ValueError` where 1.16
+raises `TypeError`) are compared with an oracle older than 1.17 and checked by
+hand against a newer one.
 `findPeaks`' distance filter carries a regression perf test from issue #101
 (was O(n²): 4594 ms at 40,000 candidate peaks; now near-linear).
 

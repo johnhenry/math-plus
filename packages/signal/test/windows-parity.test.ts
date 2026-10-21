@@ -3,7 +3,7 @@ import { makeTest } from "../../../test/harness.ts";
 // @ts-ignore -- bun types are not installed; only evaluated under Bun (see test/harness.ts)
 const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("bun:test") : null);
 import { getWindow, WINDOW_NAMES } from "../src/index.ts";
-import { closeScaled, maxAbs, runScipyOracle, SCIPY_SKIP_REASON } from "./helpers.ts";
+import { closeScaled, maxAbs, runScipyOracle, SCIPY_17_PLUS, SCIPY_SKIP_REASON } from "./helpers.ts";
 
 // Every window and alias `scipy.signal.get_window` accepts, against SciPy 1.16 itself at 1e-12: the name table
 // (read from SciPy's own `_win_equiv_raw`, not typed from memory), every alias with every parameter set, periodic and
@@ -32,9 +32,17 @@ function runWindows(cases: readonly Case[]): Want[] {
   });
 }
 
+/** The spellings SciPy 1.17+ accepts that 1.16 (which this package follows) does not. */
+const NEWER_ONLY = /^(kaiser_bessel_derived|.*_(periodic|symmetric))$/;
+const nameOf = (w: unknown): unknown => (Array.isArray(w) ? w[0] : w);
+
 /** Our `getWindow` must agree with SciPy on a case: the same values at 1e-12, or an error of the same class, and the same warnings. */
 function agree(c: Case, want: Want, tol = TOL): void {
   const what = `${JSON.stringify(c.window)} n=${c.n} fftbins=${c.fftbins}`;
+  if (SCIPY_17_PLUS) {
+    // SciPy >= 1.17 refuses n = 0 and numeric strings and accepts newer spellings; this package is 1.16's (see helpers.ts)
+    if (c.n === 0 || (typeof c.window === "string" && /^[\s+\-.\d]/.test(c.window)) || NEWER_ONLY.test(String(nameOf(c.window)))) return;
+  }
   const warned: string[] = [];
   let got: Float64Array | undefined;
   let err: unknown;
@@ -46,7 +54,9 @@ function agree(c: Case, want: Want, tol = TOL): void {
   if (want.error !== undefined) {
     assert.ok(err !== undefined, `${what}: SciPy raised ${want.error} but getWindow returned`);
     const typeError = /TypeError$/.test(want.error_type ?? "");
-    assert.ok(typeError ? err instanceof TypeError : err instanceof RangeError, `${what}: SciPy raised ${want.error}; got ${String(err)}`);
+    // (SciPy >= 1.17 raises ValueError where 1.16 raises TypeError for a wrong parameter count)
+    const ok = SCIPY_17_PLUS ? err instanceof TypeError || err instanceof RangeError : typeError ? err instanceof TypeError : err instanceof RangeError;
+    assert.ok(ok, `${what}: SciPy raised ${want.error}; got ${String(err)}`);
   } else {
     assert.ok(err === undefined, `${what}: SciPy returned a window; getWindow threw ${String(err)}`);
     const w = want.w as number[];
@@ -66,7 +76,9 @@ const both = (window: unknown, lengths: readonly number[]): Case[] =>
   lengths.flatMap((n) => [true, false].map((fftbins) => ({ window, n, fftbins })));
 
 test("window names: the table of accepted names is SciPy's own _win_equiv_raw", { skip: SCIPY_SKIP_REASON }, () => {
-  const { table } = runScipyOracle<{ table: [string[], boolean][] }>({ op: "window_table" });
+  const { table: raw } = runScipyOracle<{ table: [string[], boolean][] }>({ op: "window_table" });
+  // (SciPy >= 1.17 adds the spelling "kaiser_bessel_derived", which 1.16 does not accept)
+  const table: [string[], boolean][] = raw.map(([names, needs]) => [names.filter((n) => !NEWER_ONLY.test(n)), needs]);
   assert.deepEqual(
     WINDOW_NAMES.map(([names, needs]) => [names, needs]),
     table,
@@ -206,4 +218,15 @@ test("windows are exactly symmetric where SciPy's are (lanczos, chebwin, dpss, k
   }
   const k = getWindow(["kbd", 5], 64, false);
   for (let i = 0; i < 32; i++) assert.ok(Math.abs((k[i] as number) ** 2 + (k[i + 32] as number) ** 2 - 1) < 1e-12);
+});
+
+test("1.16 corner cases that SciPy 1.17+ changed, checked by hand: empty windows, numeric strings, the underscored kaiser_bessel_derived", () => {
+  for (const w of ["hann", "boxcar", "lanczos", ["kaiser", 5], ["chebwin", 80], ["dpss", 1], ["kbd", 4], ["tukey", 0.2]] as const) {
+    assert.equal(getWindow(w as never, 0, w[0] === "kbd" ? false : true).length, 0, `${JSON.stringify(w)}`);
+  }
+  assert.deepEqual(Array.from(getWindow("4.0" as never, 9)), Array.from(getWindow(4.0, 9)));
+  assert.deepEqual(Array.from(getWindow(" 1e1 " as never, 9)), Array.from(getWindow(10, 9)));
+  assert.throws(() => getWindow(["kaiser_bessel_derived", 4] as never, 8, false), RangeError);
+  assert.throws(() => getWindow(["hann_periodic"] as never, 8), RangeError);
+  assert.throws(() => getWindow(["kbd", 4], 8), RangeError, "periodic kbd");
 });

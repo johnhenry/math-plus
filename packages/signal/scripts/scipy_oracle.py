@@ -187,7 +187,9 @@ def run(job: dict):
     elif op == "window_table":
         # SciPy's own table of window names (the source of truth for the aliases getWindow accepts).
         from scipy.signal.windows import _windows
-        result = {"table": [[list(names), bool(needs)] for names, (_f, needs) in _windows._win_equiv_raw.items()]}
+        # (SciPy 1.17 renamed the table to _WIN_FUNC_DATA and spells "needs parameters" True / False / "OPTIONAL")
+        raw = getattr(_windows, "_win_equiv_raw", None) or _windows._WIN_FUNC_DATA
+        result = {"table": [[list(names), needs is True] for names, (_f, needs) in raw.items()]}
 
     elif op == "periodogram_kw":
         # scipy.signal.periodogram with only the listed kwargs; `x` may be empty (`x_shape`), N-D or complex.
