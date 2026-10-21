@@ -81,3 +81,76 @@ export function withSize(shape: readonly number[], axis: number, size: number, r
 export function checkAxesDistinct(who: string, a: number, b: number): void {
   if (a === b) throw new RangeError(`${who}: must specify differing time and frequency axes`);
 }
+
+/** The shape of a real or complex input. */
+export function shapeOf(input: SignalInput): readonly number[] {
+  return (isComplexTensor(input) ? input.real : input).shape as readonly number[];
+}
+
+export const sizeOf = (shape: readonly number[]): number => shape.reduce((a, b) => a * b, 1);
+
+/** An all-empty real `Tensor` of `shape` (one of whose dimensions is 0). */
+export function emptyTensor(shape: readonly number[]): Tensor {
+  return Tensor.fromTypedArray(new Float64Array(0), [...shape], { dtype: "f64" });
+}
+
+/** `np.broadcast_shapes(a, b)`, or `null` when they do not broadcast. */
+export function broadcastShapes(a: readonly number[], b: readonly number[]): number[] | null {
+  const n = Math.max(a.length, b.length);
+  const out = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    const da = i < n - a.length ? 1 : (a[i - (n - a.length)] as number);
+    const db = i < n - b.length ? 1 : (b[i - (n - b.length)] as number);
+    if (da === db || db === 1) out[i] = da;
+    else if (da === 1) out[i] = db;
+    else return null;
+  }
+  return out;
+}
+
+/** For each element of an array of shape `out` (row-major), the flat index of the element of an array of shape `from` it broadcasts from. */
+export function broadcastMap(out: readonly number[], from: readonly number[]): Uint32Array {
+  const total = sizeOf(out);
+  const map = new Uint32Array(total);
+  if (total === 0) return map;
+  const nd = out.length;
+  const strides = new Array<number>(nd).fill(0); // strides of `from`, 0 along broadcast dimensions
+  let acc = 1;
+  for (let d = from.length - 1; d >= 0; d--) {
+    const od = d + (nd - from.length);
+    strides[od] = from[d] === 1 ? 0 : acc;
+    acc *= from[d] as number;
+  }
+  const idx = new Array<number>(nd).fill(0);
+  let at = 0;
+  for (let i = 0; i < total; i++) {
+    map[i] = at;
+    for (let d = nd - 1; d >= 0; d--) {
+      idx[d] = (idx[d] as number) + 1;
+      at += strides[d] as number;
+      if ((idx[d] as number) < (out[d] as number)) break;
+      at -= (out[d] as number) * (strides[d] as number);
+      idx[d] = 0;
+    }
+  }
+  return map;
+}
+
+/** The first `count` samples along `axis` (`x[..., :count]`), `count <= shape[axis]`. */
+export function sliceAxis(input: SignalInput, axis: number, count: number): SignalInput {
+  const cut = (t: Tensor): Tensor => {
+    const shape = t.shape as readonly number[];
+    const n = shape[axis] as number;
+    let pre = 1;
+    for (let d = 0; d < axis; d++) pre *= shape[d] as number;
+    let inner = 1;
+    for (let d = axis + 1; d < shape.length; d++) inner *= shape[d] as number;
+    const src = valuesOf(t);
+    const out = new Float64Array(pre * count * inner);
+    for (let p = 0; p < pre; p++) out.set(src.subarray(p * n * inner, p * n * inner + count * inner), p * count * inner);
+    const next = shape.slice();
+    next[axis] = count;
+    return Tensor.fromTypedArray(out, next, { dtype: "f64" });
+  };
+  return isComplexTensor(input) ? ComplexTensor.fromParts(cut(input.real), cut(input.imag)) : cut(input);
+}

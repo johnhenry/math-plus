@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
 const pkgJson = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8"));
 
-const EXPORTS = ["rfft", "welch", "stft", "istft", "getWindow", "checkNOLA", "checkCOLA", "butter", "sosfiltfilt", "findPeaks", "resamplePoly"];
+const EXPORTS = ["rfft", "welch", "periodogram", "csd", "coherence", "spectrogram", "stft", "istft", "getWindow", "checkNOLA", "checkCOLA", "butter", "sosfiltfilt", "findPeaks", "resamplePoly"];
 
 test("package.json exposes a ./web entry with types", () => {
   assert.ok(pkgJson.exports["./web"], "exports['./web'] missing");
@@ -21,7 +21,7 @@ test("package.json exposes a ./web entry with types", () => {
   assert.ok(pkgJson.exports["./web"].default);
 });
 
-test("./web exports rfft, welch, stft, butter, sosfiltfilt, findPeaks and resamplePoly", async () => {
+test("./web exports rfft, welch, periodogram, csd, coherence, spectrogram, stft, butter, sosfiltfilt, findPeaks and resamplePoly", async () => {
   const mod = await import("../src/web.ts");
   for (const name of EXPORTS) assert.equal(typeof (mod as Record<string, unknown>)[name], "function", name);
 });
@@ -87,6 +87,12 @@ test("the built ./web entry loads and runs with process, Buffer and require remo
     const spec = m.rfft(t);
     if (!spec) throw new Error("rfft");
     m.welch(t, { nperseg: 64 });
+    m.periodogram(t);
+    m.csd(t, T.from(x.map((v) => 2 * v), { dtype: "f64" }), { nperseg: 64 });
+    m.coherence(t, T.from(x.map((v) => 2 * v), { dtype: "f64" }), { nperseg: 64 });
+    m.spectrogram(t, { nperseg: 64, window: ["chebwin", 60] });
+    m.getWindow(["dpss", 3], 32);
+    if (!Array.isArray(m.WINDOW_NAMES)) throw new Error("WINDOW_NAMES");
     m.stft(t, { nperseg: 64 });
     m.findPeaks(t);
     m.resamplePoly(t, 1, 2);

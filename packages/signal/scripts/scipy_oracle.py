@@ -53,7 +53,8 @@ def _kwargs(kw: dict) -> dict:
 
 def _signal(job: dict, key: str = "x") -> np.ndarray:
     """A (possibly N-D, possibly complex) array from `job[key]` (+ `job[key + '_imag']`)."""
-    x = np.array(job[key], dtype=float)
+    # An empty array of a given shape (JSON cannot carry (3, 0) or (0, 5) data): `<key>_shape`.
+    x = np.zeros(job[key + "_shape"]) if key + "_shape" in job else np.array(job[key], dtype=float)
     if key + "_imag" in job:
         x = x + 1j * np.array(job[key + "_imag"], dtype=float)
     return x
@@ -159,7 +160,7 @@ def run(job: dict):
         # {"tuple": [...]} or an explicit array; `detrend` may be {"fn": name}.
         x = _signal(job)
         f, pxx = signal.welch(x, **_kwargs(job.get("kwargs", {})))
-        result = {"freqs": f.tolist(), "shape": list(pxx.shape), "Pxx": pxx.tolist()}
+        result = {"freqs": f.tolist(), "freqs_shape": list(f.shape), "shape": list(pxx.shape), "Pxx": pxx.tolist()}
 
     elif op == "stft_kw":
         # scipy.signal.stft with only the listed kwargs. Zxx is (..., freq, time) with the frequency axis where `axis` was.
@@ -169,7 +170,7 @@ def run(job: dict):
 
     elif op == "istft_kw":
         # scipy.signal.istft of a spectrogram given as real/imag (any dimensionality).
-        z = _signal(job, "z") if "z" in job else np.array(job["real"], dtype=float) + 1j * np.array(job["imag"], dtype=float)
+        z = _signal(job, "z") if ("z" in job or "z_shape" in job) else np.array(job["real"], dtype=float) + 1j * np.array(job["imag"], dtype=float)
         t, x = signal.istft(z, **_kwargs(job.get("kwargs", {})))
         result = {"times": t.tolist(), "complex": bool(np.iscomplexobj(x)), **_complex_parts(x)}
 
@@ -182,6 +183,37 @@ def run(job: dict):
 
     elif op == "check_cola":
         result = {"ok": bool(signal.check_COLA(_window(job["window"]), job["nperseg"], job["noverlap"], **({"tol": job["tol"]} if "tol" in job else {})))}
+
+    elif op == "window_table":
+        # SciPy's own table of window names (the source of truth for the aliases getWindow accepts).
+        from scipy.signal.windows import _windows
+        # (SciPy 1.17 renamed the table to _WIN_FUNC_DATA and spells "needs parameters" True / False / "OPTIONAL")
+        raw = getattr(_windows, "_win_equiv_raw", None) or _windows._WIN_FUNC_DATA
+        result = {"table": [[list(names), needs is True] for names, (_f, needs) in raw.items()]}
+
+    elif op == "periodogram_kw":
+        # scipy.signal.periodogram with only the listed kwargs; `x` may be empty (`x_shape`), N-D or complex.
+        x = _signal(job)
+        f, pxx = signal.periodogram(x, **_kwargs(job.get("kwargs", {})))
+        result = {"freqs": np.asarray(f).tolist(), "freqs_shape": list(np.shape(f)), "shape": list(pxx.shape), "Pxx": pxx.tolist()}
+
+    elif op == "csd_kw":
+        # scipy.signal.csd(x, y, ...) -- `y` from `y`/`y_imag`/`y_shape`, or the very same object as x when `same` is set.
+        x = _signal(job)
+        y = x if job.get("same") else _signal(job, "y")
+        f, pxy = signal.csd(x, y, **_kwargs(job.get("kwargs", {})))
+        result = {"freqs": np.asarray(f).tolist(), "freqs_shape": list(np.shape(f)), "complex": bool(np.iscomplexobj(pxy)), **_complex_parts(pxy)}
+
+    elif op == "coherence_kw":
+        x = _signal(job)
+        y = x if job.get("same") else _signal(job, "y")
+        f, cxy = signal.coherence(x, y, **_kwargs(job.get("kwargs", {})))
+        result = {"freqs": np.asarray(f).tolist(), "freqs_shape": list(np.shape(f)), "shape": list(cxy.shape), "Cxy": cxy.tolist()}
+
+    elif op == "spectrogram_kw":
+        x = _signal(job)
+        f, t, sxx = signal.spectrogram(x, **_kwargs(job.get("kwargs", {})))
+        result = {"freqs": np.asarray(f).tolist(), "times": np.asarray(t).tolist(), "complex": bool(np.iscomplexobj(sxx)), **_complex_parts(sxx)}
 
     elif op == "windowed_frame_fft":
         # A primitive, version-stable oracle for our own stft's exact
@@ -211,8 +243,10 @@ def run_recorded(job: dict):
         except Exception as e:  # noqa: BLE001 -- reported to the test, which decides whether that was expected
             if not job.get("expect_error"):
                 raise
-            result = {"error": f"{type(e).__name__}: {e}"}
-    result["warnings"] = [str(w.message) for w in caught]
+            result = {"error": f"{type(e).__name__}: {e}", "error_type": type(e).__name__}
+    # SciPy's own `warnings.warn` is a UserWarning; NumPy's RuntimeWarnings (divide by zero ...) are kept apart.
+    result["warnings"] = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+    result["runtime_warnings"] = [str(w.message) for w in caught if not issubclass(w.category, UserWarning)]
     return result
 
 

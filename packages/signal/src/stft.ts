@@ -31,11 +31,15 @@
  * `console.warn(message)`. (SciPy's `stft` does not check NOLA, so neither does
  * this one; see `checkNOLA` to test parameters up front.)
  *
- * `scaling` accepts SciPy's `"spectrum"` and `"psd"` (`X / sqrt(fs · Σw²)`),
- * `"density"` as an alias of `"psd"`, and a non-SciPy `"none"` (the raw
- * windowed DFT). One-sided bins are NOT doubled (SciPy doesn't either).
+ * `scaling` is SciPy's `"spectrum"` or `"psd"` (`X / sqrt(fs · Σw²)`); anything
+ * else is an error, as in SciPy. One-sided bins are NOT doubled (SciPy doesn't either).
  *
- * Disclosed limits: an empty input throws (SciPy returns empty arrays). For
+ * An empty input to `stft` gives an empty `Zxx` of the input's shape, `freqs: []`
+ * and `times: []`, as SciPy does (before it looks at any other option but
+ * `scaling` and `boundary`). An `nperseg` longer than the signal is clamped with
+ * SciPy's warning (through `onWarning`, else `console.warn`). As in SciPy,
+ * `nperseg` defaults to 256 whatever the window is, so an array `window` of
+ * another length needs its `nperseg`. For
  * N-D `istft` input, `times` has one entry per output sample (`x`'s length
  * along its time axis); SciPy 1.16 computes it from `x.shape[0]`, which is the
  * wrong length for N-D input unless the time axis comes first.
@@ -43,14 +47,14 @@
 import { ComplexTensor } from "@johnhenry/math-plus-fft";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { planDft } from "./dft.ts";
-import { isComplexTensor, normalizeAxis, rowsAlong, type SignalInput, valuesOf, checkAxesDistinct } from "./nd.ts";
-import { binFrequencies, type Boundary, emitWarning, prepareRow, resolveSegments, segmentSpectrum, type SegmentOptions, type WarningOptions } from "./spectral.ts";
+import { checkAxesDistinct, emptyTensor, isComplexTensor, normalizeAxis, rowsAlong, type SignalInput, shapeOf, sizeOf, valuesOf } from "./nd.ts";
+import { binFrequencies, type Boundary, emitWarning, frameSpectra, frameTimes, resolveSegments, rethrowWindowError, type SegmentOptions, toInt, type WarningOptions } from "./spectral.ts";
 import { getWindow, type WindowSpec } from "./window.ts";
 
-export type StftScaling = "spectrum" | "psd" | "density" | "none";
+export type StftScaling = "spectrum" | "psd";
 
 export interface StftOptions extends SegmentOptions {
-  /** `"spectrum"` (default): `X / Σw`. `"psd"` / `"density"`: `X / sqrt(fs · Σw²)`. `"none"`: the raw windowed DFT (not in SciPy). */
+  /** `"spectrum"` (default): `X / Σw`. `"psd"`: `X / sqrt(fs · Σw²)`. (SciPy's two; its `"density"` for `spectrogram` is `spectrogram`'s own option.) */
   readonly scaling?: StftScaling;
   /** Extend the signal by `floor(nperseg / 2)` samples at both ends so the first and last samples sit at a window centre: `"zeros"` (default), `"even"`, `"odd"`, `"constant"`, or `null` for none. */
   readonly boundary?: Boundary;
@@ -70,8 +74,8 @@ export interface StftResult {
 }
 
 function checkScaling(who: string, scaling: unknown): StftScaling {
-  if (scaling !== "none" && scaling !== "density" && scaling !== "psd" && scaling !== "spectrum") {
-    throw new RangeError(`${who}: scaling must be "spectrum", "psd", "density" or "none", got ${String(scaling)}`);
+  if (scaling !== "psd" && scaling !== "spectrum") {
+    throw new RangeError(`${who}: Parameter scaling=${JSON.stringify(scaling)} not in ['spectrum', 'psd']!`);
   }
   return scaling;
 }
@@ -79,50 +83,39 @@ function checkScaling(who: string, scaling: unknown): StftScaling {
 /** `signal` -> `{ freqs, times, Zxx }`: one `nfft`-point DFT per windowed frame along `axis`; `bins` is `floor(nfft/2)+1` one-sided, else `nfft`. */
 export function stft(signal: SignalInput, options: StftOptions = {}): StftResult {
   const scaling = checkScaling("stft", options.scaling ?? "spectrum");
+  const boundary = options.boundary === undefined ? "zeros" : options.boundary;
+  if (boundary !== null && !["zeros", "even", "odd", "constant"].includes(boundary)) {
+    throw new RangeError(`stft: boundary must be null, "zeros", "even", "odd" or "constant", got ${String(boundary)}`);
+  }
+  const shape = shapeOf(signal);
+  if (sizeOf(shape) === 0) {
+    // SciPy returns here, before it looks at the window and segment options: three empty arrays shaped like the input
+    return { freqs: [], times: [], Zxx: ComplexTensor.fromParts(emptyTensor(shape), emptyTensor(shape)) };
+  }
   const rows = rowsAlong("stft", signal, options.axis ?? -1);
-  const p = resolveSegments("stft", rows.n, rows.im !== null, options, {
+  const p = resolveSegments("stft", rows.n, rows.im !== null, { ...options, nperseg: options.nperseg ?? 256 }, {
     defaultDetrend: false,
-    boundary: options.boundary === undefined ? "zeros" : options.boundary,
+    boundary,
     padded: options.padded ?? true,
     warnComplexOnesided: true,
+    family: "helper",
   });
-  const { bins, numFrames } = p;
-  const scale = scaling === "none" ? 1 : scaling === "spectrum" ? 1 / p.sumW : 1 / Math.sqrt(p.fs * p.sumW2);
-
-  // Final layout: shape with `axis` -> bins, then time last: [pre, bins, inner, numFrames]
-  const total = rows.pre * bins * rows.inner * numFrames;
-  const realOut = new Float64Array(total);
-  const imagOut = new Float64Array(total);
-  const times: number[] = [];
-  const shift = p.extended ? p.nperseg / 2 : 0;
-  for (let f = 0; f < numFrames; f++) times.push((f * p.hop + p.nperseg / 2 - shift) / p.fs);
-  for (let r = 0; r < rows.rows; r++) {
-    const row = prepareRow("stft", p, rows.re.subarray(r * rows.n, (r + 1) * rows.n), rows.im === null ? null : rows.im.subarray(r * rows.n, (r + 1) * rows.n));
-    const pi = Math.floor(r / rows.inner);
-    const ii = r % rows.inner;
-    for (let f = 0; f < numFrames; f++) {
-      const { re, im } = segmentSpectrum("stft", f * p.hop, p, row);
-      for (let k = 0; k < bins; k++) {
-        const at = ((pi * bins + k) * rows.inner + ii) * numFrames + f;
-        realOut[at] = (re[k] as number) * scale;
-        imagOut[at] = (im[k] as number) * scale;
-      }
-    }
-  }
-  const shape = [...rows.shape];
-  shape[rows.axis] = bins;
-  shape.push(numFrames);
-  const Zxx = ComplexTensor.fromParts(
-    Tensor.fromTypedArray(realOut, shape, { dtype: "f64" }),
-    Tensor.fromTypedArray(imagOut, shape, { dtype: "f64" }),
-  );
-  return { freqs: binFrequencies(p.nfft, p.fs, p.onesided), times, Zxx };
+  const scale = scaling === "spectrum" ? 1 / p.sumW : 1 / Math.sqrt(p.fs * p.sumW2);
+  const { re, im, shape: outShape } = frameSpectra("stft", rows, p, scale, false);
+  return {
+    freqs: binFrequencies(p.nfft, p.fs, p.onesided),
+    times: frameTimes(p),
+    Zxx: ComplexTensor.fromParts(
+      Tensor.fromTypedArray(re, outShape, { dtype: "f64" }),
+      Tensor.fromTypedArray(im as Float64Array, outShape, { dtype: "f64" }),
+    ),
+  };
 }
 
 export interface IstftOptions extends WarningOptions {
   /** Sample rate; default 1. */
   readonly fs?: number;
-  /** Window used by `stft` (name, tuple, number or a `Float64Array` of length `nperseg`). Default `"hann"`. */
+  /** Window used by `stft` (a name, a tuple or a `Float64Array` of length `nperseg`; a bare number is not one, as in SciPy). Default `"hann"`. */
   readonly window?: WindowSpec;
   /** Segment length used by `stft`. Default `2 * (bins - 1)` for a one-sided input, else `bins` (so pass it for odd segment lengths). */
   readonly nperseg?: number;
@@ -134,7 +127,7 @@ export interface IstftOptions extends WarningOptions {
   readonly inputOnesided?: boolean;
   /** `Zxx` was made with a boundary extension; drop it from the output. Default `true`. */
   readonly boundary?: boolean;
-  /** The `scaling` used by `stft`: `"spectrum"` (default), `"psd"`/`"density"`, or `"none"`. */
+  /** The `scaling` used by `stft`: `"spectrum"` (default) or `"psd"`. */
   readonly scaling?: StftScaling;
   /** Axis of `Zxx` holding the frequencies; default -2. */
   readonly freqAxis?: number;
@@ -174,20 +167,21 @@ export function istft(Zxx: SignalInput, options: IstftOptions = {}): IstftResult
   const nDefault = inputOnesided ? 2 * (nBins - 1) : nBins;
 
   const spec = options.window ?? "hann";
-  const nperseg = options.nperseg ?? (spec instanceof Float64Array ? spec.length : nDefault);
+  const given = options.nperseg === undefined ? undefined : toInt("istft", "nperseg", options.nperseg);
+  if (given !== undefined && given < 1) throw new RangeError("istft: nperseg must be a positive integer");
+  const nperseg = given ?? nDefault;
   if (!Number.isInteger(nperseg) || nperseg < 1) throw new RangeError(`istft: nperseg must be a positive integer, got ${nperseg}`);
-  const nfft = options.nfft ?? (inputOnesided && nperseg === nDefault + 1 ? nperseg : nDefault);
-  if (!Number.isInteger(nfft) || nfft < nperseg) throw new RangeError(`istft: nfft (${nfft}) must be an integer >= nperseg (${nperseg})`);
-  const noverlap = options.noverlap ?? Math.floor(nperseg / 2);
-  if (!Number.isInteger(noverlap) || noverlap < 0 || noverlap >= nperseg) {
-    throw new RangeError(`istft: noverlap (${noverlap}) must be an integer in [0, nperseg) (nperseg=${nperseg})`);
-  }
+  const nfft = options.nfft === undefined ? (inputOnesided && nperseg === nDefault + 1 ? nperseg : nDefault) : toInt("istft", "nfft", options.nfft);
+  if (nfft < nperseg) throw new RangeError(`istft: nfft=${nfft} must be greater than or equal to nperseg=${nperseg}.`);
+  const noverlap = options.noverlap === undefined ? Math.floor(nperseg / 2) : toInt("istft", "noverlap", options.noverlap);
+  if (noverlap >= nperseg) throw new RangeError("istft: noverlap must be less than nperseg.");
   const hop = nperseg - noverlap;
+  if (typeof spec === "number") throw new RangeError("istft: window must be 1-D"); // np.asarray(4.0).shape is ()
   let window: Float64Array;
   try {
-    window = getWindow(spec, nperseg);
+    window = getWindow(spec, nperseg, true, options);
   } catch (e) {
-    throw new RangeError(`istft: ${(e as Error).message}`);
+    return rethrowWindowError("istft", e);
   }
   let sumW = 0;
   let sumW2 = 0;
@@ -195,7 +189,7 @@ export function istft(Zxx: SignalInput, options: IstftOptions = {}): IstftResult
     sumW += w;
     sumW2 += w * w;
   }
-  const scale = scaling === "none" ? 1 : scaling === "spectrum" ? sumW : Math.sqrt(fs * sumW2);
+  const scale = scaling === "spectrum" ? sumW : Math.sqrt(fs * sumW2);
 
   const zRe = valuesOf(complexIn ? Zxx.real : Zxx);
   const zIm = complexIn ? valuesOf(Zxx.imag) : null;
@@ -207,13 +201,14 @@ export function istft(Zxx: SignalInput, options: IstftOptions = {}): IstftResult
   for (let t = 0; t < nseg; t++) {
     for (let i = 0; i < nperseg; i++) norm[t * hop + i] = (norm[t * hop + i] as number) + (window[i] as number) ** 2;
   }
-  const trim = options.boundary ?? true ? Math.floor(nperseg / 2) : 0;
-  const end = trim > 0 ? outLen - trim : outLen;
+  const boundaryOn = options.boundary ?? true;
+  const trim = boundaryOn ? Math.floor(nperseg / 2) : 0;
+  const end = boundaryOn && trim === 0 ? 0 : outLen - trim; // SciPy slices x[nperseg//2:-(nperseg//2)]: for nperseg = 1 that is x[0:-0], which is empty
   const L = Math.max(0, end - trim);
   let nolaOk = true;
   for (let i = trim; i < end; i++) if (!((norm[i] as number) > 1e-10)) nolaOk = false;
   if (!nolaOk) {
-    emitWarning(options, `istft: NOLA condition failed, STFT may not be invertible.${trim > 0 ? "" : " Possibly due to missing boundary"}`);
+    emitWarning(options, `NOLA condition failed, STFT may not be invertible.${boundaryOn ? "" : " Possibly due to missing boundary"}`);
   }
 
   // Strides of Zxx (row-major), the outer axes in order, and the output layout (outer axes with the signal at `timeOut`).

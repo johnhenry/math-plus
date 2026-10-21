@@ -33,6 +33,27 @@ function findOraclePython(): string | undefined {
 export const SCIPY_PYTHON = findOraclePython();
 export const SCIPY_SKIP_REASON = SCIPY_PYTHON ? undefined : "no python with scipy found (set MATH_PLUS_SCIPY_ORACLE_PYTHON)";
 
+function scipyVersion(): [number, number] | undefined {
+  if (!SCIPY_PYTHON) return undefined;
+  try {
+    const out = execFileSync(SCIPY_PYTHON, ["-c", "import scipy; print(scipy.__version__)"], { stdio: ["ignore", "pipe", "ignore"] }).toString("utf8").trim();
+    const [major, minor] = out.split(".").map(Number);
+    return [major as number, minor as number];
+  } catch {
+    return undefined;
+  }
+}
+const version = scipyVersion();
+/**
+ * SciPy 1.17 changed `get_window` (and so every spectral function that builds a window from a name): it refuses a
+ * length of 0 and numeric strings, also accepts "kaiser_bessel_derived" and "<name>_periodic" / "<name>_symmetric",
+ * and raises ValueError for every bad parameter list (1.16: TypeError for a wrong count). This package follows
+ * SciPy 1.16 (see the README), so the few expectations that depend on those changes are only compared with an
+ * oracle older than 1.17; with a newer one they are skipped or their error class is relaxed. Everything else is
+ * compared with whichever SciPy is installed.
+ */
+export const SCIPY_17_PLUS = version !== undefined && (version[0] > 1 || version[1] >= 17);
+
 export function runScipyOracle<T>(job: Record<string, unknown>): T {
   if (!SCIPY_PYTHON) throw new Error("runScipyOracle called without a resolved python (check SCIPY_SKIP_REASON first)");
   const dir = mkdtempSync(join(tmpdir(), "math-plus-signal-oracle-"));
