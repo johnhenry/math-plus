@@ -13,11 +13,7 @@ import numpy as np
 from scipy import signal
 
 
-def main() -> None:
-    job_path = sys.argv[1]
-    with open(job_path) as f:
-        job = json.load(f)
-
+def run(job: dict):
     op = job["op"]
 
     if op == "butter_sos":
@@ -106,6 +102,54 @@ def main() -> None:
         y = signal.resample_poly(x, job["up"], job["down"])
         result = {"y": y.astype(np.float64).tolist(), "dtype": str(y.dtype)}
 
+    elif op == "welch_opts":
+        # welch with the full option set (issue #178); `window` is a get_window
+        # name (periodic, SciPy's default) or an explicit array.
+        x = np.array(job["x"], dtype=float)
+        window = job["window"]
+        if isinstance(window, list):
+            window = np.array(window, dtype=float)
+        f, pxx = signal.welch(
+            x,
+            fs=job["fs"],
+            window=window,
+            nperseg=job["nperseg"],
+            noverlap=job["noverlap"],
+            nfft=job["nfft"],
+            detrend=job["detrend"],
+            return_onesided=job["onesided"],
+            scaling=job["scaling"],
+        )
+        result = {"frequencies": f.tolist(), "psd": pxx.tolist()}
+
+    elif op == "stft_opts":
+        # scipy.signal.stft with no boundary extension or padding (issue #178),
+        # frames-major like ours. scaling "none" = scipy's "spectrum" undone
+        # (multiplied back by sum(window)) = the raw windowed FFT.
+        x = np.array(job["x"], dtype=float)
+        window = job["window"]
+        if isinstance(window, list):
+            window = np.array(window, dtype=float)
+        scaling = job["scaling"]
+        f, t, z = signal.stft(
+            x,
+            fs=job["fs"],
+            window=window,
+            nperseg=job["nperseg"],
+            noverlap=job["noverlap"],
+            nfft=job["nfft"],
+            detrend=job["detrend"],
+            return_onesided=job["onesided"],
+            boundary=None,
+            padded=False,
+            scaling="psd" if scaling == "density" else "spectrum",
+        )
+        if scaling == "none":
+            w = signal.get_window(window, job["nperseg"]) if isinstance(window, str) else window
+            z = z * np.sum(w)
+        zt = z.T
+        result = {"freqs": f.tolist(), "times": t.tolist(), "real": zt.real.tolist(), "imag": zt.imag.tolist()}
+
     elif op == "windowed_frame_fft":
         # A primitive, version-stable oracle for our own stft's exact
         # algorithm (windowed-frame -> full FFT, no extra normalization) --
@@ -122,7 +166,19 @@ def main() -> None:
     else:
         raise ValueError(f"scipy_oracle: unknown op {op!r}")
 
-    print(json.dumps(result))
+    return result
+
+
+def main() -> None:
+    job_path = sys.argv[1]
+    with open(job_path) as f:
+        job = json.load(f)
+    # {"op": "batch", "jobs": [...]} runs many jobs in one interpreter start
+    # (python + scipy import dominates a single job's cost).
+    if job["op"] == "batch":
+        print(json.dumps([run(j) for j in job["jobs"]]))
+    else:
+        print(json.dumps(run(job)))
 
 
 if __name__ == "__main__":

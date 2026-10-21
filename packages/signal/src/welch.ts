@@ -1,89 +1,51 @@
 /**
- * welch (issue #70) — power spectral density via Welch's method: reuses
- * the existing windowed-segment machinery (mirroring `stft`'s framing, not
- * calling `stft` directly since a raw complex spectrum per frame is needed
- * before squaring — `stft` already returns exactly that shape, reused via
- * `stft` itself, see below), then averages `|X_i(f)|^2` across segments
- * with window-power normalization.
+ * welch (issues #70, #178) — power spectral density via Welch's method:
+ * the average of `|X_i(f)|^2` over windowed, overlapping segments, with
+ * `scipy.signal.welch`'s meanings for `fs`, `window`, `nperseg`, `noverlap`,
+ * `nfft`, `detrend`, `scaling` and `onesided`.
  *
- * v1 scope, disclosed: returns the TWO-SIDED PSD over all `nperseg`
- * frequency bins (matching `scipy.signal.welch(..., return_onesided=
- * False)` exactly, verified numerically before writing this) — NOT
- * SciPy's default one-sided-with-doubling convention for real inputs.
- * Simpler, and a real, correctly-normalized PSD either way; revisit if a
- * concrete workload wants the halved one-sided form. `fs` is fixed at 1.0
- * (SciPy's own default), not exposed as an option, matching this issue's
- * scoped `{window?, nperseg?, noverlap?}` signature.
+ * Defaults keep the original behaviour: fs 1, periodic Hann, two-sided
+ * (`return_onesided=False`), density scaling, NO detrend (SciPy's own
+ * default is `"constant"`), `nfft` = next power of two at or above `nperseg`.
+ * Disclosed limits: 1-D real input only; `nfft` must be a power of two
+ * (the FFT package's requirement); no `average="median"`.
  */
-import { ComplexTensor, fft } from "@johnhenry/math-plus-fft";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
-import { hannWindow } from "./window.ts";
+import { binFrequencies, resolveSegments, segmentSpectrum, type SegmentOptions } from "./spectral.ts";
 
-export interface WelchOptions {
-  readonly window?: Float64Array;
-  readonly nperseg?: number;
-  readonly noverlap?: number;
-}
-
-const DEFAULT_NPERSEG = 256;
-
-function isPowerOfTwo(n: number): boolean {
-  return n > 0 && (n & (n - 1)) === 0;
+export interface WelchOptions extends SegmentOptions {
+  /** `"density"` (default): power per unit frequency, `|X|² / (fs · Σw²)`. `"spectrum"`: power per bin, `|X|² / (Σw)²`. */
+  readonly scaling?: "density" | "spectrum";
 }
 
 export function welch(signal: Tensor, options: WelchOptions = {}): { frequencies: number[]; psd: Tensor } {
   if (signal.shape.length !== 1) throw new RangeError("welch: v1 supports 1-D Tensor only");
+  const scaling = options.scaling ?? "density";
+  if (scaling !== "density" && scaling !== "spectrum") {
+    throw new RangeError(`welch: scaling must be "density" or "spectrum", got ${String(scaling)}`);
+  }
   // Read-only below, so no defensive copy is needed even when `.data`
   // aliases `signal`'s own storage.
   const data = signal.contiguous().data as Float64Array;
+  const p = resolveSegments("welch", data.length, options);
+  const { nfft } = p;
 
-  const nperseg = options.nperseg ?? Math.min(DEFAULT_NPERSEG, data.length);
-  if (!isPowerOfTwo(nperseg)) {
-    throw new RangeError(`welch: nperseg must be a power of two in v1, got ${nperseg}`);
-  }
-  const noverlap = options.noverlap ?? Math.floor(nperseg / 2);
-  if (noverlap < 0 || noverlap >= nperseg) {
-    throw new RangeError(`welch: noverlap (${noverlap}) must be in [0, nperseg) (nperseg=${nperseg})`);
-  }
-  const window = options.window ?? hannWindow(nperseg);
-  if (window.length !== nperseg) {
-    throw new RangeError(`welch: window length (${window.length}) must equal nperseg (${nperseg})`);
-  }
-  const hop = nperseg - noverlap;
-  const numFrames = Math.floor((data.length - nperseg) / hop) + 1;
-  if (numFrames < 1) {
-    throw new RangeError(`welch: signal too short (${data.length} samples) for nperseg=${nperseg}`);
-  }
-
-  let windowPower = 0;
-  for (const w of window) windowPower += w * w;
-
-  const accumulator = new Float64Array(nperseg);
-  for (let f = 0; f < numFrames; f++) {
-    const start = f * hop;
-    const frame = new Float64Array(nperseg);
-    for (let i = 0; i < nperseg; i++) frame[i] = (data[start + i] as number) * (window[i] as number);
-    const spectrum = fft(ComplexTensor.fromReal(Tensor.fromTypedArray(frame, [nperseg], { dtype: "f64" })));
-    const specReal = spectrum.real.contiguous().data as Float64Array;
-    const specImag = spectrum.imag.contiguous().data as Float64Array;
-    for (let k = 0; k < nperseg; k++) {
-      const re = specReal[k] as number;
-      const im = specImag[k] as number;
-      accumulator[k] = (accumulator[k] as number) + (re * re + im * im);
+  const accumulator = new Float64Array(nfft);
+  for (let f = 0; f < p.numFrames; f++) {
+    const { real, imag } = segmentSpectrum(data, f * p.hop, p);
+    for (let k = 0; k < nfft; k++) {
+      accumulator[k] = (accumulator[k] as number) + ((real[k] as number) ** 2 + (imag[k] as number) ** 2);
     }
   }
 
-  const psdData = new Float64Array(nperseg);
-  for (let k = 0; k < nperseg; k++) {
-    psdData[k] = (accumulator[k] as number) / numFrames / windowPower;
+  const scale = (scaling === "density" ? 1 / (p.fs * p.sumW2) : 1 / (p.sumW * p.sumW)) / p.numFrames;
+  const bins = p.onesided ? nfft / 2 + 1 : nfft;
+  const psdData = new Float64Array(bins);
+  for (let k = 0; k < bins; k++) {
+    let v = (accumulator[k] as number) * scale;
+    // One-sided: fold the negative frequencies in (everything but DC and Nyquist counts twice).
+    if (p.onesided && k > 0 && k < nfft / 2) v *= 2;
+    psdData[k] = v;
   }
-  // Two-sided frequency labeling matches numpy.fft.fftfreq's wraparound
-  // convention, NOT a naive k/nperseg: bins [0, nperseg/2) are positive,
-  // bins [nperseg/2, nperseg) wrap to negative (k-nperseg)/nperseg -- the
-  // Nyquist bin itself (k=nperseg/2, even nperseg only) is -0.5, not +0.5.
-  const frequencies = Array.from({ length: nperseg }, (_, k) =>
-    k < nperseg / 2 ? k / nperseg : (k - nperseg) / nperseg,
-  );
-
-  return { frequencies, psd: Tensor.fromTypedArray(psdData, [nperseg], { dtype: "f64" }) };
+  return { frequencies: binFrequencies(nfft, p.fs, p.onesided), psd: Tensor.fromTypedArray(psdData, [bins], { dtype: "f64" }) };
 }

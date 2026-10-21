@@ -42,7 +42,7 @@ findPeaks(Tensor.from(x, { dtype: "f64" }), { distance: 4 });
 | Group | Exports |
 |---|---|
 | Convolution | `convolve`, `convolve1D`, `correlate`, `correlate1D`, `correlate2D` (true 2-D, FFT-based, `"full"` only), `applyTimeDomainOp` |
-| Spectral | `stft`, `istft`, `welch`, `hannWindow`, `hammingWindow` |
+| Spectral | `stft`, `istft`, `welch`, `getWindow`, `hannWindow`, `hammingWindow` |
 | Filters | `butter` (lowpass/highpass/bandpass/bandstop, SOS output only), `sosFilter`, `sosfiltfilt` (zero-phase, scipy's odd padding + steady-state `zi`; 1-D, `padlen` option), `freqz` |
 | Peaks | `findPeaks` (`height`/`distance`/`prominence` options, scipy semantics) |
 | Resampling | `resamplePoly(signal, up, down)` — positional integer args, GCD-reduced |
@@ -63,15 +63,29 @@ removed. It ships unbundled ESM: use a bundler or an ESM CDN for a single file.
 ## Traps
 
 - **Argument order:** `sosFilter(sos, signal)` — filter first, matching scipy.
-- **`stft`'s `nperseg` must be a power of two**, and the default is
-  `min(256, signal.length)` — a 100-sample signal's *default* throws. Default
-  window is periodic Hann with 50% overlap (COLA); `stft` returns the **full**
-  `nperseg` bins per frame, not `nperseg/2+1`. No boundary padding: samples
-  past the last full frame are lost, and `istft` reconstruction is least
-  accurate in the first/last half-window.
-- **`welch` returns the TWO-sided PSD** (`return_onesided=False`), `fs`
-  fixed at 1.0; frequency labels follow `fftfreq` wraparound (Nyquist bin is
-  `-0.5`).
+- **`welch` / `stft` options** follow SciPy: `fs` (default 1), `window`
+  (`"hann"` default, `"hamming"`, `"blackman"`, `"boxcar"`/`"rectangular"`, all
+  periodic like `get_window`, or a `Float64Array` of length `nperseg`),
+  `nperseg` (any length; default `min(256, length)`), `noverlap` (default half),
+  `nfft` (power of two `>= nperseg`, zero-padding each segment; default the
+  next power of two), `detrend` (`false` default, `"constant"`, `"linear"`),
+  `onesided` (`false` default: all `nfft` bins) and `scaling` (`welch`:
+  `"density"` default or `"spectrum"`; `stft`: `"none"` default = raw FFT,
+  `"spectrum"` = `/Σw`, `"density"` = `/sqrt(fs·Σw²)`). The defaults are the
+  pre-options behaviour, which differs from SciPy's in two places: `onesided`
+  (SciPy: true for real input) and `detrend` (SciPy: `"constant"`).
+- **`welch` one-sided** doubles the bins between DC and Nyquist; **`stft`
+  one-sided does not** (SciPy doesn't). `welch` returns `{ frequencies, psd }`
+  with frequencies in `fs` units; two-sided order is `fftfreq`'s (Nyquist is
+  negative for even `nfft`).
+- **`stft`** returns the `[numFrames, bins]` ComplexTensor, which also carries
+  `freqs`, `times` (segment centres, `(start + nperseg/2) / fs`) and `frames`
+  (the tensor itself): `const { freqs, times, frames } = stft(x, opts)`. No
+  boundary extension or padding (SciPy `boundary=None, padded=False`): samples
+  past the last full frame are lost. Default `nperseg` is `min(256, length)`;
+  default window periodic Hann with 50% overlap (COLA). `istft` inverts only
+  a two-sided, un-padded (`nfft === nperseg`), un-detrended, `scaling: "none"`
+  spectrogram, and is least accurate in the first/last half-window.
 - **`butter`'s `wn` is normalized to Nyquist = 1**, strictly `0 < wn < 1`.
   SOS section coefficients are deliberately **not** byte-comparable to
   scipy's (scipy's own pole/zero-to-section grouping isn't fixed either);
