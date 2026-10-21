@@ -6,76 +6,68 @@ import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { hannWindow, istft, stft } from "../src/index.ts";
 import { runScipyOracle, SCIPY_SKIP_REASON } from "./helpers.ts";
 
-test("stft: output shape is [numFrames, nperseg]", () => {
+// The SciPy-oracle comparisons for stft/istft live in spectral-options.test.ts.
+
+test("stft: Zxx shape is [freqs, frames] (SciPy orientation); with no boundary or padding it is [nperseg/2+1, floor((n-nperseg)/hop)+1]", () => {
   const signal = Tensor.from(
     Array.from({ length: 1024 }, (_, i) => Math.sin(i * 0.1)),
     { dtype: "f64" },
   );
-  const spec = stft(signal, { nperseg: 64 });
-  assert.equal(spec.shape.length, 2);
-  const [numFrames, nperseg] = spec.shape as [number, number];
-  assert.equal(nperseg, 64);
-  const hop = 64 - 32; // default noverlap = nperseg/2
-  assert.equal(numFrames, Math.floor((1024 - 64) / hop) + 1);
+  const { Zxx, freqs, times } = stft(signal, { nperseg: 64, boundary: null, padded: false });
+  assert.equal(Zxx.shape.length, 2);
+  const [nFreqs, numFrames] = Zxx.shape as [number, number];
+  assert.equal(nFreqs, 33);
+  assert.equal(freqs.length, 33);
+  assert.equal(numFrames, Math.floor((1024 - 64) / 32) + 1);
+  assert.equal(times.length, numFrames);
 });
 
 test("stft: each frame's spectrum matches an independently-computed windowed-frame FFT (numpy oracle)", { skip: SCIPY_SKIP_REASON }, () => {
   const nperseg = 32;
   const signal = Array.from({ length: 128 }, (_, i) => Math.sin(i * 0.2) + 0.4 * Math.cos(i * 0.7));
-  const spec = stft(Tensor.from(signal, { dtype: "f64" }), { nperseg });
-
-  const window = hannWindow(nperseg);
-  const frame0 = signal.slice(0, nperseg);
-  const oracle = runScipyOracle<{ real: number[]; imag: number[] }>({
-    op: "windowed_frame_fft",
-    x: frame0,
-    window: Array.from(window),
+  const { Zxx } = stft(Tensor.from(signal, { dtype: "f64" }), {
+    nperseg,
+    onesided: false,
+    boundary: null,
+    padded: false,
+    scaling: "none",
   });
 
-  const mineReal: number[] = [];
-  const mineImag: number[] = [];
+  const window = hannWindow(nperseg);
+  const oracle = runScipyOracle<{ real: number[]; imag: number[] }>({
+    op: "windowed_frame_fft",
+    x: signal.slice(0, nperseg),
+    window: Array.from(window),
+  });
   for (let k = 0; k < nperseg; k++) {
-    mineReal.push(spec.real.at(0, k) as number);
-    mineImag.push(spec.imag.at(0, k) as number);
-  }
-  for (let k = 0; k < nperseg; k++) {
-    assert.ok(Math.abs((mineReal[k] as number) - (oracle.real[k] as number)) < 1e-9, `real[${k}]`);
-    assert.ok(Math.abs((mineImag[k] as number) - (oracle.imag[k] as number)) < 1e-9, `imag[${k}]`);
+    assert.ok(Math.abs((Zxx.real.at(k, 0) as number) - (oracle.real[k] as number)) < 1e-9, `real[${k}]`);
+    assert.ok(Math.abs((Zxx.imag.at(k, 0) as number) - (oracle.imag[k] as number)) < 1e-9, `imag[${k}]`);
   }
 });
 
-test("stft -> istft round-trips (near-exactly) for the default Hann-window-50%-overlap configuration (COLA-compliant)", () => {
+test("stft -> istft round-trips for a Hann window at 50% overlap with explicit nperseg", () => {
   const n = 512;
   const signal = Array.from({ length: n }, (_, i) => Math.sin(i * 0.15) + 0.3 * Math.sin(i * 0.6) + 0.1 * Math.sin(i * 1.9));
-  const original = Tensor.from(signal, { dtype: "f64" });
-  const spec = stft(original, { nperseg: 64 });
-  const reconstructed = istft(spec, { nperseg: 64 }).toArray() as number[];
-
-  // The reconstructed signal is only defined over the region actually
-  // covered by full frames (the tail beyond the last frame's start+nperseg
-  // is not reconstructed) -- compare over that overlap.
-  const compareLen = Math.min(signal.length, reconstructed.length);
-  // Skip the very first/last half-window where WOLA normalization is
-  // least accurate (edge effects, not a bug -- same caveat any STFT/ISTFT
-  // round-trip has without boundary padding, which this v1 doesn't do).
-  for (let i = 32; i < compareLen - 32; i++) {
-    assert.ok(
-      Math.abs((signal[i] as number) - (reconstructed[i] as number)) < 1e-9,
-      `sample ${i}: original=${signal[i]} reconstructed=${reconstructed[i]}`,
-    );
+  const { Zxx } = stft(Tensor.from(signal, { dtype: "f64" }), { nperseg: 64 });
+  const { x } = istft(Zxx, { nperseg: 64 });
+  const reconstructed = Array.from(x.contiguous().data as Float64Array);
+  // boundary 'zeros' + padded: the whole signal is reconstructed, edges included
+  for (let i = 0; i < n; i++) {
+    assert.ok(Math.abs((signal[i] as number) - (reconstructed[i] as number)) < 1e-9, `sample ${i}`);
   }
 });
 
-test("istft: throws when the nperseg option doesn't match the spectrogram's own frame length", () => {
+test("istft: throws when the window length doesn't match nperseg, and on a non-2-D input", () => {
   const signal = Tensor.from(Array.from({ length: 256 }, (_, i) => Math.sin(i * 0.1)), { dtype: "f64" });
-  const spec = stft(signal, { nperseg: 64 });
-  assert.throws(() => istft(spec, { nperseg: 32 }), RangeError);
+  const { Zxx } = stft(signal, { nperseg: 64 });
+  assert.throws(() => istft(Zxx, { nperseg: 64, window: new Float64Array(32) }), RangeError);
 });
 
-test("stft: a non-power-of-two nperseg is zero-padded to the next power of two (issue #178); a non-power-of-two nfft is rejected", () => {
+test("stft: a non-power-of-two nfft works (Bluestein) and sets the number of bins", () => {
   const signal = Tensor.from([1, 2, 3, 4, 5, 6], { dtype: "f64" });
-  assert.deepEqual(stft(signal, { nperseg: 6 }).shape, [1, 8]);
-  assert.throws(() => stft(signal, { nperseg: 6, nfft: 6 }), RangeError);
+  assert.deepEqual(stft(signal, { nperseg: 6, boundary: null, padded: false }).Zxx.shape, [4, 1]);
+  assert.deepEqual(stft(signal, { nperseg: 6, nfft: 10, boundary: null, padded: false }).Zxx.shape, [6, 1]);
+  assert.deepEqual(stft(signal, { nperseg: 6, nfft: 9, boundary: null, padded: false }).Zxx.shape, [5, 1]);
 });
 
 test("stft: rejects a >1-D input", () => {

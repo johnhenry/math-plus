@@ -8,9 +8,21 @@ e.g. SOS arrays -- not bulk tensor data).
 """
 import json
 import sys
+import warnings
 
 import numpy as np
 from scipy import signal
+
+# SciPy warns when nperseg > len(x) (it then clamps); that is expected here.
+warnings.simplefilter("ignore")
+
+
+def _kwargs(kw: dict) -> dict:
+    """JSON kwargs -> scipy kwargs: a list `window` becomes an ndarray."""
+    kw = dict(kw)
+    if isinstance(kw.get("window"), list):
+        kw["window"] = np.array(kw["window"], dtype=float)
+    return kw
 
 
 def run(job: dict):
@@ -102,53 +114,26 @@ def run(job: dict):
         y = signal.resample_poly(x, job["up"], job["down"])
         result = {"y": y.astype(np.float64).tolist(), "dtype": str(y.dtype)}
 
-    elif op == "welch_opts":
-        # welch with the full option set (issue #178); `window` is a get_window
-        # name (periodic, SciPy's default) or an explicit array.
+    elif op == "welch_kw":
+        # scipy.signal.welch called with ONLY the keyword arguments the job
+        # lists, so omitted options take SciPy's own defaults (issue #178 /
+        # SciPy-parity release). `window` may be a name or an explicit array.
         x = np.array(job["x"], dtype=float)
-        window = job["window"]
-        if isinstance(window, list):
-            window = np.array(window, dtype=float)
-        f, pxx = signal.welch(
-            x,
-            fs=job["fs"],
-            window=window,
-            nperseg=job["nperseg"],
-            noverlap=job["noverlap"],
-            nfft=job["nfft"],
-            detrend=job["detrend"],
-            return_onesided=job["onesided"],
-            scaling=job["scaling"],
-        )
+        f, pxx = signal.welch(x, **_kwargs(job.get("kwargs", {})))
         result = {"frequencies": f.tolist(), "psd": pxx.tolist()}
 
-    elif op == "stft_opts":
-        # scipy.signal.stft with no boundary extension or padding (issue #178),
-        # frames-major like ours. scaling "none" = scipy's "spectrum" undone
-        # (multiplied back by sum(window)) = the raw windowed FFT.
+    elif op == "stft_kw":
+        # scipy.signal.stft with only the listed kwargs. Zxx is (freq, time),
+        # exactly as SciPy returns it.
         x = np.array(job["x"], dtype=float)
-        window = job["window"]
-        if isinstance(window, list):
-            window = np.array(window, dtype=float)
-        scaling = job["scaling"]
-        f, t, z = signal.stft(
-            x,
-            fs=job["fs"],
-            window=window,
-            nperseg=job["nperseg"],
-            noverlap=job["noverlap"],
-            nfft=job["nfft"],
-            detrend=job["detrend"],
-            return_onesided=job["onesided"],
-            boundary=None,
-            padded=False,
-            scaling="psd" if scaling == "density" else "spectrum",
-        )
-        if scaling == "none":
-            w = signal.get_window(window, job["nperseg"]) if isinstance(window, str) else window
-            z = z * np.sum(w)
-        zt = z.T
-        result = {"freqs": f.tolist(), "times": t.tolist(), "real": zt.real.tolist(), "imag": zt.imag.tolist()}
+        f, t, z = signal.stft(x, **_kwargs(job.get("kwargs", {})))
+        result = {"freqs": f.tolist(), "times": t.tolist(), "real": z.real.tolist(), "imag": z.imag.tolist()}
+
+    elif op == "istft_kw":
+        # scipy.signal.istft of a (freq, time) spectrogram given as real/imag.
+        z = np.array(job["real"], dtype=float) + 1j * np.array(job["imag"], dtype=float)
+        t, x = signal.istft(z, **_kwargs(job.get("kwargs", {})))
+        result = {"times": t.tolist(), "x": np.real(x).tolist()}
 
     elif op == "windowed_frame_fft":
         # A primitive, version-stable oracle for our own stft's exact

@@ -17,7 +17,7 @@ export { findPeaks, type FindPeaksOptions, type FindPeaksResult } from "./find-p
 export { resamplePoly } from "./resample.ts";
 export { sosFilter, type Sos, type SosSection } from "./sos-filter.ts";
 export { sosfiltfilt, type SosfiltfiltOptions } from "./sosfiltfilt.ts";
-export { stft, type Spectrogram, type StftOptions } from "./stft.ts";
-export type { Detrend, SegmentOptions } from "./spectral.ts";
+export { istft, stft, type IstftOptions, type StftOptions, type StftResult, type StftScaling } from "./stft.ts";
+export type { Boundary, Detrend, SegmentOptions } from "./spectral.ts";
 export { welch, type WelchOptions } from "./welch.ts";
 export { getWindow, type WindowName, type WindowSpec } from "./window.ts";
