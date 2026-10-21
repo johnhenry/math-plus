@@ -70,7 +70,10 @@ test("stft: a non-power-of-two nfft works (Bluestein) and sets the number of bin
   assert.deepEqual(stft(signal, { nperseg: 6, nfft: 9, boundary: null, padded: false }).Zxx.shape, [5, 1]);
 });
 
-test("stft: rejects a >1-D input", () => {
-  const bad2d = Tensor.zeros([4, 4], { dtype: "f64" });
-  assert.throws(() => stft(bad2d), RangeError);
+test("stft: a 2-D input is transformed along its last axis; a 0-D input and an out-of-range axis throw", () => {
+  const two = stft(Tensor.zeros([3, 64], { dtype: "f64" }), { nperseg: 16 });
+  assert.deepEqual(two.Zxx.shape, [3, 9, 9]); // [rows, freqs, times]
+  assert.throws(() => stft(Tensor.from([1], { dtype: "f64" }).reshape([]) as never), RangeError);
+  assert.throws(() => stft(Tensor.zeros([4, 4], { dtype: "f64" }), { axis: 2 }), RangeError);
+  assert.throws(() => stft(Tensor.zeros([4, 4], { dtype: "f64" }), { axis: -3 }), RangeError);
 });

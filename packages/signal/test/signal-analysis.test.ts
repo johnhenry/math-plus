@@ -118,15 +118,15 @@ test("welch matches scipy.signal.welch (return_onesided=False, detrend=False) wh
   const window = new Array(nperseg);
   for (let i = 0; i < nperseg; i++) window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / nperseg); // periodic Hann, matching hannWindow's default
 
-  const oracle = runScipyOracle<{ frequencies: number[]; psd: number[] }>({
+  const oracle = runScipyOracle<{ freqs: number[]; Pxx: number[] }>({
     op: "welch",
     x,
     window,
     nperseg,
     noverlap,
   });
-  close(got.frequencies, oracle.frequencies, 1e-9);
-  close(got.psd.contiguous().data as Float64Array, oracle.psd, 1e-6);
+  close(got.freqs, oracle.freqs, 1e-9);
+  close(got.Pxx.contiguous().data as Float64Array, oracle.Pxx, 1e-6);
 });
 
 test("welch: a pure sinusoid's PSD peaks at (or symmetrically around) its own frequency bin", () => {
@@ -135,8 +135,8 @@ test("welch: a pure sinusoid's PSD peaks at (or symmetrically around) its own fr
   const freqBin = 20; // target: energy concentrated near bin 20 or its mirror (nperseg - 20)
   const cyclesPerSample = freqBin / nperseg;
   const x = Array.from({ length: n }, (_, i) => Math.sin(2 * Math.PI * cyclesPerSample * i));
-  const { psd } = welch(Tensor.from(x, { dtype: "f64" }), { nperseg });
-  const data = psd.contiguous().data as Float64Array;
+  const { Pxx } = welch(Tensor.from(x, { dtype: "f64" }), { nperseg });
+  const data = Pxx.contiguous().data as Float64Array;
   let peakBin = 0;
   for (let i = 1; i < data.length; i++) if ((data[i] as number) > (data[peakBin] as number)) peakBin = i;
   const mirror = nperseg - freqBin;
@@ -148,6 +148,6 @@ test("welch: a pure sinusoid's PSD peaks at (or symmetrically around) its own fr
 
 test("welch clamps nperseg to the signal length (as SciPy does) but rejects a window longer than the signal", () => {
   const signal = Tensor.from([1, 2, 3], { dtype: "f64" });
-  assert.equal(welch(signal, { nperseg: 256 }).frequencies.length, 2); // nperseg -> 3, one-sided -> 2 bins
+  assert.equal(welch(signal, { nperseg: 256 }).freqs.length, 2); // nperseg -> 3, one-sided -> 2 bins
   assert.throws(() => welch(signal, { window: new Float64Array(8) }), RangeError);
 });

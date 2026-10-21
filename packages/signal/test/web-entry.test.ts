@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
 const pkgJson = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8"));
 
-const EXPORTS = ["rfft", "welch", "stft", "butter", "sosfiltfilt", "findPeaks", "resamplePoly"];
+const EXPORTS = ["rfft", "welch", "stft", "istft", "getWindow", "checkNOLA", "checkCOLA", "butter", "sosfiltfilt", "findPeaks", "resamplePoly"];
 
 test("package.json exposes a ./web entry with types", () => {
   assert.ok(pkgJson.exports["./web"], "exports['./web'] missing");

@@ -6,31 +6,45 @@
  * one-sided (`return_onesided=True`), `boundary="zeros"`, `padded=true`.
  *
  * Return shapes follow SciPy's `(f, t, Zxx)` / `(t, x)` as plain objects:
- *  - `stft(x)` -> `{ freqs: number[], times: number[], Zxx: ComplexTensor }`
- *    with `Zxx` shaped `[freqs.length, times.length]` (frequency-major, like
- *    SciPy; the `times` are segment centres, shifted so the first is 0 when
- *    `boundary` is set).
- *  - `istft(Zxx)` -> `{ times: number[], x: Tensor }`.
+ *  - `stft(x, { axis })` -> `{ freqs: number[], times: number[], Zxx: ComplexTensor }`.
+ *    For a 1-D `x`, `Zxx` is `[freqs.length, times.length]` (frequency-major,
+ *    like SciPy; the `times` are segment centres, shifted so the first is 0
+ *    when `boundary` is set). For N-D input the frequency axis takes the place
+ *    of `axis` and the time axis is appended last, exactly as in SciPy:
+ *    `[a, n, b]` with `axis: 1` gives `[a, freqs, b, times]`.
+ *  - `istft(Zxx, { freqAxis, timeAxis })` -> `{ times: number[], x }`; `x` is
+ *    a `Tensor` for a one-sided input and a `ComplexTensor` for
+ *    `inputOnesided: false` (as SciPy returns complex there). The frequency
+ *    axis is removed from `Zxx`'s shape and the signal takes the place of the
+ *    time axis, as in SciPy.
+ *
+ * Complex input to `stft` (a `ComplexTensor`) is always two-sided, in FFT
+ * order; like SciPy, `stft` warns when `onesided` was not turned off.
  *
  * `istft` is weighted overlap-add with window-power normalisation (SciPy's
  * algorithm), exact (to floating-point precision) whenever the window and
  * overlap satisfy the NOLA condition -- the Hann-at-50% default does, and with
  * the default `boundary`/`padded` the whole signal comes back, edges included.
+ * When the NOLA condition fails for the given window and overlap (some
+ * sample's window power sums to <= 1e-10), `istft` reports it as SciPy's
+ * warning: it calls `options.onWarning(message)` if given, else
+ * `console.warn(message)`. (SciPy's `stft` does not check NOLA, so neither does
+ * this one; see `checkNOLA` to test parameters up front.)
  *
  * `scaling` accepts SciPy's `"spectrum"` and `"psd"` (`X / sqrt(fs · Σw²)`),
  * `"density"` as an alias of `"psd"`, and a non-SciPy `"none"` (the raw
  * windowed DFT). One-sided bins are NOT doubled (SciPy doesn't either).
  *
- * Disclosed limits (not implemented): 1-D real input only (no `axis` /
- * `time_axis` / `freq_axis`, no complex input); `istft` returns the real part
- * (SciPy returns complex for `input_onesided=false`) and does not emit
- * SciPy's NOLA warning; `window` is a name or an array, not a
- * `(name, param)` tuple; `detrend` is not a callable.
+ * Disclosed limits: an empty input throws (SciPy returns empty arrays). For
+ * N-D `istft` input, `times` has one entry per output sample (`x`'s length
+ * along its time axis); SciPy 1.16 computes it from `x.shape[0]`, which is the
+ * wrong length for N-D input unless the time axis comes first.
  */
 import { ComplexTensor } from "@johnhenry/math-plus-fft";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { planDft } from "./dft.ts";
-import { binFrequencies, type Boundary, resolveSegments, segmentSpectrum, type SegmentOptions } from "./spectral.ts";
+import { isComplexTensor, normalizeAxis, rowsAlong, type SignalInput, valuesOf, checkAxesDistinct } from "./nd.ts";
+import { binFrequencies, type Boundary, emitWarning, prepareRow, resolveSegments, segmentSpectrum, type SegmentOptions, type WarningOptions } from "./spectral.ts";
 import { getWindow, type WindowSpec } from "./window.ts";
 
 export type StftScaling = "spectrum" | "psd" | "density" | "none";
@@ -42,6 +56,8 @@ export interface StftOptions extends SegmentOptions {
   readonly boundary?: Boundary;
   /** Zero-pad the (extended) signal to a whole number of segments so no tail is dropped. Default `true`. */
   readonly padded?: boolean;
+  /** Axis along which the STFT is computed; default -1 (the last). */
+  readonly axis?: number;
 }
 
 export interface StftResult {
@@ -49,7 +65,7 @@ export interface StftResult {
   readonly freqs: number[];
   /** Segment-centre times in `1/fs` units. */
   readonly times: number[];
-  /** The complex spectrogram, shape `[freqs.length, times.length]`. */
+  /** The complex spectrogram: the input's shape with `axis` replaced by the frequency axis (`freqs.length`) and the time axis (`times.length`) appended; `[freqs.length, times.length]` for a 1-D signal. */
   readonly Zxx: ComplexTensor;
 }
 
@@ -60,45 +76,53 @@ function checkScaling(who: string, scaling: unknown): StftScaling {
   return scaling;
 }
 
-/** `signal[T]` -> `{ freqs, times, Zxx }`, `Zxx` being `[bins, numFrames]` (one `nfft`-point DFT per windowed frame; `bins` is `floor(nfft/2)+1` one-sided, else `nfft`). */
-export function stft(signal: Tensor, options: StftOptions = {}): StftResult {
-  if (signal.shape.length !== 1) throw new RangeError("stft: 1-D Tensor only");
+/** `signal` -> `{ freqs, times, Zxx }`: one `nfft`-point DFT per windowed frame along `axis`; `bins` is `floor(nfft/2)+1` one-sided, else `nfft`. */
+export function stft(signal: SignalInput, options: StftOptions = {}): StftResult {
   const scaling = checkScaling("stft", options.scaling ?? "spectrum");
-  // Read-only below, so no defensive copy is needed even when `.data`
-  // aliases `signal`'s own storage.
-  const data = signal.contiguous().data as Float64Array;
-  const p = resolveSegments("stft", data, options, {
+  const rows = rowsAlong("stft", signal, options.axis ?? -1);
+  const p = resolveSegments("stft", rows.n, rows.im !== null, options, {
     defaultDetrend: false,
     boundary: options.boundary === undefined ? "zeros" : options.boundary,
     padded: options.padded ?? true,
+    warnComplexOnesided: true,
   });
   const { bins, numFrames } = p;
   const scale = scaling === "none" ? 1 : scaling === "spectrum" ? 1 / p.sumW : 1 / Math.sqrt(p.fs * p.sumW2);
 
-  const realOut = new Float64Array(bins * numFrames);
-  const imagOut = new Float64Array(bins * numFrames);
+  // Final layout: shape with `axis` -> bins, then time last: [pre, bins, inner, numFrames]
+  const total = rows.pre * bins * rows.inner * numFrames;
+  const realOut = new Float64Array(total);
+  const imagOut = new Float64Array(total);
   const times: number[] = [];
   const shift = p.extended ? p.nperseg / 2 : 0;
-  for (let f = 0; f < numFrames; f++) {
-    const start = f * p.hop;
-    const { re, im } = segmentSpectrum(start, p);
-    for (let k = 0; k < bins; k++) {
-      realOut[k * numFrames + f] = (re[k] as number) * scale;
-      imagOut[k * numFrames + f] = (im[k] as number) * scale;
+  for (let f = 0; f < numFrames; f++) times.push((f * p.hop + p.nperseg / 2 - shift) / p.fs);
+  for (let r = 0; r < rows.rows; r++) {
+    const row = prepareRow("stft", p, rows.re.subarray(r * rows.n, (r + 1) * rows.n), rows.im === null ? null : rows.im.subarray(r * rows.n, (r + 1) * rows.n));
+    const pi = Math.floor(r / rows.inner);
+    const ii = r % rows.inner;
+    for (let f = 0; f < numFrames; f++) {
+      const { re, im } = segmentSpectrum("stft", f * p.hop, p, row);
+      for (let k = 0; k < bins; k++) {
+        const at = ((pi * bins + k) * rows.inner + ii) * numFrames + f;
+        realOut[at] = (re[k] as number) * scale;
+        imagOut[at] = (im[k] as number) * scale;
+      }
     }
-    times.push((start + p.nperseg / 2 - shift) / p.fs);
   }
+  const shape = [...rows.shape];
+  shape[rows.axis] = bins;
+  shape.push(numFrames);
   const Zxx = ComplexTensor.fromParts(
-    Tensor.fromTypedArray(realOut, [bins, numFrames], { dtype: "f64" }),
-    Tensor.fromTypedArray(imagOut, [bins, numFrames], { dtype: "f64" }),
+    Tensor.fromTypedArray(realOut, shape, { dtype: "f64" }),
+    Tensor.fromTypedArray(imagOut, shape, { dtype: "f64" }),
   );
   return { freqs: binFrequencies(p.nfft, p.fs, p.onesided), times, Zxx };
 }
 
-export interface IstftOptions {
+export interface IstftOptions extends WarningOptions {
   /** Sample rate; default 1. */
   readonly fs?: number;
-  /** Window used by `stft` (name, or a `Float64Array` of length `nperseg`). Default `"hann"`. */
+  /** Window used by `stft` (name, tuple, number or a `Float64Array` of length `nperseg`). Default `"hann"`. */
   readonly window?: WindowSpec;
   /** Segment length used by `stft`. Default `2 * (bins - 1)` for a one-sided input, else `bins` (so pass it for odd segment lengths). */
   readonly nperseg?: number;
@@ -106,23 +130,43 @@ export interface IstftOptions {
   readonly noverlap?: number;
   /** DFT length used by `stft`; default as SciPy: `nperseg` for a one-sided odd-`nperseg` input, else the inferred segment length. */
   readonly nfft?: number;
-  /** `Zxx` holds only the non-negative frequencies (`stft`'s `onesided`). Default `true`. */
+  /** `Zxx` holds only the non-negative frequencies (`stft`'s `onesided`). Default `true`. When `false` the result `x` is complex, as in SciPy. */
   readonly inputOnesided?: boolean;
   /** `Zxx` was made with a boundary extension; drop it from the output. Default `true`. */
   readonly boundary?: boolean;
   /** The `scaling` used by `stft`: `"spectrum"` (default), `"psd"`/`"density"`, or `"none"`. */
   readonly scaling?: StftScaling;
+  /** Axis of `Zxx` holding the frequencies; default -2. */
+  readonly freqAxis?: number;
+  /** Axis of `Zxx` holding the segment index (time); default -1. */
+  readonly timeAxis?: number;
+}
+
+export interface IstftResult<X extends Tensor | ComplexTensor = Tensor | ComplexTensor> {
+  /** Sample times `i / fs`, one per output sample. */
+  readonly times: number[];
+  /** The signal: `Zxx`'s shape without the frequency axis, the signal taking the place of the time axis. A `Tensor` for a one-sided input, a `ComplexTensor` for `inputOnesided: false`. */
+  readonly x: X;
 }
 
 /**
- * Inverse of `stft` (`scipy.signal.istft`): `Zxx` is `[bins, numFrames]`; returns
- * `{ times, x }` with `times[i] = i / fs`. With no options it inverts
- * `stft(x)`'s defaults; pass the same options you gave `stft` otherwise
- * (`onesided` there is `inputOnesided` here).
+ * Inverse of `stft` (`scipy.signal.istft`): `Zxx` is a `ComplexTensor` (or a real `Tensor`) of at least 2 dimensions,
+ * `[bins, numFrames]` by default (`freqAxis` -2, `timeAxis` -1). With no options it inverts `stft(x)`'s defaults;
+ * pass the same options you gave `stft` otherwise (`onesided` there is `inputOnesided` here).
  */
-export function istft(Zxx: ComplexTensor, options: IstftOptions = {}): { times: number[]; x: Tensor } {
-  if (Zxx.shape.length !== 2) throw new RangeError("istft: expected a 2-D [bins, numFrames] ComplexTensor");
-  const [nBins, nseg] = Zxx.shape as [number, number];
+export function istft(Zxx: SignalInput, options: IstftOptions & { readonly inputOnesided: false }): IstftResult<ComplexTensor>;
+export function istft(Zxx: SignalInput, options?: IstftOptions & { readonly inputOnesided?: true }): IstftResult<Tensor>;
+export function istft(Zxx: SignalInput, options?: IstftOptions): IstftResult;
+export function istft(Zxx: SignalInput, options: IstftOptions = {}): IstftResult {
+  const complexIn = isComplexTensor(Zxx);
+  const shape = (complexIn ? Zxx.real : Zxx).shape as readonly number[];
+  const ndim = shape.length;
+  if (ndim < 2) throw new RangeError("istft: expected a ComplexTensor (or real Tensor) spectrogram of at least 2 dimensions (frequency x time)");
+  const fa = normalizeAxis("istft", options.freqAxis ?? -2, ndim, "freqAxis");
+  const ta = normalizeAxis("istft", options.timeAxis ?? -1, ndim, "timeAxis");
+  checkAxesDistinct("istft", fa, ta);
+  const nBins = shape[fa] as number;
+  const nseg = shape[ta] as number;
   const fs = options.fs ?? 1;
   if (!(fs > 0) || !Number.isFinite(fs)) throw new RangeError(`istft: fs must be a finite number above 0, got ${fs}`);
   const scaling = checkScaling("istft", options.scaling ?? "spectrum");
@@ -153,55 +197,112 @@ export function istft(Zxx: ComplexTensor, options: IstftOptions = {}): { times: 
   }
   const scale = scaling === "none" ? 1 : scaling === "spectrum" ? sumW : Math.sqrt(fs * sumW2);
 
-  const zRe = Zxx.real.contiguous().data as Float64Array;
-  const zIm = Zxx.imag.contiguous().data as Float64Array;
+  const zRe = valuesOf(complexIn ? Zxx.real : Zxx);
+  const zIm = complexIn ? valuesOf(Zxx.imag) : null;
   const plan = planDft(nfft);
   const outLen = nperseg + (nseg - 1) * hop;
-  const out = new Float64Array(outLen);
+
+  // Window power: the same for every row, so the NOLA check and the divisor are computed once.
   const norm = new Float64Array(outLen);
-  const fullRe = new Float64Array(nfft);
-  const fullIm = new Float64Array(nfft);
-
   for (let t = 0; t < nseg; t++) {
-    fullRe.fill(0);
-    fullIm.fill(0);
-    if (inputOnesided) {
-      // irfft(n=nfft): bins 0 … floor(nfft/2) of the column (zero-padded or truncated), rebuilt Hermitian
-      const top = Math.floor(nfft / 2);
-      for (let k = 0; k <= top; k++) {
-        const re = k < nBins ? (zRe[k * nseg + t] as number) : 0;
-        let im = k < nBins ? (zIm[k * nseg + t] as number) : 0;
-        if (k === 0 || (nfft % 2 === 0 && k === top)) im = 0; // C2R ignores the imaginary part of DC and Nyquist
-        fullRe[k] = re;
-        fullIm[k] = im;
-        if (k > 0 && nfft - k !== k) {
-          fullRe[nfft - k] = re;
-          fullIm[nfft - k] = -im;
-        }
-      }
-    } else {
-      const keep = Math.min(nBins, nfft); // ifft(n=nfft): truncate or zero-pad the column
-      for (let k = 0; k < keep; k++) {
-        fullRe[k] = zRe[k * nseg + t] as number;
-        fullIm[k] = zIm[k * nseg + t] as number;
-      }
-    }
-    const sub = plan.transform(fullRe, fullIm, true).re;
-    const start = t * hop;
-    for (let i = 0; i < nperseg; i++) {
-      const w = window[i] as number;
-      out[start + i] = (out[start + i] as number) + (sub[i] as number) * scale * w;
-      norm[start + i] = (norm[start + i] as number) + w * w;
-    }
+    for (let i = 0; i < nperseg; i++) norm[t * hop + i] = (norm[t * hop + i] as number) + (window[i] as number) ** 2;
   }
-
   const trim = options.boundary ?? true ? Math.floor(nperseg / 2) : 0;
   const end = trim > 0 ? outLen - trim : outLen;
-  const x = new Float64Array(Math.max(0, end - trim));
-  for (let i = trim; i < end; i++) {
-    const nrm = norm[i] as number;
-    x[i - trim] = nrm > 1e-10 ? (out[i] as number) / nrm : (out[i] as number);
+  const L = Math.max(0, end - trim);
+  let nolaOk = true;
+  for (let i = trim; i < end; i++) if (!((norm[i] as number) > 1e-10)) nolaOk = false;
+  if (!nolaOk) {
+    emitWarning(options, `istft: NOLA condition failed, STFT may not be invertible.${trim > 0 ? "" : " Possibly due to missing boundary"}`);
   }
-  const times = Array.from({ length: x.length }, (_, i) => i / fs);
-  return { times, x: Tensor.fromTypedArray(x, [x.length], { dtype: "f64" }) };
+
+  // Strides of Zxx (row-major), the outer axes in order, and the output layout (outer axes with the signal at `timeOut`).
+  const strides = new Array<number>(ndim);
+  let acc = 1;
+  for (let d = ndim - 1; d >= 0; d--) {
+    strides[d] = acc;
+    acc *= shape[d] as number;
+  }
+  const outer = shape.map((_, d) => d).filter((d) => d !== fa && d !== ta);
+  const outerDims = outer.map((d) => shape[d] as number);
+  const timeOut = ta - (fa < ta ? 1 : 0);
+  const outShape = outerDims.slice();
+  outShape.splice(timeOut, 0, L);
+  const outStrides = new Array<number>(outShape.length);
+  acc = 1;
+  for (let d = outShape.length - 1; d >= 0; d--) {
+    outStrides[d] = acc;
+    acc *= outShape[d] as number;
+  }
+  const outerOutStride = outer.map((_, k) => outStrides[k < timeOut ? k : k + 1] as number);
+  const lStride = outStrides[timeOut] as number;
+  const rows = outerDims.reduce((a, b) => a * b, 1);
+
+  const outRe = new Float64Array(acc);
+  const outIm = inputOnesided ? null : new Float64Array(acc);
+  const sRe = new Float64Array(outLen);
+  const sIm = new Float64Array(outLen);
+  const fullRe = new Float64Array(nfft);
+  const fullIm = new Float64Array(nfft);
+  const idx = new Array<number>(outer.length).fill(0);
+
+  for (let r = 0; r < rows; r++) {
+    let inBase = 0;
+    let outBase = 0;
+    for (let k = 0; k < outer.length; k++) {
+      inBase += (idx[k] as number) * (strides[outer[k] as number] as number);
+      outBase += (idx[k] as number) * (outerOutStride[k] as number);
+    }
+    sRe.fill(0);
+    sIm.fill(0);
+    for (let t = 0; t < nseg; t++) {
+      fullRe.fill(0);
+      fullIm.fill(0);
+      const col = inBase + t * (strides[ta] as number);
+      const fStride = strides[fa] as number;
+      if (inputOnesided) {
+        // irfft(n=nfft): bins 0 … floor(nfft/2) of the column (zero-padded or truncated), rebuilt Hermitian
+        const top = Math.floor(nfft / 2);
+        for (let k = 0; k <= top; k++) {
+          const re = k < nBins ? (zRe[col + k * fStride] as number) : 0;
+          let im = k < nBins && zIm !== null ? (zIm[col + k * fStride] as number) : 0;
+          if (k === 0 || (nfft % 2 === 0 && k === top)) im = 0; // C2R ignores the imaginary part of DC and Nyquist
+          fullRe[k] = re;
+          fullIm[k] = im;
+          if (k > 0 && nfft - k !== k) {
+            fullRe[nfft - k] = re;
+            fullIm[nfft - k] = -im;
+          }
+        }
+      } else {
+        const keep = Math.min(nBins, nfft); // ifft(n=nfft): truncate or zero-pad the column
+        for (let k = 0; k < keep; k++) {
+          fullRe[k] = zRe[col + k * fStride] as number;
+          fullIm[k] = zIm === null ? 0 : (zIm[col + k * fStride] as number);
+        }
+      }
+      const sub = plan.transform(fullRe, fullIm, true);
+      const start = t * hop;
+      for (let i = 0; i < nperseg; i++) {
+        const w = (window[i] as number) * scale;
+        sRe[start + i] = (sRe[start + i] as number) + (sub.re[i] as number) * w;
+        if (!inputOnesided) sIm[start + i] = (sIm[start + i] as number) + (sub.im[i] as number) * w;
+      }
+    }
+    for (let i = trim; i < end; i++) {
+      const nrm = norm[i] as number;
+      const div = nrm > 1e-10 ? nrm : 1;
+      outRe[outBase + (i - trim) * lStride] = (sRe[i] as number) / div;
+      if (outIm !== null) outIm[outBase + (i - trim) * lStride] = (sIm[i] as number) / div;
+    }
+    for (let k = outer.length - 1; k >= 0; k--) {
+      idx[k] = (idx[k] as number) + 1;
+      if ((idx[k] as number) < (outerDims[k] as number)) break;
+      idx[k] = 0;
+    }
+  }
+  const times = Array.from({ length: L }, (_, i) => i / fs);
+  const re = Tensor.fromTypedArray(outRe, outShape, { dtype: "f64" });
+  if (outIm === null) return { times, x: re };
+  return { times, x: ComplexTensor.fromParts(re, Tensor.fromTypedArray(outIm, outShape, { dtype: "f64" })) };
 }
