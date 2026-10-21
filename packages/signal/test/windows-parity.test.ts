@@ -10,6 +10,12 @@ import { closeScaled, maxAbs, runScipyOracle, SCIPY_17_PLUS, SCIPY_SKIP_REASON }
 // symmetric, lengths 0 to 255, plus SciPy's errors (and their classes) and warnings.
 
 const TOL = 1e-12;
+/**
+ * chebwin is an inverse DFT of the Chebyshev polynomial's samples (as in SciPy), so its last bits depend on the FFT
+ * rounding of whichever NumPy is installed: ~1.4e-12 against NumPy 2.5 at n = 255. It is held to 1e-11.
+ */
+const CHEB_TOL = 1e-11;
+const CHEB = new Set(["chebwin", "cheb"]);
 
 interface Case {
   readonly window: unknown;
@@ -38,6 +44,7 @@ const nameOf = (w: unknown): unknown => (Array.isArray(w) ? w[0] : w);
 
 /** Our `getWindow` must agree with SciPy on a case: the same values at 1e-12, or an error of the same class, and the same warnings. */
 function agree(c: Case, want: Want, tol = TOL): void {
+  if (CHEB.has(String(nameOf(c.window)))) tol = Math.max(tol, CHEB_TOL);
   const what = `${JSON.stringify(c.window)} n=${c.n} fftbins=${c.fftbins}`;
   if (SCIPY_17_PLUS) {
     // SciPy >= 1.17 refuses n = 0 and numeric strings and accepts newer spellings; this package is 1.16's (see helpers.ts)
