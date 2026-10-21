@@ -46,7 +46,9 @@ export function welch(signal: Tensor, options: WelchOptions = {}): { frequencies
   const scale = scaling === "density" ? 1 / (p.fs * p.sumW2) : 1 / (p.sumW * p.sumW);
   // One-sided: fold the negative frequencies in -- every bin but DC (and Nyquist, for even nfft) counts twice.
   const lastDoubled = nfft % 2 ? bins - 1 : bins - 2;
+  const keepAll = average === "median"; // only the median needs every segment's periodogram; the mean streams
   const periodograms: Float64Array[] = [];
+  const psdData = new Float64Array(bins);
   for (let f = 0; f < p.numFrames; f++) {
     const { re, im } = segmentSpectrum(f * p.hop, p);
     const pw = new Float64Array(bins);
@@ -55,14 +57,15 @@ export function welch(signal: Tensor, options: WelchOptions = {}): { frequencies
       if (p.onesided && k >= 1 && k <= lastDoubled) v *= 2;
       pw[k] = v;
     }
-    periodograms.push(pw);
+    if (keepAll) periodograms.push(pw);
+    else for (let k = 0; k < bins; k++) psdData[k] = (psdData[k] as number) + (pw[k] as number);
   }
 
-  const psdData = new Float64Array(bins);
-  const n = periodograms.length;
-  if (average === "mean" || n === 1) {
-    for (const pw of periodograms) for (let k = 0; k < bins; k++) psdData[k] = (psdData[k] as number) + (pw[k] as number);
+  const n = p.numFrames;
+  if (!keepAll) {
     for (let k = 0; k < bins; k++) psdData[k] = (psdData[k] as number) / n;
+  } else if (n === 1) {
+    psdData.set(periodograms[0] as Float64Array); // a single segment is returned as is (no bias correction)
   } else {
     const bias = medianBias(n);
     const column = new Float64Array(n);
