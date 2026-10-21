@@ -36,7 +36,7 @@ export function runScipyOracle<T>(job: Record<string, unknown>): T {
   try {
     const jobPath = join(dir, "job.json");
     writeFileSync(jobPath, JSON.stringify(job));
-    const stdout = execFileSync(SCIPY_PYTHON, [ORACLE_SCRIPT, jobPath], { stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = execFileSync(SCIPY_PYTHON, [ORACLE_SCRIPT, jobPath], { stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 });
     return JSON.parse(stdout.toString("utf8")) as T;
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -72,9 +72,10 @@ test("istft: throws when the nperseg option doesn't match the spectrogram's own 
   assert.throws(() => istft(spec, { nperseg: 32 }), RangeError);
 });
 
-test("stft: rejects a non-power-of-two nperseg", () => {
+test("stft: a non-power-of-two nperseg is zero-padded to the next power of two (issue #178); a non-power-of-two nfft is rejected", () => {
   const signal = Tensor.from([1, 2, 3, 4, 5, 6], { dtype: "f64" });
-  assert.throws(() => stft(signal, { nperseg: 6 }), RangeError);
+  assert.deepEqual(stft(signal, { nperseg: 6 }).shape, [1, 8]);
+  assert.throws(() => stft(signal, { nperseg: 6, nfft: 6 }), RangeError);
 });
 
 test("stft: rejects a >1-D input", () => {
