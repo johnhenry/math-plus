@@ -1,128 +1,207 @@
 /**
- * stft/istft (issues #44, #178). Standard windowed short-time Fourier
- * transform: each frame is `window * signal[start:start+nperseg]` (optionally
- * detrended first), zero-padded to `nfft` and transformed via
- * @johnhenry/math-plus-fft's `fft`; `istft` reconstructs via weighted
- * overlap-add (WOLA) with window-power normalization -- the standard COLA
- * reconstruction, exact (to floating-point precision) for the default
- * Hann-window-at-50%-overlap configuration.
+ * stft/istft (issues #44, #178). With no options `stft(x)` is
+ * `scipy.signal.stft(x)` and `istft(Zxx)` is `scipy.signal.istft(Zxx)`:
+ * fs 1, periodic Hann window, `nperseg = min(256, n)`, 50% overlap,
+ * `nfft = nperseg`, `detrend=false`, `scaling="spectrum"` (`X / Σw`),
+ * one-sided (`return_onesided=True`), `boundary="zeros"`, `padded=true`.
  *
- * `stft` returns the `[numFrames, bins]` ComplexTensor it always did, now
- * also carrying `freqs`, `times` (segment centres, `(start + nperseg/2) / fs`)
- * and `frames` (the tensor itself), so `const { freqs, times, frames } =
- * stft(x, opts)` works. Options follow `scipy.signal.stft` with
- * `boundary=None, padded=False` (no edge extension: samples past the last
- * full frame are dropped); `scaling` adds `"none"` (default, the raw FFT)
- * to SciPy's `"spectrum"` (`X / Σw`) and `"density"` (`X / sqrt(fs · Σw²)`,
- * SciPy's `"psd"`). Unlike `welch`, one-sided bins are NOT doubled
- * (SciPy doesn't either).
+ * Return shapes follow SciPy's `(f, t, Zxx)` / `(t, x)` as plain objects:
+ *  - `stft(x)` -> `{ freqs: number[], times: number[], Zxx: ComplexTensor }`
+ *    with `Zxx` shaped `[freqs.length, times.length]` (frequency-major, like
+ *    SciPy; the `times` are segment centres, shifted so the first is 0 when
+ *    `boundary` is set).
+ *  - `istft(Zxx)` -> `{ times: number[], x: Tensor }`.
  *
- * Disclosed limits: `nfft` must be a power of two (the FFT package's
- * requirement). `istft` only inverts a two-sided, un-padded (`nfft ===
- * nperseg`), un-detrended, `scaling: "none"` spectrogram and throws on a
- * one-sided or zero-padded one.
+ * `istft` is weighted overlap-add with window-power normalisation (SciPy's
+ * algorithm), exact (to floating-point precision) whenever the window and
+ * overlap satisfy the NOLA condition -- the Hann-at-50% default does, and with
+ * the default `boundary`/`padded` the whole signal comes back, edges included.
+ *
+ * `scaling` accepts SciPy's `"spectrum"` and `"psd"` (`X / sqrt(fs · Σw²)`),
+ * `"density"` as an alias of `"psd"`, and a non-SciPy `"none"` (the raw
+ * windowed DFT). One-sided bins are NOT doubled (SciPy doesn't either).
+ *
+ * Disclosed limits (not implemented): 1-D real input only (no `axis` /
+ * `time_axis` / `freq_axis`, no complex input); `istft` returns the real part
+ * (SciPy returns complex for `input_onesided=false`) and does not emit
+ * SciPy's NOLA warning; `window` is a name or an array, not a
+ * `(name, param)` tuple; `detrend` is not a callable.
  */
-import { ComplexTensor, ifft } from "@johnhenry/math-plus-fft";
+import { ComplexTensor } from "@johnhenry/math-plus-fft";
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
-import { binFrequencies, resolveSegments, segmentSpectrum, type SegmentOptions } from "./spectral.ts";
-import { getWindow } from "./window.ts";
+import { planDft } from "./dft.ts";
+import { binFrequencies, type Boundary, resolveSegments, segmentSpectrum, type SegmentOptions } from "./spectral.ts";
+import { getWindow, type WindowSpec } from "./window.ts";
+
+export type StftScaling = "spectrum" | "psd" | "density" | "none";
 
 export interface StftOptions extends SegmentOptions {
-  /** `"none"` (default): raw FFT of each windowed frame. `"spectrum"`: divided by `Σw`. `"density"`: divided by `sqrt(fs · Σw²)`. */
-  readonly scaling?: "none" | "density" | "spectrum";
+  /** `"spectrum"` (default): `X / Σw`. `"psd"` / `"density"`: `X / sqrt(fs · Σw²)`. `"none"`: the raw windowed DFT (not in SciPy). */
+  readonly scaling?: StftScaling;
+  /** Extend the signal by `floor(nperseg / 2)` samples at both ends so the first and last samples sit at a window centre: `"zeros"` (default), `"even"`, `"odd"`, `"constant"`, or `null` for none. */
+  readonly boundary?: Boundary;
+  /** Zero-pad the (extended) signal to a whole number of segments so no tail is dropped. Default `true`. */
+  readonly padded?: boolean;
 }
 
-/** What `stft` returns: the `[numFrames, bins]` complex spectrogram, plus its axes. */
-export type Spectrogram = ComplexTensor & {
+export interface StftResult {
+  /** Bin frequencies (`rfftfreq` one-sided, `fftfreq` order two-sided). */
   readonly freqs: number[];
+  /** Segment-centre times in `1/fs` units. */
   readonly times: number[];
-  readonly frames: ComplexTensor;
-};
+  /** The complex spectrogram, shape `[freqs.length, times.length]`. */
+  readonly Zxx: ComplexTensor;
+}
 
-/** `signal[T]` -> a `[numFrames, bins]` Spectrogram (one `nfft`-point FFT per windowed frame; `bins` is `nfft`, or `nfft/2+1` one-sided). */
-export function stft(signal: Tensor, options: StftOptions = {}): Spectrogram {
-  if (signal.shape.length !== 1) throw new RangeError("stft: v1 supports 1-D Tensor only");
-  const scaling = options.scaling ?? "none";
-  if (scaling !== "none" && scaling !== "density" && scaling !== "spectrum") {
-    throw new RangeError(`stft: scaling must be "none", "density" or "spectrum", got ${String(scaling)}`);
+function checkScaling(who: string, scaling: unknown): StftScaling {
+  if (scaling !== "none" && scaling !== "density" && scaling !== "psd" && scaling !== "spectrum") {
+    throw new RangeError(`${who}: scaling must be "spectrum", "psd", "density" or "none", got ${String(scaling)}`);
   }
+  return scaling;
+}
+
+/** `signal[T]` -> `{ freqs, times, Zxx }`, `Zxx` being `[bins, numFrames]` (one `nfft`-point DFT per windowed frame; `bins` is `floor(nfft/2)+1` one-sided, else `nfft`). */
+export function stft(signal: Tensor, options: StftOptions = {}): StftResult {
+  if (signal.shape.length !== 1) throw new RangeError("stft: 1-D Tensor only");
+  const scaling = checkScaling("stft", options.scaling ?? "spectrum");
   // Read-only below, so no defensive copy is needed even when `.data`
   // aliases `signal`'s own storage.
   const data = signal.contiguous().data as Float64Array;
-  const p = resolveSegments("stft", data.length, options);
-  const bins = p.onesided ? p.nfft / 2 + 1 : p.nfft;
+  const p = resolveSegments("stft", data, options, {
+    defaultDetrend: false,
+    boundary: options.boundary === undefined ? "zeros" : options.boundary,
+    padded: options.padded ?? true,
+  });
+  const { bins, numFrames } = p;
   const scale = scaling === "none" ? 1 : scaling === "spectrum" ? 1 / p.sumW : 1 / Math.sqrt(p.fs * p.sumW2);
 
-  const realOut = new Float64Array(p.numFrames * bins);
-  const imagOut = new Float64Array(p.numFrames * bins);
+  const realOut = new Float64Array(bins * numFrames);
+  const imagOut = new Float64Array(bins * numFrames);
   const times: number[] = [];
-  for (let f = 0; f < p.numFrames; f++) {
+  const shift = p.extended ? p.nperseg / 2 : 0;
+  for (let f = 0; f < numFrames; f++) {
     const start = f * p.hop;
-    const { real, imag } = segmentSpectrum(data, start, p);
+    const { re, im } = segmentSpectrum(start, p);
     for (let k = 0; k < bins; k++) {
-      realOut[f * bins + k] = (real[k] as number) * scale;
-      imagOut[f * bins + k] = (imag[k] as number) * scale;
+      realOut[k * numFrames + f] = (re[k] as number) * scale;
+      imagOut[k * numFrames + f] = (im[k] as number) * scale;
     }
-    times.push((start + p.nperseg / 2) / p.fs);
+    times.push((start + p.nperseg / 2 - shift) / p.fs);
   }
-  const out = ComplexTensor.fromParts(
-    Tensor.fromTypedArray(realOut, [p.numFrames, bins], { dtype: "f64" }),
-    Tensor.fromTypedArray(imagOut, [p.numFrames, bins], { dtype: "f64" }),
+  const Zxx = ComplexTensor.fromParts(
+    Tensor.fromTypedArray(realOut, [bins, numFrames], { dtype: "f64" }),
+    Tensor.fromTypedArray(imagOut, [bins, numFrames], { dtype: "f64" }),
   );
-  return Object.assign(out, { freqs: binFrequencies(p.nfft, p.fs, p.onesided), times, frames: out });
+  return { freqs: binFrequencies(p.nfft, p.fs, p.onesided), times, Zxx };
 }
 
-function resolveInverse(spectrogramNperseg: number, options: StftOptions): { window: Float64Array; nperseg: number; hop: number } {
-  const nperseg = options.nperseg ?? spectrogramNperseg;
+export interface IstftOptions {
+  /** Sample rate; default 1. */
+  readonly fs?: number;
+  /** Window used by `stft` (name, or a `Float64Array` of length `nperseg`). Default `"hann"`. */
+  readonly window?: WindowSpec;
+  /** Segment length used by `stft`. Default `2 * (bins - 1)` for a one-sided input, else `bins` (so pass it for odd segment lengths). */
+  readonly nperseg?: number;
+  /** Overlap used by `stft`; default `floor(nperseg / 2)`. */
+  readonly noverlap?: number;
+  /** DFT length used by `stft`; default as SciPy: `nperseg` for a one-sided odd-`nperseg` input, else the inferred segment length. */
+  readonly nfft?: number;
+  /** `Zxx` holds only the non-negative frequencies (`stft`'s `onesided`). Default `true`. */
+  readonly inputOnesided?: boolean;
+  /** `Zxx` was made with a boundary extension; drop it from the output. Default `true`. */
+  readonly boundary?: boolean;
+  /** The `scaling` used by `stft`: `"spectrum"` (default), `"psd"`/`"density"`, or `"none"`. */
+  readonly scaling?: StftScaling;
+}
+
+/**
+ * Inverse of `stft` (`scipy.signal.istft`): `Zxx` is `[bins, numFrames]`; returns
+ * `{ times, x }` with `times[i] = i / fs`. With no options it inverts
+ * `stft(x)`'s defaults; pass the same options you gave `stft` otherwise
+ * (`onesided` there is `inputOnesided` here).
+ */
+export function istft(Zxx: ComplexTensor, options: IstftOptions = {}): { times: number[]; x: Tensor } {
+  if (Zxx.shape.length !== 2) throw new RangeError("istft: expected a 2-D [bins, numFrames] ComplexTensor");
+  const [nBins, nseg] = Zxx.shape as [number, number];
+  const fs = options.fs ?? 1;
+  if (!(fs > 0) || !Number.isFinite(fs)) throw new RangeError(`istft: fs must be a finite number above 0, got ${fs}`);
+  const scaling = checkScaling("istft", options.scaling ?? "spectrum");
+  const inputOnesided = options.inputOnesided ?? true;
+  const nDefault = inputOnesided ? 2 * (nBins - 1) : nBins;
+
+  const spec = options.window ?? "hann";
+  const nperseg = options.nperseg ?? (spec instanceof Float64Array ? spec.length : nDefault);
   if (!Number.isInteger(nperseg) || nperseg < 1) throw new RangeError(`istft: nperseg must be a positive integer, got ${nperseg}`);
+  const nfft = options.nfft ?? (inputOnesided && nperseg === nDefault + 1 ? nperseg : nDefault);
+  if (!Number.isInteger(nfft) || nfft < nperseg) throw new RangeError(`istft: nfft (${nfft}) must be an integer >= nperseg (${nperseg})`);
   const noverlap = options.noverlap ?? Math.floor(nperseg / 2);
   if (!Number.isInteger(noverlap) || noverlap < 0 || noverlap >= nperseg) {
-    throw new RangeError(`istft: noverlap (${noverlap}) must be in [0, nperseg) (nperseg=${nperseg})`);
+    throw new RangeError(`istft: noverlap (${noverlap}) must be an integer in [0, nperseg) (nperseg=${nperseg})`);
   }
+  const hop = nperseg - noverlap;
   let window: Float64Array;
   try {
-    window = getWindow(options.window ?? "hann", nperseg);
+    window = getWindow(spec, nperseg);
   } catch (e) {
     throw new RangeError(`istft: ${(e as Error).message}`);
   }
-  return { window, nperseg, hop: nperseg - noverlap };
-}
-
-/** Inverse of `stft` -- weighted overlap-add reconstruction. `options` should match what `stft` was called with (nperseg is inferred from `spectrogram`'s own shape if omitted; the spectrogram must be two-sided, un-padded and unscaled, see the header). */
-export function istft(spectrogram: ComplexTensor, options: StftOptions = {}): Tensor {
-  if (spectrogram.shape.length !== 2) throw new RangeError("istft: expected a [numFrames, nperseg] ComplexTensor");
-  const [numFrames, spectrogramNperseg] = spectrogram.shape as [number, number];
-  const { window, nperseg, hop } = resolveInverse(spectrogramNperseg, options);
-  if (nperseg !== spectrogramNperseg) {
-    throw new RangeError(`istft: nperseg option (${nperseg}) doesn't match the spectrogram's own frame length (${spectrogramNperseg})`);
+  let sumW = 0;
+  let sumW2 = 0;
+  for (const w of window) {
+    sumW += w;
+    sumW2 += w * w;
   }
+  const scale = scaling === "none" ? 1 : scaling === "spectrum" ? sumW : Math.sqrt(fs * sumW2);
 
-  const outLen = (numFrames - 1) * hop + nperseg;
+  const zRe = Zxx.real.contiguous().data as Float64Array;
+  const zIm = Zxx.imag.contiguous().data as Float64Array;
+  const plan = planDft(nfft);
+  const outLen = nperseg + (nseg - 1) * hop;
   const out = new Float64Array(outLen);
   const norm = new Float64Array(outLen);
+  const fullRe = new Float64Array(nfft);
+  const fullIm = new Float64Array(nfft);
 
-  for (let f = 0; f < numFrames; f++) {
-    const frameReal = new Float64Array(nperseg);
-    const frameImag = new Float64Array(nperseg);
-    for (let k = 0; k < nperseg; k++) {
-      frameReal[k] = spectrogram.real.at(f, k) as number;
-      frameImag[k] = spectrogram.imag.at(f, k) as number;
+  for (let t = 0; t < nseg; t++) {
+    fullRe.fill(0);
+    fullIm.fill(0);
+    if (inputOnesided) {
+      // irfft(n=nfft): bins 0 … floor(nfft/2) of the column (zero-padded or truncated), rebuilt Hermitian
+      const top = Math.floor(nfft / 2);
+      for (let k = 0; k <= top; k++) {
+        const re = k < nBins ? (zRe[k * nseg + t] as number) : 0;
+        let im = k < nBins ? (zIm[k * nseg + t] as number) : 0;
+        if (k === 0 || (nfft % 2 === 0 && k === top)) im = 0; // C2R ignores the imaginary part of DC and Nyquist
+        fullRe[k] = re;
+        fullIm[k] = im;
+        if (k > 0 && nfft - k !== k) {
+          fullRe[nfft - k] = re;
+          fullIm[nfft - k] = -im;
+        }
+      }
+    } else {
+      const keep = Math.min(nBins, nfft); // ifft(n=nfft): truncate or zero-pad the column
+      for (let k = 0; k < keep; k++) {
+        fullRe[k] = zRe[k * nseg + t] as number;
+        fullIm[k] = zIm[k * nseg + t] as number;
+      }
     }
-    const reconstructed = ifft(
-      ComplexTensor.fromParts(
-        Tensor.fromTypedArray(frameReal, [nperseg], { dtype: "f64" }),
-        Tensor.fromTypedArray(frameImag, [nperseg], { dtype: "f64" }),
-      ),
-    ).real.contiguous().data as Float64Array;
-    const start = f * hop;
+    const sub = plan.transform(fullRe, fullIm, true).re;
+    const start = t * hop;
     for (let i = 0; i < nperseg; i++) {
-      out[start + i] = (out[start + i] as number) + (reconstructed[i] as number) * (window[i] as number);
-      norm[start + i] = (norm[start + i] as number) + (window[i] as number) * (window[i] as number);
+      const w = window[i] as number;
+      out[start + i] = (out[start + i] as number) + (sub[i] as number) * scale * w;
+      norm[start + i] = (norm[start + i] as number) + w * w;
     }
   }
 
-  for (let i = 0; i < outLen; i++) {
-    out[i] = (norm[i] as number) > 1e-10 ? (out[i] as number) / (norm[i] as number) : 0;
+  const trim = options.boundary ?? true ? Math.floor(nperseg / 2) : 0;
+  const end = trim > 0 ? outLen - trim : outLen;
+  const x = new Float64Array(Math.max(0, end - trim));
+  for (let i = trim; i < end; i++) {
+    const nrm = norm[i] as number;
+    x[i - trim] = nrm > 1e-10 ? (out[i] as number) / nrm : (out[i] as number);
   }
-  return Tensor.fromTypedArray(out, [outLen], { dtype: "f64" });
+  const times = Array.from({ length: x.length }, (_, i) => i / fs);
+  return { times, x: Tensor.fromTypedArray(x, [x.length], { dtype: "f64" }) };
 }

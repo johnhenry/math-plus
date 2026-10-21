@@ -101,7 +101,7 @@ test("freqz rejects an empty sos", () => {
 
 // ---- welch --------------------------------------------------------------
 
-test("welch matches scipy.signal.welch (return_onesided=False, scaling='density', detrend=False), the documented v1 scope", { skip: SCIPY_SKIP_REASON }, () => {
+test("welch matches scipy.signal.welch (return_onesided=False, detrend=False) when those options are passed explicitly", { skip: SCIPY_SKIP_REASON }, () => {
   const n = 1024;
   const nperseg = 256;
   const noverlap = 128;
@@ -113,7 +113,7 @@ test("welch matches scipy.signal.welch (return_onesided=False, scaling='density'
   };
   const x = Array.from({ length: n }, () => rng());
   const signal = Tensor.from(x, { dtype: "f64" });
-  const got = welch(signal, { nperseg, noverlap });
+  const got = welch(signal, { nperseg, noverlap, onesided: false, detrend: false });
 
   const window = new Array(nperseg);
   for (let i = 0; i < nperseg; i++) window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / nperseg); // periodic Hann, matching hannWindow's default
@@ -146,7 +146,8 @@ test("welch: a pure sinusoid's PSD peaks at (or symmetrically around) its own fr
   );
 });
 
-test("welch rejects a signal too short for the requested nperseg", () => {
+test("welch clamps nperseg to the signal length (as SciPy does) but rejects a window longer than the signal", () => {
   const signal = Tensor.from([1, 2, 3], { dtype: "f64" });
-  assert.throws(() => welch(signal, { nperseg: 256 }), RangeError);
+  assert.equal(welch(signal, { nperseg: 256 }).frequencies.length, 2); // nperseg -> 3, one-sided -> 2 bins
+  assert.throws(() => welch(signal, { window: new Float64Array(8) }), RangeError);
 });

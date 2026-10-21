@@ -1,14 +1,14 @@
 /**
  * welch (issues #70, #178) — power spectral density via Welch's method:
- * the average of `|X_i(f)|^2` over windowed, overlapping segments, with
- * `scipy.signal.welch`'s meanings for `fs`, `window`, `nperseg`, `noverlap`,
- * `nfft`, `detrend`, `scaling` and `onesided`.
+ * the average of `|X_i(f)|^2` over windowed, overlapping segments. With no
+ * options `welch(x)` is `scipy.signal.welch(x)`: fs 1, periodic Hann window,
+ * `nperseg = min(256, n)`, 50% overlap, `nfft = nperseg`, `detrend="constant"`,
+ * `scaling="density"`, one-sided (`return_onesided=True`), `average="mean"`.
  *
- * Defaults keep the original behaviour: fs 1, periodic Hann, two-sided
- * (`return_onesided=False`), density scaling, NO detrend (SciPy's own
- * default is `"constant"`), `nfft` = next power of two at or above `nperseg`.
- * Disclosed limits: 1-D real input only; `nfft` must be a power of two
- * (the FFT package's requirement); no `average="median"`.
+ * Disclosed limits (not implemented): 1-D real input only (no `axis`, no
+ * complex input, so no complex-forced two-sided mode); `window` is a name or
+ * an array, not a parameterised `(name, param)` tuple; `detrend` is
+ * `false`/`"constant"`/`"linear"`, not a callable.
  */
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { binFrequencies, resolveSegments, segmentSpectrum, type SegmentOptions } from "./spectral.ts";
@@ -16,36 +16,63 @@ import { binFrequencies, resolveSegments, segmentSpectrum, type SegmentOptions }
 export interface WelchOptions extends SegmentOptions {
   /** `"density"` (default): power per unit frequency, `|X|² / (fs · Σw²)`. `"spectrum"`: power per bin, `|X|² / (Σw)²`. */
   readonly scaling?: "density" | "spectrum";
+  /** How the segments' periodograms are combined: `"mean"` (default) or `"median"` (bias-corrected, robust to outlier segments). */
+  readonly average?: "mean" | "median";
+}
+
+/** `scipy.signal.welch`'s `_median_bias`: the median of n exponential variables is biased low by this factor. */
+function medianBias(n: number): number {
+  let bias = 1;
+  for (let i = 1; i <= Math.floor((n - 1) / 2); i++) bias += 1 / (2 * i + 1) - 1 / (2 * i);
+  return bias;
 }
 
 export function welch(signal: Tensor, options: WelchOptions = {}): { frequencies: number[]; psd: Tensor } {
-  if (signal.shape.length !== 1) throw new RangeError("welch: v1 supports 1-D Tensor only");
+  if (signal.shape.length !== 1) throw new RangeError("welch: 1-D Tensor only");
   const scaling = options.scaling ?? "density";
   if (scaling !== "density" && scaling !== "spectrum") {
     throw new RangeError(`welch: scaling must be "density" or "spectrum", got ${String(scaling)}`);
   }
+  const average = options.average ?? "mean";
+  if (average !== "mean" && average !== "median") {
+    throw new RangeError(`welch: average must be "mean" or "median", got ${String(average)}`);
+  }
   // Read-only below, so no defensive copy is needed even when `.data`
   // aliases `signal`'s own storage.
   const data = signal.contiguous().data as Float64Array;
-  const p = resolveSegments("welch", data.length, options);
-  const { nfft } = p;
+  const p = resolveSegments("welch", data, options, { defaultDetrend: "constant" });
+  const { nfft, bins } = p;
 
-  const accumulator = new Float64Array(nfft);
+  const scale = scaling === "density" ? 1 / (p.fs * p.sumW2) : 1 / (p.sumW * p.sumW);
+  // One-sided: fold the negative frequencies in -- every bin but DC (and Nyquist, for even nfft) counts twice.
+  const lastDoubled = nfft % 2 ? bins - 1 : bins - 2;
+  const periodograms: Float64Array[] = [];
   for (let f = 0; f < p.numFrames; f++) {
-    const { real, imag } = segmentSpectrum(data, f * p.hop, p);
-    for (let k = 0; k < nfft; k++) {
-      accumulator[k] = (accumulator[k] as number) + ((real[k] as number) ** 2 + (imag[k] as number) ** 2);
+    const { re, im } = segmentSpectrum(f * p.hop, p);
+    const pw = new Float64Array(bins);
+    for (let k = 0; k < bins; k++) {
+      let v = ((re[k] as number) ** 2 + (im[k] as number) ** 2) * scale;
+      if (p.onesided && k >= 1 && k <= lastDoubled) v *= 2;
+      pw[k] = v;
     }
+    periodograms.push(pw);
   }
 
-  const scale = (scaling === "density" ? 1 / (p.fs * p.sumW2) : 1 / (p.sumW * p.sumW)) / p.numFrames;
-  const bins = p.onesided ? nfft / 2 + 1 : nfft;
   const psdData = new Float64Array(bins);
-  for (let k = 0; k < bins; k++) {
-    let v = (accumulator[k] as number) * scale;
-    // One-sided: fold the negative frequencies in (everything but DC and Nyquist counts twice).
-    if (p.onesided && k > 0 && k < nfft / 2) v *= 2;
-    psdData[k] = v;
+  const n = periodograms.length;
+  if (average === "mean" || n === 1) {
+    for (const pw of periodograms) for (let k = 0; k < bins; k++) psdData[k] = (psdData[k] as number) + (pw[k] as number);
+    for (let k = 0; k < bins; k++) psdData[k] = (psdData[k] as number) / n;
+  } else {
+    const bias = medianBias(n);
+    const column = new Float64Array(n);
+    for (let k = 0; k < bins; k++) {
+      for (let f = 0; f < n; f++) column[f] = (periodograms[f] as Float64Array)[k] as number;
+      column.sort();
+      const mid = n >> 1;
+      const median = n % 2 ? (column[mid] as number) : ((column[mid - 1] as number) + (column[mid] as number)) / 2;
+      psdData[k] = median / bias;
+    }
   }
   return { frequencies: binFrequencies(nfft, p.fs, p.onesided), psd: Tensor.fromTypedArray(psdData, [bins], { dtype: "f64" }) };
 }

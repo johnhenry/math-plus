@@ -60,32 +60,73 @@ from it uses Node built-ins or Node globals; `test/web-entry.test.ts` checks
 the built import graph and loads the entry with `process`/`Buffer`/`require`
 removed. It ships unbundled ESM: use a bundler or an ESM CDN for a single file.
 
+## Matches SciPy
+
+`welch(x)`, `stft(x)` and `istft(Zxx)` with no options give the same results as
+`scipy.signal.welch(x)`, `scipy.signal.stft(x)` and `scipy.signal.istft(Zxx)`
+(checked against SciPy by differential tests, to ~1e-9 relative to the
+spectrum's peak, over many lengths, including non-power-of-two and shorter
+than 256), and every option takes SciPy's default and meaning:
+
+| | `welch` | `stft` |
+|---|---|---|
+| `fs` / `window` / `nperseg` / `noverlap` / `nfft` | 1 / `"hann"` (periodic) / `min(256, n)` / `nperseg >> 1` / `nperseg` | same |
+| `detrend` | `"constant"` | `false` |
+| `onesided` | `true` (`floor(nfft/2)+1` bins) | `true` |
+| `scaling` | `"density"` (or `"spectrum"`) | `"spectrum"` (`"psd"`; `"density"` is an alias; `"none"` is a non-SciPy raw FFT) |
+| `average` | `"mean"` (or `"median"`) | n/a |
+| `boundary` / `padded` | n/a | `"zeros"` (`"even"`, `"odd"`, `"constant"`, `null`) / `true` |
+
+`nfft` may be any integer `>= nperseg`: powers of two use the radix-2 FFT, every
+other length uses Bluestein's chirp-z algorithm on top of it (exact, a few ulps
+of rounding). Like SciPy, an `nperseg` longer than the signal is clamped to the
+signal's length.
+
+Return shapes mirror SciPy's tuples as plain objects:
+
+```js
+const { frequencies, psd } = welch(x);       // psd: Tensor [floor(nfft/2)+1]
+const { freqs, times, Zxx } = stft(x);       // Zxx: ComplexTensor [freqs.length, times.length]
+const { times: t, x: y } = istft(Zxx);       // x: Tensor, round-trips stft(x) (whole signal, edges too)
+```
+
+Not implemented (1-D real `Tensor` input only): `axis`/`time_axis`/`freq_axis`
+(and so N-D input), complex input, callable `detrend`, `(name, param)` window
+tuples, SciPy's NOLA warning, and the complex output of `istft` with
+`inputOnesided: false` (the real part is returned).
+
+### Migrating from 0.1 (breaking)
+
+The old defaults were not SciPy's. Pass the old value to keep the old result:
+
+| Option | Before | Now (SciPy) | To keep the old behaviour |
+|---|---|---|---|
+| `welch` `onesided` | `false` (`nfft` bins) | `true` | `onesided: false` |
+| `welch` `detrend` | `false` | `"constant"` | `detrend: false` |
+| `welch`/`stft` `nfft` | next power of two `>= nperseg` | `nperseg` | `nfft: 2 ** Math.ceil(Math.log2(nperseg))` |
+| `welch`/`stft` `nperseg` > signal length | `RangeError` | clamped to the length | n/a |
+| `stft` `onesided` | `false` | `true` | `onesided: false` |
+| `stft` `scaling` | `"none"` (raw FFT) | `"spectrum"` (`/Σw`) | `scaling: "none"` |
+| `stft` `boundary` / `padded` | none / `false` | `"zeros"` / `true` | `boundary: null, padded: false` |
+| `stft` return | ComplexTensor `[frames, bins]` with `.freqs`, `.times`, `.frames` | `{ freqs, times, Zxx }`, `Zxx` is `[bins, frames]` | index as `Zxx.real.at(bin, frame)` (frame-major access becomes bin-major) |
+| `istft` | `istft(spec, opts)` -> `Tensor`; two-sided, `nfft === nperseg`, `scaling: "none"` only | `istft(Zxx, opts)` -> `{ times, x }`; SciPy's full option set | `istft(Zxx, { inputOnesided: false, scaling: "none", boundary: false }).x` |
+
+`welch` still returns `{ frequencies, psd }`. `detrend: "linear"` on a
+length-1 or length-2 segment now gives zeros (a line fits exactly), as SciPy does.
+
 ## Traps
 
 - **Argument order:** `sosFilter(sos, signal)` — filter first, matching scipy.
-- **`welch` / `stft` options** follow SciPy: `fs` (default 1), `window`
-  (`"hann"` default, `"hamming"`, `"blackman"`, `"boxcar"`/`"rectangular"`, all
-  periodic like `get_window`, or a `Float64Array` of length `nperseg`),
-  `nperseg` (any length; default `min(256, length)`), `noverlap` (default half),
-  `nfft` (power of two `>= nperseg`, zero-padding each segment; default the
-  next power of two), `detrend` (`false` default, `"constant"`, `"linear"`),
-  `onesided` (`false` default: all `nfft` bins) and `scaling` (`welch`:
-  `"density"` default or `"spectrum"`; `stft`: `"none"` default = raw FFT,
-  `"spectrum"` = `/Σw`, `"density"` = `/sqrt(fs·Σw²)`). The defaults are the
-  pre-options behaviour, which differs from SciPy's in two places: `onesided`
-  (SciPy: true for real input) and `detrend` (SciPy: `"constant"`).
-- **`welch` one-sided** doubles the bins between DC and Nyquist; **`stft`
-  one-sided does not** (SciPy doesn't). `welch` returns `{ frequencies, psd }`
-  with frequencies in `fs` units; two-sided order is `fftfreq`'s (Nyquist is
-  negative for even `nfft`).
-- **`stft`** returns the `[numFrames, bins]` ComplexTensor, which also carries
-  `freqs`, `times` (segment centres, `(start + nperseg/2) / fs`) and `frames`
-  (the tensor itself): `const { freqs, times, frames } = stft(x, opts)`. No
-  boundary extension or padding (SciPy `boundary=None, padded=False`): samples
-  past the last full frame are lost. Default `nperseg` is `min(256, length)`;
-  default window periodic Hann with 50% overlap (COLA). `istft` inverts only
-  a two-sided, un-padded (`nfft === nperseg`), un-detrended, `scaling: "none"`
-  spectrogram, and is least accurate in the first/last half-window.
+- **`welch` / `stft` / `istft` match SciPy** (see "Matches SciPy" below). Same
+  option names, camelCased (`return_onesided` -> `onesided`, `input_onesided`
+  -> `inputOnesided`); window is `"hann"`, `"hamming"`, `"blackman"`,
+  `"boxcar"`/`"rectangular"` (periodic, like `get_window`) or a `Float64Array`.
+- **`welch` one-sided** doubles every bin but DC (and Nyquist for even `nfft`);
+  **`stft` one-sided does not** (SciPy doesn't either). Two-sided order is
+  `fftfreq`'s (Nyquist is negative for even `nfft`).
+- **`istft` infers an even `nperseg`** (`2 * (bins - 1)`), exactly as SciPy
+  does: for an odd segment length pass `nperseg` explicitly (and `inputOnesided:
+  false` / `nfft` if you changed those in `stft`).
 - **`butter`'s `wn` is normalized to Nyquist = 1**, strictly `0 < wn < 1`.
   SOS section coefficients are deliberately **not** byte-comparable to
   scipy's (scipy's own pole/zero-to-section grouping isn't fixed either);
