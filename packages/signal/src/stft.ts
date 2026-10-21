@@ -161,7 +161,7 @@ export function istft(Zxx: SignalInput, options: IstftOptions = {}): IstftResult
   const complexIn = isComplexTensor(Zxx);
   const shape = (complexIn ? Zxx.real : Zxx).shape as readonly number[];
   const ndim = shape.length;
-  if (ndim < 2) throw new RangeError("istft: expected a ComplexTensor of at least 2 dimensions (frequency x time)");
+  if (ndim < 2) throw new RangeError("istft: expected a ComplexTensor (or real Tensor) spectrogram of at least 2 dimensions (frequency x time)");
   const fa = normalizeAxis("istft", options.freqAxis ?? -2, ndim, "freqAxis");
   const ta = normalizeAxis("istft", options.timeAxis ?? -1, ndim, "timeAxis");
   checkAxesDistinct("istft", fa, ta);
