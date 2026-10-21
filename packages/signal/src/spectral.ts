@@ -4,17 +4,41 @@
  * and padding, per-segment detrend and windowing, and the zero-padded DFT of
  * any `nfft` (see dft.ts). One implementation, so the two cannot drift apart.
  */
+import { ComplexTensor } from "@johnhenry/math-plus-fft";
+import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { type DftPlan, planDft } from "./dft.ts";
+import { isComplexTensor } from "./nd.ts";
 import { getWindow, type WindowSpec } from "./window.ts";
 
-export type Detrend = false | "constant" | "linear";
+/**
+ * A detrend function, applied to each 1-D segment on its own (`detrend(segment) -> segment`). It gets a 1-D `Tensor` of
+ * `nperseg` samples (a 1-D `ComplexTensor` for complex input) and returns the detrended segment of the same length: a
+ * `Tensor` / `ComplexTensor` of that kind, or a `Float64Array` for real input. SciPy hands its function every segment
+ * (and every other row) at once; a function that acts on the segment axis independently, as `scipy.signal.detrend`
+ * does, gives the same result either way.
+ */
+export type DetrendFunction = (segment: Tensor | ComplexTensor) => Tensor | ComplexTensor | Float64Array;
+export type Detrend = false | "constant" | "linear" | DetrendFunction;
+
+/**
+ * Where warnings go. SciPy's `warnings.warn` becomes `onWarning(message)`; without a callback the message goes to
+ * `console.warn`. Pass `() => {}` to silence them.
+ */
+export interface WarningOptions {
+  readonly onWarning?: (message: string) => void;
+}
+
+export function emitWarning(options: WarningOptions, message: string): void {
+  if (options.onWarning) options.onWarning(message);
+  else console.warn(message);
+}
 /** How `stft` extends the signal by `floor(nperseg / 2)` samples at both ends (`scipy.signal.stft`'s `boundary`); `null` = no extension. */
 export type Boundary = "zeros" | "even" | "odd" | "constant" | null;
 
-export interface SegmentOptions {
+export interface SegmentOptions extends WarningOptions {
   /** Sample rate; default 1. Frequencies come out in the same unit (hertz for samples per second). */
   readonly fs?: number;
-  /** Window: a name (periodic, as `scipy.signal.get_window`) or a `Float64Array` (its length then sets `nperseg`). Default `"hann"`. */
+  /** Window: a name, a `(name, param)` tuple or a number (all periodic, as `scipy.signal.get_window`) or a `Float64Array` (its length then sets `nperseg`). Default `"hann"`. */
   readonly window?: WindowSpec;
   /** Segment length, any positive integer; default `min(256, signal.length)` (a longer request is clamped, as SciPy does). */
   readonly nperseg?: number;
@@ -22,16 +46,16 @@ export interface SegmentOptions {
   readonly noverlap?: number;
   /** DFT length, any integer `>= nperseg` (not just powers of two); each segment is zero-padded to it. Default: `nperseg`. */
   readonly nfft?: number;
-  /** Removed from each segment before windowing: `"constant"` (mean), `"linear"` (least-squares line) or `false`. Default: `"constant"` for `welch`, `false` for `stft` (SciPy's own defaults). */
+  /** Removed from each segment before windowing: `"constant"` (mean), `"linear"` (least-squares line), a function `(segment) -> segment` ({@link DetrendFunction}) or `false`. Default: `"constant"` for `welch`, `false` for `stft` (SciPy's own defaults). */
   readonly detrend?: Detrend;
-  /** Keep only the `floor(nfft / 2) + 1` bins from DC up (real input). Default `true`; `false` keeps all `nfft` bins. */
+  /** Keep only the `floor(nfft / 2) + 1` bins from DC up (real input). Default `true`; `false` keeps all `nfft` bins. Complex input is always two-sided (`stft` warns when you left this on, as SciPy does; `welch` switches silently, as SciPy does). */
   readonly onesided?: boolean;
 }
 
 export interface ResolvedSegments {
   readonly fs: number;
-  /** The signal after boundary extension and padding (the input itself when neither applies). */
-  readonly data: Float64Array;
+  /** Length of the signal after boundary extension and padding (the input's own when neither applies). */
+  readonly extLength: number;
   readonly window: Float64Array;
   readonly nperseg: number;
   readonly noverlap: number;
@@ -39,6 +63,7 @@ export interface ResolvedSegments {
   readonly hop: number;
   readonly numFrames: number;
   readonly detrend: Detrend;
+  readonly complex: boolean;
   readonly onesided: boolean;
   /** Number of output bins: `floor(nfft / 2) + 1` one-sided, else `nfft`. */
   readonly bins: number;
@@ -49,12 +74,16 @@ export interface ResolvedSegments {
   /** Σw² */
   readonly sumW2: number;
   readonly plan: DftPlan;
+  readonly boundary: Boundary;
+  readonly padded: boolean;
 }
 
 export interface ResolveExtras {
   readonly defaultDetrend: Detrend;
   readonly boundary?: Boundary;
   readonly padded?: boolean;
+  /** Emit SciPy's "Input data is complex, switching to onesided=false" warning (`stft` does, `welch` does not). */
+  readonly warnComplexOnesided?: boolean;
 }
 
 const DEFAULT_NPERSEG = 256;
@@ -90,11 +119,11 @@ function extend(who: string, x: Float64Array, n: number, kind: Exclude<Boundary,
   return out;
 }
 
-export function resolveSegments(who: string, signal: Float64Array, options: SegmentOptions, extras: ResolveExtras): ResolvedSegments {
+/** Resolve the options for rows of `length` samples (real or complex). Validation and defaults follow `scipy.signal`. */
+export function resolveSegments(who: string, length: number, complex: boolean, options: SegmentOptions, extras: ResolveExtras): ResolvedSegments {
   const fs = options.fs ?? 1;
   if (!(fs > 0) || !Number.isFinite(fs)) throw new RangeError(`${who}: fs must be a finite number above 0, got ${fs}`);
   const spec = options.window ?? "hann";
-  const length = signal.length;
   if (length < 1) throw new RangeError(`${who}: signal must not be empty`);
 
   let nperseg: number;
@@ -117,8 +146,8 @@ export function resolveSegments(who: string, signal: Float64Array, options: Segm
     throw new RangeError(`${who}: nfft must be an integer >= nperseg (${nperseg}), got ${nfft}`);
   }
   const detrend = options.detrend ?? extras.defaultDetrend;
-  if (detrend !== false && detrend !== "constant" && detrend !== "linear") {
-    throw new RangeError(`${who}: detrend must be false, "constant" or "linear", got ${String(detrend)}`);
+  if (detrend !== false && detrend !== "constant" && detrend !== "linear" && typeof detrend !== "function") {
+    throw new RangeError(`${who}: detrend must be false, "constant", "linear" or a function, got ${String(detrend)}`);
   }
   const boundary = extras.boundary ?? null;
   if (boundary !== null && !BOUNDARIES.includes(boundary)) {
@@ -131,18 +160,12 @@ export function resolveSegments(who: string, signal: Float64Array, options: Segm
     throw new RangeError(`${who}: ${(e as Error).message}`);
   }
   const hop = nperseg - noverlap;
+  const padded = extras.padded ?? false;
 
   // Boundary extension first, padding after, so the extended signal ends in zeros (as SciPy does).
-  let data = boundary === null ? signal : extend(who, signal, Math.floor(nperseg / 2), boundary);
-  if (extras.padded) {
-    const nadd = ((((-(data.length - nperseg)) % hop) + hop) % hop) % nperseg;
-    if (nadd > 0) {
-      const padded = new Float64Array(data.length + nadd);
-      padded.set(data);
-      data = padded;
-    }
-  }
-  const numFrames = Math.floor((data.length - nperseg) / hop) + 1;
+  let extLength = boundary === null ? length : length + 2 * Math.floor(nperseg / 2);
+  if (padded) extLength += ((((-(extLength - nperseg)) % hop) + hop) % hop) % nperseg;
+  const numFrames = Math.floor((extLength - nperseg) / hop) + 1;
   if (numFrames < 1) throw new RangeError(`${who}: signal too short (${length} samples) for nperseg=${nperseg}`);
 
   let sumW = 0;
@@ -151,10 +174,14 @@ export function resolveSegments(who: string, signal: Float64Array, options: Segm
     sumW += w;
     sumW2 += w * w;
   }
-  const onesided = options.onesided ?? true;
+  let onesided = options.onesided ?? true;
+  if (complex && onesided) {
+    onesided = false;
+    if (extras.warnComplexOnesided) emitWarning(options, `${who}: input data is complex, switching to onesided=false`);
+  }
   return {
     fs,
-    data,
+    extLength,
     window,
     nperseg,
     noverlap,
@@ -162,13 +189,36 @@ export function resolveSegments(who: string, signal: Float64Array, options: Segm
     hop,
     numFrames,
     detrend,
+    complex,
     onesided,
     bins: onesided ? Math.floor(nfft / 2) + 1 : nfft,
     extended: boundary !== null,
     sumW,
     sumW2,
     plan: planDft(nfft),
+    boundary,
+    padded,
   };
+}
+
+/** One row after boundary extension and padding. */
+export interface PreparedRow {
+  readonly re: Float64Array;
+  readonly im: Float64Array | null;
+}
+
+/** Boundary-extend and pad a row (`re` / `im` parts) to `p.extLength`. */
+export function prepareRow(who: string, p: ResolvedSegments, re: Float64Array, im: Float64Array | null): PreparedRow {
+  const fix = (x: Float64Array): Float64Array => {
+    let data = p.boundary === null ? x : extend(who, x, Math.floor(p.nperseg / 2), p.boundary);
+    if (data.length < p.extLength) {
+      const padded = new Float64Array(p.extLength);
+      padded.set(data);
+      data = padded;
+    }
+    return data;
+  };
+  return { re: fix(re), im: im === null ? null : fix(im) };
 }
 
 /** Frequencies of the output bins: `rfftfreq` one-sided (`0 … fs/2`), else `fftfreq` order (Nyquist negative for even `nfft`). */
@@ -179,8 +229,7 @@ export function binFrequencies(nfft: number, fs: number, onesided: boolean): num
 }
 
 /** Remove the mean or the least-squares line from `f` in place (`scipy.signal.detrend`). */
-export function detrendInPlace(f: Float64Array, kind: Detrend): void {
-  if (kind === false) return;
+export function detrendInPlace(f: Float64Array, kind: "constant" | "linear"): void {
   const n = f.length;
   let mean = 0;
   for (let i = 0; i < n; i++) mean += f[i] as number;
@@ -201,11 +250,45 @@ export function detrendInPlace(f: Float64Array, kind: Detrend): void {
   for (let i = 0; i < n; i++) f[i] = (f[i] as number) - mean - slope * (i - tm);
 }
 
-/** Segment `start…start+nperseg` of `p.data`: detrended, windowed, zero-padded to `nfft`, transformed. Returns the full `nfft`-bin spectrum. */
-export function segmentSpectrum(start: number, p: ResolvedSegments): { re: Float64Array; im: Float64Array } {
-  const seg = p.data.slice(start, start + p.nperseg);
-  detrendInPlace(seg, p.detrend);
-  const frame = new Float64Array(p.nfft);
-  for (let i = 0; i < p.nperseg; i++) frame[i] = (seg[i] as number) * (p.window[i] as number);
-  return p.plan.transform(frame, new Float64Array(p.nfft), false);
+/** Run a user detrend function on one segment (`sr` / `si` are replaced in place by its result). */
+function detrendWith(who: string, fn: DetrendFunction, sr: Float64Array, si: Float64Array | null): void {
+  const n = sr.length;
+  const arg = si === null
+    ? Tensor.fromTypedArray(Float64Array.from(sr), [n], { dtype: "f64" })
+    : ComplexTensor.fromParts(Tensor.fromTypedArray(Float64Array.from(sr), [n], { dtype: "f64" }), Tensor.fromTypedArray(Float64Array.from(si), [n], { dtype: "f64" }));
+  const out = fn(arg);
+  const parts = out instanceof Float64Array ? { re: out, im: null } : isComplexTensor(out) ? { re: out.real, im: out.imag } : { re: out, im: null };
+  const read = (v: Float64Array | Tensor): Float64Array => (v instanceof Float64Array ? v : (v.contiguous().data as Float64Array));
+  const re = read(parts.re);
+  if (re.length !== n) throw new RangeError(`${who}: detrend must return a segment of ${n} samples, got ${re.length}`);
+  if (si === null) {
+    if (parts.im !== null) throw new RangeError(`${who}: detrend returned a complex segment for real input`);
+    sr.set(re);
+    return;
+  }
+  if (parts.im === null) throw new RangeError(`${who}: detrend must return a ComplexTensor for complex input`);
+  const im = read(parts.im);
+  if (im.length !== n) throw new RangeError(`${who}: detrend must return a segment of ${n} samples, got ${im.length}`);
+  sr.set(re);
+  si.set(im);
+}
+
+/** Segment `start…start+nperseg` of a prepared row: detrended, windowed, zero-padded to `nfft`, transformed. Returns the full `nfft`-bin spectrum. */
+export function segmentSpectrum(who: string, start: number, p: ResolvedSegments, row: PreparedRow): { re: Float64Array; im: Float64Array } {
+  const sr = row.re.slice(start, start + p.nperseg);
+  const si = row.im === null ? null : row.im.slice(start, start + p.nperseg);
+  if (typeof p.detrend === "function") {
+    detrendWith(who, p.detrend, sr, si);
+  } else if (p.detrend !== false) {
+    detrendInPlace(sr, p.detrend);
+    if (si !== null) detrendInPlace(si, p.detrend);
+  }
+  const fr = new Float64Array(p.nfft);
+  const fi = new Float64Array(p.nfft);
+  for (let i = 0; i < p.nperseg; i++) {
+    const w = p.window[i] as number;
+    fr[i] = (sr[i] as number) * w;
+    if (si !== null) fi[i] = (si[i] as number) * w;
+  }
+  return p.plan.transform(fr, fi, false);
 }

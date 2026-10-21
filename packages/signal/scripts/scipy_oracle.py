@@ -17,12 +17,50 @@ from scipy import signal
 warnings.simplefilter("ignore")
 
 
+def _window(w):
+    """JSON window -> scipy window: a list is an ndarray, {"tuple": [...]} a tuple (null -> None), a string or number as is."""
+    if isinstance(w, list):
+        return np.array(w, dtype=float)
+    if isinstance(w, dict):
+        return tuple(np.array(a, dtype=float) if isinstance(a, list) else a for a in w["tuple"])
+    return w
+
+
+# Detrend callables for the differential tests (JSON cannot carry a function). Each acts along the LAST axis, which is
+# the segment axis whenever scipy calls it (welch always; stft with its default axis=-1).
+def _first3(d):
+    return d - d[..., :3].mean(axis=-1, keepdims=True)
+
+
+def _ends(d):
+    n = d.shape[-1]
+    t = np.arange(n) / (n - 1)
+    return d - (d[..., :1] + (d[..., -1:] - d[..., :1]) * t)
+
+
+DETREND_FNS = {"first3": _first3, "ends": _ends}
+
+
 def _kwargs(kw: dict) -> dict:
-    """JSON kwargs -> scipy kwargs: a list `window` becomes an ndarray."""
+    """JSON kwargs -> scipy kwargs: `window` per _window, a {"fn": name} `detrend` becomes a callable."""
     kw = dict(kw)
-    if isinstance(kw.get("window"), list):
-        kw["window"] = np.array(kw["window"], dtype=float)
+    if "window" in kw:
+        kw["window"] = _window(kw["window"])
+    if isinstance(kw.get("detrend"), dict):
+        kw["detrend"] = DETREND_FNS[kw["detrend"]["fn"]]
     return kw
+
+
+def _signal(job: dict, key: str = "x") -> np.ndarray:
+    """A (possibly N-D, possibly complex) array from `job[key]` (+ `job[key + '_imag']`)."""
+    x = np.array(job[key], dtype=float)
+    if key + "_imag" in job:
+        x = x + 1j * np.array(job[key + "_imag"], dtype=float)
+    return x
+
+
+def _complex_parts(z: np.ndarray) -> dict:
+    return {"shape": list(z.shape), "real": np.real(z).tolist(), "imag": np.imag(z).tolist()}
 
 
 def run(job: dict):
@@ -103,7 +141,7 @@ def run(job: dict):
             scaling="density",
             detrend=False,
         )
-        result = {"frequencies": f.tolist(), "psd": pxx.tolist()}
+        result = {"freqs": f.tolist(), "Pxx": pxx.tolist()}
 
     elif op == "resample_poly":
         # Identity-path oracle only (issue #113): resample_poly(x, n, n) must
@@ -116,24 +154,34 @@ def run(job: dict):
 
     elif op == "welch_kw":
         # scipy.signal.welch called with ONLY the keyword arguments the job
-        # lists, so omitted options take SciPy's own defaults (issue #178 /
-        # SciPy-parity release). `window` may be a name or an explicit array.
-        x = np.array(job["x"], dtype=float)
+        # lists, so omitted options take SciPy's own defaults. `x` may be N-D,
+        # and complex when the job carries `x_imag`; `window` may be a name,
+        # {"tuple": [...]} or an explicit array; `detrend` may be {"fn": name}.
+        x = _signal(job)
         f, pxx = signal.welch(x, **_kwargs(job.get("kwargs", {})))
-        result = {"frequencies": f.tolist(), "psd": pxx.tolist()}
+        result = {"freqs": f.tolist(), "shape": list(pxx.shape), "Pxx": pxx.tolist()}
 
     elif op == "stft_kw":
-        # scipy.signal.stft with only the listed kwargs. Zxx is (freq, time),
-        # exactly as SciPy returns it.
-        x = np.array(job["x"], dtype=float)
+        # scipy.signal.stft with only the listed kwargs. Zxx is (..., freq, time) with the frequency axis where `axis` was.
+        x = _signal(job)
         f, t, z = signal.stft(x, **_kwargs(job.get("kwargs", {})))
-        result = {"freqs": f.tolist(), "times": t.tolist(), "real": z.real.tolist(), "imag": z.imag.tolist()}
+        result = {"freqs": f.tolist(), "times": t.tolist(), **_complex_parts(z)}
 
     elif op == "istft_kw":
-        # scipy.signal.istft of a (freq, time) spectrogram given as real/imag.
-        z = np.array(job["real"], dtype=float) + 1j * np.array(job["imag"], dtype=float)
+        # scipy.signal.istft of a spectrogram given as real/imag (any dimensionality).
+        z = _signal(job, "z") if "z" in job else np.array(job["real"], dtype=float) + 1j * np.array(job["imag"], dtype=float)
         t, x = signal.istft(z, **_kwargs(job.get("kwargs", {})))
-        result = {"times": t.tolist(), "x": np.real(x).tolist()}
+        result = {"times": t.tolist(), "complex": bool(np.iscomplexobj(x)), **_complex_parts(x)}
+
+    elif op == "get_window":
+        w = signal.get_window(_window(job["window"]), job["n"], fftbins=job.get("fftbins", True))
+        result = {"w": w.tolist()}
+
+    elif op == "check_nola":
+        result = {"ok": bool(signal.check_NOLA(_window(job["window"]), job["nperseg"], job["noverlap"], **({"tol": job["tol"]} if "tol" in job else {})))}
+
+    elif op == "check_cola":
+        result = {"ok": bool(signal.check_COLA(_window(job["window"]), job["nperseg"], job["noverlap"], **({"tol": job["tol"]} if "tol" in job else {})))}
 
     elif op == "windowed_frame_fft":
         # A primitive, version-stable oracle for our own stft's exact
@@ -154,6 +202,20 @@ def run(job: dict):
     return result
 
 
+def run_recorded(job: dict):
+    """run(), plus the text of every warning SciPy raised, as `warnings` (a job that SciPy rejects reports `error`)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            result = run(job)
+        except Exception as e:  # noqa: BLE001 -- reported to the test, which decides whether that was expected
+            if not job.get("expect_error"):
+                raise
+            result = {"error": f"{type(e).__name__}: {e}"}
+    result["warnings"] = [str(w.message) for w in caught]
+    return result
+
+
 def main() -> None:
     job_path = sys.argv[1]
     with open(job_path) as f:
@@ -161,9 +223,9 @@ def main() -> None:
     # {"op": "batch", "jobs": [...]} runs many jobs in one interpreter start
     # (python + scipy import dominates a single job's cost).
     if job["op"] == "batch":
-        print(json.dumps([run(j) for j in job["jobs"]]))
+        print(json.dumps([run_recorded(j) for j in job["jobs"]]))
     else:
-        print(json.dumps(run(job)))
+        print(json.dumps(run_recorded(job)))
 
 
 if __name__ == "__main__":

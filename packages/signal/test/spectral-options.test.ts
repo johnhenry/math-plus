@@ -5,25 +5,27 @@ const { test } = makeTest((globalThis as { Bun?: unknown }).Bun ? await import("
 import { Tensor } from "@johnhenry/math-plus-tensor-core";
 import { ComplexTensor } from "@johnhenry/math-plus-fft";
 import { getWindow, hannWindow, istft, stft, welch, type StftOptions, type WelchOptions } from "../src/index.ts";
-import { runScipyOracle, SCIPY_SKIP_REASON } from "./helpers.ts";
+import {
+  checkStft,
+  checkWelch,
+  closeScaled,
+  flat,
+  flatten,
+  type Kw,
+  maxAbs,
+  pyKw,
+  runScipyOracle,
+  SCIPY_SKIP_REASON,
+  signalOf,
+  type StftWant,
+  tensorOf,
+  type WelchWant,
+  zParts,
+} from "./helpers.ts";
 
 // Issue #178 + the SciPy-parity release: welch/stft/istft take scipy.signal's
 // defaults and options. Every comparison below is against scipy.signal itself;
 // the "no options" cases call SciPy with no keyword arguments at all.
-
-const REL = 1e-9;
-
-function signalOf(n: number, seed: number): number[] {
-  let s = seed >>> 0;
-  const rng = () => {
-    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
-    return s / 4294967296 - 0.5;
-  };
-  // a trend and an offset, so detrend choices actually differ
-  return Array.from({ length: n }, (_, i) => 3 + 0.01 * i + Math.sin(i / 7) + 0.5 * Math.sin(i / 2.3) + rng());
-}
-const tensorOf = (x: number[]) => Tensor.from(x, { dtype: "f64" });
-const arr = (t: Tensor) => Array.from(t.contiguous().data as Float64Array);
 
 // ---- windows ------------------------------------------------------------
 
@@ -38,7 +40,7 @@ test("getWindow: periodic hann/hamming/blackman/boxcar/rectangular match closed 
   }
   assert.deepEqual(Array.from(getWindow("boxcar", 5)), [1, 1, 1, 1, 1]);
   assert.deepEqual(Array.from(getWindow("rectangular", 5)), [1, 1, 1, 1, 1]);
-  assert.deepEqual(Array.from(getWindow("hann", 8)), Array.from(hannWindow(8)));
+  closeScaled(getWindow("hann", 8), hannWindow(8), 1, "hann vs hannWindow", 1e-15);
 });
 
 test("getWindow: unknown names, bad lengths and wrong-length arrays throw", () => {
@@ -48,64 +50,6 @@ test("getWindow: unknown names, bad lengths and wrong-length arrays throw", () =
   const mine = Float64Array.from([1, 2, 3]);
   assert.deepEqual(Array.from(getWindow(mine, 3)), [1, 2, 3]);
 });
-
-// ---- helpers for the SciPy comparisons ----------------------------------
-
-type Kw = Record<string, unknown>;
-
-/** JS option names -> the scipy keyword arguments (omitted JS options stay omitted, so SciPy's own defaults apply). */
-function pyKw(o: Kw, spectrogram: boolean): Kw {
-  const rename: Record<string, string> = { onesided: "return_onesided", inputOnesided: "input_onesided" };
-  const out: Kw = {};
-  for (const [k, v] of Object.entries(o)) {
-    if (v === undefined) continue;
-    let val: unknown = v;
-    if (k === "window") val = v instanceof Float64Array ? Array.from(v) : v === "rectangular" ? "boxcar" : v;
-    if (k === "scaling" && spectrogram && v === "density") val = "psd";
-    out[rename[k] ?? k] = val;
-  }
-  return out;
-}
-
-const flat = (t: Tensor) => Array.from(t.contiguous().data as Float64Array);
-const zParts = (z: ComplexTensor) => ({ re: flat(z.real), im: flat(z.imag) });
-
-/** Max |a-b| relative to `scale` (the larger of the reference's own max and a tiny floor). */
-function closeScaled(a: ArrayLike<number>, b: ArrayLike<number>, scale: number, what: string, tol = REL): void {
-  assert.equal(a.length, b.length, `${what}: lengths ${a.length} vs ${b.length}`);
-  let worst = 0;
-  for (let i = 0; i < a.length; i++) worst = Math.max(worst, Math.abs((a[i] as number) - (b[i] as number)));
-  assert.ok(worst <= tol * Math.max(scale, 1e-300), `${what}: differs by ${worst} (scale ${scale})`);
-}
-const maxAbs = (a: ArrayLike<number>) => Array.from(a as ArrayLike<number> as number[]).reduce((m, v) => Math.max(m, Math.abs(v)), 0);
-
-interface WelchWant {
-  frequencies: number[];
-  psd: number[];
-}
-interface StftWant {
-  freqs: number[];
-  times: number[];
-  real: number[][];
-  imag: number[][];
-}
-
-function checkWelch(got: { frequencies: number[]; psd: Tensor }, want: WelchWant, what: string): void {
-  closeScaled(got.frequencies, want.frequencies, maxAbs(want.frequencies), `frequencies ${what}`);
-  closeScaled(flat(got.psd), want.psd, maxAbs(want.psd), `psd ${what}`);
-}
-
-function checkStft(got: { freqs: number[]; times: number[]; Zxx: ComplexTensor }, want: StftWant, what: string): void {
-  const nf = want.real.length;
-  const nt = (want.real[0] as number[]).length;
-  assert.deepEqual(got.Zxx.shape, [nf, nt], `Zxx shape ${what}`);
-  closeScaled(got.freqs, want.freqs, maxAbs(want.freqs), `freqs ${what}`);
-  closeScaled(got.times, want.times, maxAbs(want.times), `times ${what}`);
-  const { re, im } = zParts(got.Zxx);
-  const scale = Math.max(maxAbs(want.real.flat()), maxAbs(want.imag.flat()));
-  closeScaled(re, want.real.flat(), scale, `real ${what}`);
-  closeScaled(im, want.imag.flat(), scale, `imag ${what}`);
-}
 
 const LENGTHS = [8, 31, 50, 100, 255, 256, 257, 300, 513, 777, 1000, 1024, 2500];
 
@@ -131,25 +75,25 @@ test("welch: the defaults are SciPy's (one-sided, constant detrend, density, han
     scaling: "density",
     average: "mean",
   });
-  assert.deepEqual(base.frequencies, explicit.frequencies);
-  assert.deepEqual(flat(base.psd), flat(explicit.psd));
-  assert.equal(base.frequencies.length, 129);
+  assert.deepEqual(base.freqs, explicit.freqs);
+  assert.deepEqual(flat(base.Pxx), flat(explicit.Pxx));
+  assert.equal(base.freqs.length, 129);
   // nfft follows nperseg, NOT the next power of two
-  assert.equal(welch(tensorOf(x), { nperseg: 100 }).frequencies.length, 51);
-  assert.equal(welch(tensorOf(x), { nperseg: 101 }).frequencies.length, 51);
+  assert.equal(welch(tensorOf(x), { nperseg: 100 }).freqs.length, 51);
+  assert.equal(welch(tensorOf(x), { nperseg: 101 }).freqs.length, 51);
   // short input: nperseg = length
-  assert.equal(welch(tensorOf(signalOf(50, 2))).frequencies.length, 26);
+  assert.equal(welch(tensorOf(signalOf(50, 2))).freqs.length, 26);
 });
 
 test("welch: onesided gives floor(nfft/2)+1 bins in hertz; a sine of amplitude A peaks at A*A/2 with scaling 'spectrum'", () => {
   const r = welch(tensorOf(signalOf(1000, 2)), { fs: 250, nperseg: 100 });
-  assert.equal(r.frequencies.length, 51);
-  assert.equal(r.frequencies[50], 125);
+  assert.equal(r.freqs.length, 51);
+  assert.equal(r.freqs[50], 125);
   const n = 4096;
   const nperseg = 256;
   const bin = 32;
   const x = Array.from({ length: n }, (_, i) => 2 * Math.sin((2 * Math.PI * bin * i) / nperseg));
-  const p = flat(welch(tensorOf(x), { nperseg, scaling: "spectrum", window: "boxcar" }).psd);
+  const p = flat(welch(tensorOf(x), { nperseg, scaling: "spectrum", window: "boxcar" }).Pxx);
   assert.ok(Math.abs((p[bin] as number) - 2) < 1e-9, `peak ${p[bin]}`);
 });
 
@@ -309,14 +253,14 @@ test("stft matches scipy.signal.stft for combinations of fs, onesided, detrend, 
 
 // ---- istft --------------------------------------------------------------
 
-const toZxx = (w: StftWant): ComplexTensor => {
-  const nf = w.real.length;
-  const nt = (w.real[0] as number[]).length;
-  return ComplexTensor.fromParts(
-    Tensor.fromTypedArray(Float64Array.from(w.real.flat()), [nf, nt], { dtype: "f64" }),
-    Tensor.fromTypedArray(Float64Array.from(w.imag.flat()), [nf, nt], { dtype: "f64" }),
+const toZxx = (w: { shape: number[]; real: unknown; imag: unknown }): ComplexTensor =>
+  ComplexTensor.fromParts(
+    Tensor.fromTypedArray(Float64Array.from(flatten(w.real)), w.shape, { dtype: "f64" }),
+    Tensor.fromTypedArray(Float64Array.from(flatten(w.imag)), w.shape, { dtype: "f64" }),
   );
-};
+
+/** The real part of an istft result (a Tensor, or a ComplexTensor for a two-sided input). */
+const realOf = (x: Tensor | ComplexTensor): number[] => flat("real" in x ? x.real : x);
 
 test("istft(stft(x)) with all-default options reconstructs x (many lengths, incl. under 256 and non-power-of-two)", () => {
   for (const n of LENGTHS) {
@@ -360,17 +304,17 @@ test("istft round-trips with scipy: scipy.istft(our Zxx), our istft(scipy's Zxx)
   configs.forEach(({ n, opts }, i) => {
     const x = xs[i] as number[];
     const what = JSON.stringify({ n, ...opts });
-    const wantFromOurs = wants[2 * i] as { times: number[]; x: number[] };
+    const wantFromOurs = wants[2 * i] as { times: number[]; real: number[] };
     const sc = wants[2 * i + 1] as StftWant;
     // scipy's istft of our spectrogram reconstructs the original ...
-    closeScaled(wantFromOurs.x.slice(0, n), x, maxAbs(x), `scipy.istft(ours) ~ x ${what}`, 1e-9);
+    closeScaled(wantFromOurs.real.slice(0, n), x, maxAbs(x), `scipy.istft(ours) ~ x ${what}`, 1e-9);
     // ... and so does ours, identically to scipy's
     const myIstft = istft((mines[i] as ReturnType<typeof stft>).Zxx, inv(opts));
-    closeScaled(flat(myIstft.x), wantFromOurs.x, maxAbs(x), `istft(ours) == scipy.istft(ours) ${what}`, 1e-9);
+    closeScaled(realOf(myIstft.x), wantFromOurs.real, maxAbs(x), `istft(ours) == scipy.istft(ours) ${what}`, 1e-9);
     closeScaled(myIstft.times, wantFromOurs.times, maxAbs(wantFromOurs.times), `times ${what}`);
     // our istft of scipy's own spectrogram
     const viaScipy = istft(toZxx(sc), inv(opts));
-    closeScaled(flat(viaScipy.x).slice(0, n), x, maxAbs(x), `istft(scipy's) ~ x ${what}`, 1e-9);
+    closeScaled(realOf(viaScipy.x).slice(0, n), x, maxAbs(x), `istft(scipy's) ~ x ${what}`, 1e-9);
   });
 });
 
@@ -378,17 +322,17 @@ test("istft with no options matches scipy.signal.istft on a spectrogram it did n
   const x = signalOf(800, 12);
   const sc = runScipyOracle<StftWant>({ op: "stft_kw", x, kwargs: {} });
   // perturb it so it is not a valid STFT any more
-  const bent: StftWant = { ...sc, real: sc.real.map((r, i) => r.map((v, j) => v * (1 + 0.1 * Math.sin(i + j)))), imag: sc.imag };
-  const want = runScipyOracle<{ times: number[]; x: number[] }>({ op: "istft_kw", real: bent.real, imag: bent.imag, kwargs: {} });
+  const bent = { ...sc, real: (sc.real as number[][]).map((r, i) => r.map((v, j) => v * (1 + 0.1 * Math.sin(i + j)))) };
+  const want = runScipyOracle<{ times: number[]; real: number[] }>({ op: "istft_kw", real: bent.real, imag: bent.imag, kwargs: {} });
   const got = istft(toZxx(bent));
-  closeScaled(flat(got.x), want.x, maxAbs(want.x), "istft no options");
+  closeScaled(flat(got.x), want.real, maxAbs(want.real), "istft no options");
   closeScaled(got.times, want.times, maxAbs(want.times), "istft times");
 });
 
 test("istft: boundary:false and a mismatched window length are handled / rejected", () => {
   const t = tensorOf(signalOf(512, 13));
   const s = stft(t, { nperseg: 64, boundary: null, padded: false });
-  const { x } = istft(s.Zxx, { nperseg: 64, boundary: false });
+  const { x } = istft(s.Zxx, { nperseg: 64, boundary: false, onWarning: () => {} });
   const back = flat(x);
   const orig = signalOf(512, 13);
   for (let i = 32; i < back.length - 32; i++) assert.ok(Math.abs((back[i] as number) - (orig[i] as number)) < 1e-9);
