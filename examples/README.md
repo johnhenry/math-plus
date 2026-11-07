@@ -23,6 +23,7 @@ npm run example:04  # or one at a time
 | `08-data-pipelines.mjs` | data | `Dataset` chains, per-epoch reshuffle, `collate.xy({dtype:"f64"})` into `trainer.fit` |
 | `09-mcp-tools.mjs` | interop | the MCP server over an in-memory transport: symbolic + guarded numeric tools |
 | `10-wasm-kernels.mjs` | tensor | **env-dependent** — zero-alloc `...Into` ops, SIMD detection, stride-aware matmul |
+| `11-web-bundle.mjs` | signal | fft, signal and unit from one import of the browser bundle (`packages/web/examples/index.html` is the page) |
 
 ## Environment-dependent examples
 

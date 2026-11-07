@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>math-plus in the browser</title>
+<h1>fft + signal + unit from one import</h1>
+<pre id="out">running...</pre>
+<!-- Serve the repo root (npx serve .) after `npm run build`; no network is used beyond this one file. -->
+<script type="module">
+  import { fft, signal, tensor, unit } from "../dist/bundle/all.js";
+  const fs = 64;
+  const x = tensor.Tensor.from(Array.from({ length: fs }, (_, i) => 2 + Math.sin((2 * Math.PI * 5 * i) / fs)), { dtype: "f64" });
+  const { freqs, Pxx } = signal.welch(x, { fs, nperseg: 64 });
+  const power = Pxx.toArray();
+  document.getElementById("out").textContent = [
+    `rfft bins: ${fft.rfft(x).size}`,
+    `dominant frequency: ${freqs[power.indexOf(Math.max(...power.slice(1)))]} Hz`,
+    `5 m + 20 cm = ${unit.Unit.of(5, "m").add(unit.Unit.of(20, "cm")).to("m").value} m`,
+  ].join("\n");
+</script>

@@ -27,6 +27,7 @@
     "example:08": "node examples/08-data-pipelines.mjs",
     "example:09": "node examples/09-mcp-tools.mjs",
     "example:10": "node examples/10-wasm-kernels.mjs",
+    "example:11": "node examples/11-web-bundle.mjs",
     "changeset": "changeset",
     "release": "npm run build && changeset publish"
   },
