@@ -1,0 +1,69 @@
+{
+  "name": "@johnhenry/math-plus-web",
+  "version": "0.0.0",
+  "description": "Browser entry for the math-plus family (issues #173, #176): one import for fft, signal, unit, image, tensor, tensor-autograd, adapter-math and frame-arrow, plus self-contained single-file ESM bundles (offline, no import specifiers) and a per-package size table.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./fft": { "types": "./dist/fft.d.ts", "default": "./dist/fft.js" },
+    "./signal": { "types": "./dist/signal.d.ts", "default": "./dist/signal.js" },
+    "./unit": { "types": "./dist/unit.d.ts", "default": "./dist/unit.js" },
+    "./image": { "types": "./dist/image.d.ts", "default": "./dist/image.js" },
+    "./tensor": { "types": "./dist/tensor.d.ts", "default": "./dist/tensor.js" },
+    "./tensor-autograd": { "types": "./dist/tensor-autograd.d.ts", "default": "./dist/tensor-autograd.js" },
+    "./adapter-math": { "types": "./dist/adapter-math.d.ts", "default": "./dist/adapter-math.js" },
+    "./frame-arrow": { "types": "./dist/frame-arrow.d.ts", "default": "./dist/frame-arrow.js" },
+    "./bundle": { "types": "./dist/index.d.ts", "default": "./dist/bundle/all.js" },
+    "./bundle/fft": { "types": "./dist/fft.d.ts", "default": "./dist/bundle/fft.js" },
+    "./bundle/signal": { "types": "./dist/signal.d.ts", "default": "./dist/bundle/signal.js" },
+    "./bundle/unit": { "types": "./dist/unit.d.ts", "default": "./dist/bundle/unit.js" },
+    "./bundle/image": { "types": "./dist/image.d.ts", "default": "./dist/bundle/image.js" },
+    "./bundle/tensor": { "types": "./dist/tensor.d.ts", "default": "./dist/bundle/tensor.js" },
+    "./bundle/tensor-autograd": { "types": "./dist/tensor-autograd.d.ts", "default": "./dist/bundle/tensor-autograd.js" },
+    "./bundle/adapter-math": { "types": "./dist/adapter-math.d.ts", "default": "./dist/bundle/adapter-math.js" },
+    "./bundle/frame-arrow": { "types": "./dist/frame-arrow.d.ts", "default": "./dist/bundle/frame-arrow.js" },
+    "./bundle/sizes.json": "./dist/bundle/sizes.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node ../../scripts/rewrite-dts-extensions.mjs",
+    "postbuild": "node scripts/build-bundle.mjs",
+    "sizes": "node scripts/build-bundle.mjs --readme",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "npm run typecheck && node --test test/*.test.ts",
+    "test:bun": "bun test ./test/"
+  },
+  "dependencies": {
+    "@johnhenry/math-plus-adapter-math": "^0.0.5",
+    "@johnhenry/math-plus-fft": "^0.0.4",
+    "@johnhenry/math-plus-frame-arrow": "^0.0.5",
+    "@johnhenry/math-plus-image": "^0.0.4",
+    "@johnhenry/math-plus-signal": "^0.3.0",
+    "@johnhenry/math-plus-tensor-autograd": "^0.1.4",
+    "@johnhenry/math-plus-tensor-core": "^0.2.1",
+    "@johnhenry/math-plus-unit": "^0.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnhenry/math-plus.git",
+    "directory": "packages/web"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/johnhenry/math-plus/tree/main/packages/web"
+}

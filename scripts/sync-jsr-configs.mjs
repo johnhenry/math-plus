@@ -66,7 +66,10 @@ const PACKAGE_DIRS = [
  * in exactly one of PACKAGE_DIRS / JSR_EXCLUDED_DIRS.
  */
 const JSR_EXCLUDED_DIRS = [
-  // (none) -- packages/tensor-mlx was excluded until @johnhenry/backend-mlx
+  // packages/web is a build product: its value is the esbuild bundles in dist/bundle/, which JSR (publishing TypeScript source)
+  // cannot carry. Its module entries only re-export packages that are on JSR already.
+  "packages/web",
+  // (the rest) -- packages/tensor-mlx was excluded until @johnhenry/backend-mlx
   // 0.3.0 gained a Deno.dlopen loader (RFC 0001 §12 Q4, #147); it now runs
   // its suites under Deno 2 and publishes to JSR like the rest.
 ];
