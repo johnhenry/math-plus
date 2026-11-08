@@ -1,6 +1,6 @@
 {
   "name": "@johnhenry/math-plus-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser entry for the math-plus family (issues #173, #176): one import for fft, signal, unit, image, tensor, tensor-autograd, adapter-math, frame-arrow and data and data (async dataset pipelines), plus self-contained single-file ESM bundles (offline, no import specifiers) and a per-package size table.",
   "type": "module",
   "exports": {
