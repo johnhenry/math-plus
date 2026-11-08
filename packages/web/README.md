@@ -44,15 +44,16 @@ Minified, as built by `npm run build -w @johnhenry/math-plus-web`; `dist/bundle/
 <!-- sizes:start -->
 | Bundle | Carries | Minified | gzip | brotli |
 | --- | --- | ---: | ---: | ---: |
-| `fft.js` | @johnhenry/math-plus-fft | 50.8 kB | 16.2 kB | 14.4 kB |
-| `signal.js` | @johnhenry/math-plus-signal/web (includes fft) | 88.9 kB | 29.6 kB | 26.0 kB |
-| `unit.js` | @johnhenry/math-plus-unit | 6.4 kB | 2.2 kB | 1.9 kB |
-| `image.js` | @johnhenry/math-plus-image | 40.4 kB | 13.4 kB | 11.8 kB |
-| `tensor.js` | @johnhenry/math-plus-tensor-core | 41.4 kB | 13.8 kB | 12.2 kB |
-| `tensor-autograd.js` | @johnhenry/math-plus-tensor-autograd (includes tensor-core) | 62.7 kB | 20.3 kB | 18.1 kB |
-| `adapter-math.js` | @johnhenry/math-plus-adapter-math (includes @johnhenry/math, tensor-compile, frame-arrow) | 160.7 kB | 50.9 kB | 44.0 kB |
-| `frame-arrow.js` | @johnhenry/math-plus-frame-arrow (includes apache-arrow) | 289.1 kB | 73.4 kB | 62.4 kB |
-| `all.js` | all of the above, one shared copy of each | 478.5 kB | 134.6 kB | 113.5 kB |
+| `fft.js` | @johnhenry/math-plus-fft | 50.8 kB | 16.1 kB | 14.4 kB |
+| `signal.js` | @johnhenry/math-plus-signal/web (includes fft) | 88.9 kB | 29.4 kB | 26.0 kB |
+| `unit.js` | @johnhenry/math-plus-unit | 6.4 kB | 2.1 kB | 1.9 kB |
+| `image.js` | @johnhenry/math-plus-image | 40.4 kB | 13.3 kB | 11.8 kB |
+| `tensor.js` | @johnhenry/math-plus-tensor-core | 41.4 kB | 13.7 kB | 12.2 kB |
+| `tensor-autograd.js` | @johnhenry/math-plus-tensor-autograd (includes tensor-core) | 62.7 kB | 20.2 kB | 18.1 kB |
+| `adapter-math.js` | @johnhenry/math-plus-adapter-math (includes @johnhenry/math, tensor-compile, frame-arrow) | 160.7 kB | 50.6 kB | 44.0 kB |
+| `frame-arrow.js` | @johnhenry/math-plus-frame-arrow (includes apache-arrow) | 289.1 kB | 73.2 kB | 62.4 kB |
+| `data.js` | @johnhenry/math-plus-data (includes @johnhenry/iteration and tensor-core) | 44.9 kB | 14.9 kB | 13.3 kB |
+| `all.js` | all of the above, one shared copy of each | 484.9 kB | 136.4 kB | 115.6 kB |
 <!-- sizes:end -->
 
 ## Licences

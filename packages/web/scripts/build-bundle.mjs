@@ -30,6 +30,7 @@ export const ENTRIES = {
   "tensor-autograd": ["tensor-autograd.js", "@johnhenry/math-plus-tensor-autograd (includes tensor-core)"],
   "adapter-math": ["adapter-math.js", "@johnhenry/math-plus-adapter-math (includes @johnhenry/math, tensor-compile, frame-arrow)"],
   "frame-arrow": ["frame-arrow.js", "@johnhenry/math-plus-frame-arrow (includes apache-arrow)"],
+  data: ["data.js", "@johnhenry/math-plus-data (includes @johnhenry/iteration and tensor-core)"],
   all: ["index.js", "all of the above, one shared copy of each"],
 };
 
