@@ -24,7 +24,8 @@ const ENTRIES: Record<string, string[]> = {
   "tensor-autograd": ["Variable", "grad", "nn", "optim", "Tensor", "random"],
   "adapter-math": ["fromMatrix", "toMatrix", "compileExpr", "linalg", "Tensor"],
   "frame-arrow": ["Frame", "Series"],
-  all: ["fft", "signal", "unit", "image", "tensor", "autograd", "adapterMath", "frameArrow"],
+  data: ["Dataset", "Tensor"],
+  all: ["fft", "signal", "unit", "image", "tensor", "autograd", "adapterMath", "frameArrow", "data"],
 };
 
 const file = (name: string) => join(bundleDir, `${name}.js`);
